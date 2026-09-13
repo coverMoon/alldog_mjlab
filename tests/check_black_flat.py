@@ -74,9 +74,15 @@ def main():
         torch.testing.assert_close(data.joint_pos[0], expected_t)
         # Default reset adds 1--5 cm above the nominal initial height.
         assert torch.all((data.root_link_pos_w[:,2] >= .459) & (data.root_link_pos_w[:,2] <= .501))
-        for actuator in env.scene['robot'].actuators:
+        # 逐关节 actuator：12 个、每个只控制一个关节、顺序与 BLACK_JOINT_NAMES 一致，
+        # 且 stiffness=40.0 / damping=1.2 / effort_limit=20.0（无 RL_thigh 例外）。
+        actuators = env.scene['robot'].actuators
+        assert len(actuators) == 12
+        for index, actuator in enumerate(actuators):
+            assert actuator.cfg.target_names_expr == (BLACK_JOINT_NAMES[index],)
             assert torch.all(actuator.stiffness == 40.)
-            assert torch.all(actuator.damping == (1.0 if actuator.cfg.target_names_expr == ('RL_thigh_joint',) else 1.2))
+            assert torch.all(actuator.damping == 1.2)
+            assert torch.all(actuator.force_limit == 20.)
         action = env.action_manager.get_term('joint_pos')
         assert action.target_names == list(BLACK_JOINT_NAMES)
         assert action.scale == BLACK_ACTION_SCALE == .25

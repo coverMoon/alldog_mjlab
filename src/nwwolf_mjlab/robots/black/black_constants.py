@@ -22,11 +22,61 @@ def get_spec() -> mujoco.MjSpec:
 # Actuator
 #
 
-# Nominal control parameters from HIMLoco BlackCfg.
-# Keep the RL thigh damping exception from the source configuration.
-STIFFNESS = 40.0
-DAMPING = 1.2
-EFFORT_LIMIT = 20.0
+# 逐关节 PD 参数表，与旧 super-dog BlackCfg.control 的 dict 表达方式一致，
+# 每个关节可独立调参，为后续差异化 PD 留出接口。
+BLACK_STIFFNESS = {
+    "FL_hip_joint": 40.0,
+    "FL_thigh_joint": 40.0,
+    "FL_calf_joint": 40.0,
+
+    "FR_hip_joint": 40.0,
+    "FR_thigh_joint": 40.0,
+    "FR_calf_joint": 40.0,
+
+    "RR_hip_joint": 40.0,
+    "RR_thigh_joint": 40.0,
+    "RR_calf_joint": 40.0,
+
+    "RL_hip_joint": 40.0,
+    "RL_thigh_joint": 40.0,
+    "RL_calf_joint": 40.0,
+}
+
+BLACK_DAMPING = {
+    "FL_hip_joint": 1.2,
+    "FL_thigh_joint": 1.2,
+    "FL_calf_joint": 1.2,
+
+    "FR_hip_joint": 1.2,
+    "FR_thigh_joint": 1.2,
+    "FR_calf_joint": 1.2,
+
+    "RR_hip_joint": 1.2,
+    "RR_thigh_joint": 1.2,
+    "RR_calf_joint": 1.2,
+
+    "RL_hip_joint": 1.2,
+    "RL_thigh_joint": 1.2,
+    "RL_calf_joint": 1.2,
+}
+
+BLACK_EFFORT_LIMIT = {
+    "FL_hip_joint": 20.0,
+    "FL_thigh_joint": 20.0,
+    "FL_calf_joint": 20.0,
+
+    "FR_hip_joint": 20.0,
+    "FR_thigh_joint": 20.0,
+    "FR_calf_joint": 20.0,
+
+    "RR_hip_joint": 20.0,
+    "RR_thigh_joint": 20.0,
+    "RR_calf_joint": 20.0,
+
+    "RL_hip_joint": 20.0,
+    "RL_thigh_joint": 20.0,
+    "RL_calf_joint": 20.0,
+}
 
 # Position offsets in radians per unit action; independent of PD gains.
 BLACK_ACTION_SCALE = 0.25
@@ -38,24 +88,23 @@ BLACK_JOINT_NAMES = tuple(
     for joint in ("hip", "thigh", "calf")
 )
 
-BLACK_ACTUATOR_CFG = IdealPdActuatorCfg(
-    target_names_expr=tuple(name for name in BLACK_JOINT_NAMES if name != "RL_thigh_joint"),
-    stiffness=STIFFNESS,
-    damping=DAMPING,
-    effort_limit=EFFORT_LIMIT,
-)
+
+def _pd_actuator_cfg(joint_name: str) -> IdealPdActuatorCfg:
+    """按关节名从逐关节参数表生成单个关节的 PD actuator 配置。"""
+    return IdealPdActuatorCfg(
+        target_names_expr=(joint_name,),
+        stiffness=BLACK_STIFFNESS[joint_name],
+        damping=BLACK_DAMPING[joint_name],
+        effort_limit=BLACK_EFFORT_LIMIT[joint_name],
+    )
 
 
-BLACK_RL_THIGH_ACTUATOR_CFG = IdealPdActuatorCfg(
-    target_names_expr=("RL_thigh_joint",),
-    stiffness=STIFFNESS,
-    damping=1.0,
-    effort_limit=EFFORT_LIMIT,
-)
-
+# 逐关节 12 个 actuator；顺序由 BLACK_JOINT_NAMES（actuator/action 权威顺序）决定，
+# 不依赖 dict 插入顺序、regex 解析顺序或 MJCF 内部排序细节。
+BLACK_ACTUATOR_CFGS = tuple(_pd_actuator_cfg(name) for name in BLACK_JOINT_NAMES)
 
 BLACK_ARTICULATION = EntityArticulationInfoCfg(
-    actuators=(BLACK_ACTUATOR_CFG, BLACK_RL_THIGH_ACTUATOR_CFG),
+    actuators=BLACK_ACTUATOR_CFGS,
     soft_joint_pos_limit_factor=0.9,
 )
 
