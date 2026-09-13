@@ -1,0 +1,21 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# 未开源机器人结构 mesh 文件（XML 保留，mesh 不上传）
+src/nwwolf_mjlab/robots/black/xmls/assets/
+
+# VSCode C/C++ 插件浏览数据库（缓存文件，体积巨大）
+.vscode/
+
+# 日志与临时文件
+MUJOCO_LOG.TXT
+logs/
+docs/
