@@ -6,6 +6,7 @@ Artifacts are written to --output (a temporary directory by default).
 import argparse
 from dataclasses import asdict
 import json
+import math
 from pathlib import Path
 import tempfile
 
@@ -15,6 +16,7 @@ import torch
 from mjlab.entity import Entity
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import RslRlVecEnvWrapper
+from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 from mjlab.tasks.velocity.rl import VelocityOnPolicyRunner
 from nwwolf_mjlab.robots.black.black_constants import (
     BLACK_ACTION_SCALE, BLACK_FOOT_NAMES, BLACK_JOINT_NAMES,
@@ -59,6 +61,21 @@ def main():
         model.sensor(name)
 
     cfg = black_flat_env_cfg()
+    # Command contract：Black flat 初始 velocity command（对齐旧 super-dog Black 语义）。
+    twist_cfg = cfg.commands["twist"]
+    assert isinstance(twist_cfg, UniformVelocityCommandCfg)
+    assert twist_cfg.resampling_time_range == (10.0, 10.0)
+    assert twist_cfg.heading_command is False
+    assert twist_cfg.ranges.heading is None
+    for actual_range, wanted_range, label in (
+        (twist_cfg.ranges.lin_vel_x, (-1.0, 1.0), 'lin_vel_x'),
+        (twist_cfg.ranges.lin_vel_y, (-1.0, 1.0), 'lin_vel_y'),
+        (twist_cfg.ranges.ang_vel_z, (-math.pi, math.pi), 'ang_vel_z'),
+    ):
+        assert len(actual_range) == 2 and all(
+            math.isclose(a, e, rel_tol=1e-9, abs_tol=1e-9)
+            for a, e in zip(actual_range, wanted_range)
+        ), f'{label} = {actual_range} != {wanted_range}'
     cfg.seed = 42
     cfg.scene.num_envs = 4
     # Short episodes exercise timeout and automatic resets during both rollouts and PPO.
@@ -94,6 +111,13 @@ def main():
         torch.testing.assert_close(target[:,0], data.default_joint_pos[:,0]+.25-data.encoder_bias[:,0])
         torch.testing.assert_close(target[:,1:], data.default_joint_pos[:,1:]-data.encoder_bias[:,1:])
         wrapped.reset()
+        # 运行时 command 采样边界检查（body-frame vx/vy/wz；heading 关闭，wz 为直接均匀采样值）。
+        twist_term = env.command_manager.get_term('twist')
+        command = twist_term.command
+        assert command.ndim == 2 and command.shape[1] >= 3, command.shape
+        eps = 1e-5
+        for column, (lo, hi) in enumerate(((-1.0, 1.0), (-1.0, 1.0), (-math.pi, math.pi))):
+            assert torch.all((command[:, column] >= lo - eps) & (command[:, column] <= hi + eps)), column
         initial = wrapped.get_observations()
         report['observations'] = {k:list(v.shape) for k,v in initial.items()}
         contact = env.scene['feet_ground_contact']

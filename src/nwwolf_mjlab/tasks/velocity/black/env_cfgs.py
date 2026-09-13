@@ -1,5 +1,7 @@
 """Velocity task configurations for Black."""
 
+import math
+
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
@@ -10,6 +12,7 @@ from mjlab.sensor import (
     RingPatternCfg,
     TerrainHeightSensorCfg,
 )
+from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 
 from nwwolf_mjlab.robots.black import BLACK_ACTION_SCALE, get_black_robot_cfg
@@ -20,6 +23,18 @@ def black_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     """Create the flat-ground velocity task for Black."""
 
     cfg = make_velocity_env_cfg()
+
+    # Black flat 初始 velocity command contract（对齐旧 super-dog BlackCfg.commands）：
+    # heading command 关闭、resampling 固定 10.0 s、vx/vy ∈ [-1, 1] m/s、wz ∈ [-pi, pi] rad/s。
+    # v1.6.0 要求：heading_command=False 时 ranges.heading 必须为 None，否则构建环境时报错。
+    twist_command = cfg.commands["twist"]
+    assert isinstance(twist_command, UniformVelocityCommandCfg)
+    twist_command.resampling_time_range = (10.0, 10.0)
+    twist_command.heading_command = False
+    twist_command.ranges.heading = None
+    twist_command.ranges.lin_vel_x = (-1.0, 1.0)
+    twist_command.ranges.lin_vel_y = (-1.0, 1.0)
+    twist_command.ranges.ang_vel_z = (-math.pi, math.pi)
 
     cfg.scene.entities = {
         "robot": get_black_robot_cfg(),
