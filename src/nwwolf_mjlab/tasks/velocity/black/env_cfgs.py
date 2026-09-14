@@ -15,6 +15,7 @@ from mjlab.sensor import (
 )
 from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
+from mjlab.utils.noise import UniformNoiseCfg
 
 from nwwolf_mjlab.robots.black import BLACK_ACTION_SCALE, get_black_robot_cfg
 from nwwolf_mjlab.robots.black.black_constants import (
@@ -44,6 +45,29 @@ BLACK_ACTOR_OBS_TERM_ORDER = (
     "joint_vel",
     "actions",
 )
+
+# Black actor observation 数值 contract（对齐旧 super-dog Black 的固定
+# obs_scales / noise_scales）：command 用 (lin_vel, lin_vel, ang_vel) 缩放，
+# 其余为各分量的 obs_scales。
+BLACK_ACTOR_OBS_SCALE: dict[str, float | tuple[float, ...]] = {
+    "command": (2.0, 2.0, 0.25),
+    "base_ang_vel": 0.25,
+    "projected_gravity": 1.0,
+    "joint_pos": 1.0,
+    "joint_vel": 0.05,
+    "actions": 1.0,
+}
+
+# 旧 legged_gym 的 raw noise_scales（noise_level = 1.0）。
+# MjLab v1.6.0 pipeline 为 compute → noise → clip → scale，因此噪声进入
+# policy 的幅值 = raw noise × scale，与旧 (value + raw_noise) × scale 一致；
+# 不得写成已乘过 scale 的最终幅值。
+BLACK_ACTOR_OBS_NOISE: dict[str, tuple[float, float]] = {
+    "base_ang_vel": (-0.3, 0.3),
+    "projected_gravity": (-0.05, 0.05),
+    "joint_pos": (-0.08, 0.08),
+    "joint_vel": (-2.0, 2.0),
+}
 
 
 def black_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
@@ -200,6 +224,19 @@ def black_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.observations["actor"].terms = {
         name: actor_terms[name] for name in BLACK_ACTOR_OBS_TERM_ORDER
     }
+    # Black actor 数值 contract：固定 scale + 旧 raw noise_scales。
+    # 同样用 replace 生成独立 term cfg，避免通过共享对象改动 critic term。
+    for term_name in BLACK_ACTOR_OBS_TERM_ORDER:
+        noise_range = BLACK_ACTOR_OBS_NOISE.get(term_name)
+        cfg.observations["actor"].terms[term_name] = replace(
+            actor_terms[term_name],
+            scale=BLACK_ACTOR_OBS_SCALE[term_name],
+            noise=(
+                UniformNoiseCfg(n_min=noise_range[0], n_max=noise_range[1])
+                if noise_range is not None
+                else None
+            ),
+        )
     cfg.observations["critic"].terms.pop("height_scan", None)
     cfg.terminations.pop("out_of_terrain_bounds", None)
     cfg.curriculum.pop("terrain_levels", None)
