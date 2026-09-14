@@ -1,5 +1,6 @@
 """Velocity task configurations for Black."""
 
+from dataclasses import replace
 import math
 
 from mjlab.envs import ManagerBasedRlEnvCfg
@@ -16,7 +17,10 @@ from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 
 from nwwolf_mjlab.robots.black import BLACK_ACTION_SCALE, get_black_robot_cfg
-from nwwolf_mjlab.robots.black.black_constants import BLACK_FOOT_NAMES
+from nwwolf_mjlab.robots.black.black_constants import (
+    BLACK_FOOT_NAMES,
+    BLACK_JOINT_NAMES,
+)
 
 # Policy action term 顺序 contract：ActionManager 按 dict 插入顺序切分
 # flat policy action，因此必须由此显式顺序驱动构造，不能依赖字面 dict 写法。
@@ -26,6 +30,19 @@ BLACK_ACTION_TERM_ORDER = (
     "joint_pos_fr",
     "joint_pos_rl",
     "joint_pos_rr",
+)
+
+# Black PPO actor 单步 observation layout contract（对齐旧 super-dog Black
+# num_one_step_observations = 45）：
+#   command → base_ang_vel → projected_gravity → joint_pos → joint_vel → action
+# 不含 base_lin_vel / height_scan，也不含 history（仍为单帧）。
+BLACK_ACTOR_OBS_TERM_ORDER = (
+    "command",
+    "base_ang_vel",
+    "projected_gravity",
+    "joint_pos",
+    "joint_vel",
+    "actions",
 )
 
 
@@ -158,7 +175,31 @@ def black_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.scene.sensors = tuple(
         sensor for sensor in (cfg.scene.sensors or ()) if sensor.name != "terrain_scan"
     )
-    cfg.observations["actor"].terms.pop("height_scan", None)
+    # Black PPO actor 45 维单步 observation contract：内容与 layout 显式重建。
+    actor_terms = cfg.observations["actor"].terms
+    # 移除 MjLab velocity 默认中不属于旧 Black actor 的项。
+    actor_terms.pop("height_scan", None)
+    actor_terms.pop("base_lin_vel")
+    # joint_pos / joint_vel 必须使用 policy joint order（FL → FR → RL → RR）。
+    # 每个 term 用独立的 SceneEntityCfg 实例；并用 replace 生成独立 term cfg，
+    # 避免改动与 critic 共享的 ObservationTermCfg 对象（其 func/noise/biased 等均保留）。
+    for term_name in ("joint_pos", "joint_vel"):
+        term_cfg = actor_terms[term_name]
+        actor_terms[term_name] = replace(
+            term_cfg,
+            params={
+                **term_cfg.params,
+                "asset_cfg": SceneEntityCfg(
+                    "robot",
+                    joint_names=BLACK_JOINT_NAMES,
+                    preserve_order=True,
+                ),
+            },
+        )
+    # 由显式 contract 重建 term 顺序，不依赖基础配置的原始插入顺序。
+    cfg.observations["actor"].terms = {
+        name: actor_terms[name] for name in BLACK_ACTOR_OBS_TERM_ORDER
+    }
     cfg.observations["critic"].terms.pop("height_scan", None)
     cfg.terminations.pop("out_of_terrain_bounds", None)
     cfg.curriculum.pop("terrain_levels", None)
