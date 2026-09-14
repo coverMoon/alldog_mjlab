@@ -18,6 +18,16 @@ from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 from nwwolf_mjlab.robots.black import BLACK_ACTION_SCALE, get_black_robot_cfg
 from nwwolf_mjlab.robots.black.black_constants import BLACK_FOOT_NAMES
 
+# Policy action term 顺序 contract：ActionManager 按 dict 插入顺序切分
+# flat policy action，因此必须由此显式顺序驱动构造，不能依赖字面 dict 写法。
+# 对齐旧 super-dog Black 运行时 dof order：FL → FR → RL → RR，每腿 3 维。
+BLACK_ACTION_TERM_ORDER = (
+    "joint_pos_fl",
+    "joint_pos_fr",
+    "joint_pos_rl",
+    "joint_pos_rr",
+)
+
 
 def black_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     """Create the flat-ground velocity task for Black."""
@@ -75,9 +85,27 @@ def black_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     )
     cfg.scene.sensors = (cfg.scene.sensors or ()) + (feet_ground_contact,)
 
-    joint_pos_action = cfg.actions["joint_pos"]
-    assert isinstance(joint_pos_action, JointPositionActionCfg)
-    joint_pos_action.scale = BLACK_ACTION_SCALE
+    cfg.actions.pop("joint_pos")
+    # Black policy action contract：四个单腿 JointPositionAction term，
+    # flat policy action 按 BLACK_ACTION_TERM_ORDER（FL → FR → RL → RR）拼接，
+    # 每 term 精确绑定对应腿的 hip/thigh/calf 三个关节（每腿 3 维，共 12 维）。
+    # 不使用单个全机器人 term：joint transmission 的 target 顺序在 MjLab v1.6.0
+    # 中恒为 Entity natural order（FL → FR → RR → RL），无法表达 policy order。
+    leg_joint_names = {
+        leg: tuple(f"{leg}_{joint}_joint" for joint in ("hip", "thigh", "calf"))
+        for leg in BLACK_FOOT_NAMES
+    }
+    action_terms: dict[str, JointPositionActionCfg] = {
+        f"joint_pos_{leg.lower()}": JointPositionActionCfg(
+            entity_name="robot",
+            actuator_names=leg_joint_names[leg],
+            scale=BLACK_ACTION_SCALE,
+            use_default_offset=True,
+        )
+        for leg in BLACK_FOOT_NAMES
+    }
+    assert tuple(action_terms) == BLACK_ACTION_TERM_ORDER
+    cfg.actions = action_terms
 
     cfg.events["foot_friction"].params["asset_cfg"] = SceneEntityCfg(
         "robot",

@@ -51,13 +51,13 @@ BLACK_DAMPING = {
     "FR_thigh_joint": 1.2,
     "FR_calf_joint": 1.2,
 
-    "RR_hip_joint": 1.2,
-    "RR_thigh_joint": 1.2,
-    "RR_calf_joint": 1.2,
-
     "RL_hip_joint": 1.2,
     "RL_thigh_joint": 1.2,
     "RL_calf_joint": 1.2,
+
+    "RR_hip_joint": 1.2,
+    "RR_thigh_joint": 1.2,
+    "RR_calf_joint": 1.2,
 }
 
 BLACK_EFFORT_LIMIT = {
@@ -69,19 +69,25 @@ BLACK_EFFORT_LIMIT = {
     "FR_thigh_joint": 20.0,
     "FR_calf_joint": 20.0,
 
-    "RR_hip_joint": 20.0,
-    "RR_thigh_joint": 20.0,
-    "RR_calf_joint": 20.0,
-
     "RL_hip_joint": 20.0,
     "RL_thigh_joint": 20.0,
     "RL_calf_joint": 20.0,
+
+    "RR_hip_joint": 20.0,
+    "RR_thigh_joint": 20.0,
+    "RR_calf_joint": 20.0,
 }
 
 # Position offsets in radians per unit action; independent of PD gains.
 BLACK_ACTION_SCALE = 0.25
 
-BLACK_FOOT_NAMES = ("FL", "FR", "RR", "RL")
+# Policy / action / deployment 权威腿顺序（对齐旧 super-dog Black 在 Isaac Gym
+# 运行时打印的 self.dof_names：FL → FR → RL → RR）。
+# 注意：这不是 MuJoCo MJCF 的 natural joint order（XML 中为 FL → FR → RR → RL），
+# 两者是不同概念，不得混用。MJCF 顺序由 robot.joint_names 反映，保持不动。
+BLACK_FOOT_NAMES = ("FL", "FR", "RL", "RR")
+# Policy action / deployment 权威关节顺序：每条腿内 hip → thigh → calf，
+# 腿间顺序由 BLACK_FOOT_NAMES 决定（FL → FR → RL → RR）。
 BLACK_JOINT_NAMES = tuple(
     f"{leg}_{joint}_joint"
     for leg in BLACK_FOOT_NAMES
@@ -99,8 +105,10 @@ def _pd_actuator_cfg(joint_name: str) -> IdealPdActuatorCfg:
     )
 
 
-# 逐关节 12 个 actuator；顺序由 BLACK_JOINT_NAMES（actuator/action 权威顺序）决定，
-# 不依赖 dict 插入顺序、regex 解析顺序或 MJCF 内部排序细节。
+# 逐关节 12 个 PD actuator，覆盖 BLACK_JOINT_NAMES 的全部关节。
+# 注意：sort_actuators=True 时 MjLab 会按 model natural order 排列编译后
+# actuator 内部顺序，与 policy action 顺序无关；policy mapping 由
+# env_cfgs 中的四个单腿 action term 负责。
 BLACK_ACTUATOR_CFGS = tuple(_pd_actuator_cfg(name) for name in BLACK_JOINT_NAMES)
 
 BLACK_ARTICULATION = EntityArticulationInfoCfg(
