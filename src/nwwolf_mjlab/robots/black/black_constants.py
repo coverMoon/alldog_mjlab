@@ -81,8 +81,8 @@ BLACK_EFFORT_LIMIT = {
 # Position offsets in radians per unit action; independent of PD gains.
 BLACK_ACTION_SCALE = 0.25
 
-# Policy / action / deployment 权威腿顺序（对齐旧 super-dog Black 在 Isaac Gym
-# 运行时打印的 self.dof_names：FL → FR → RL → RR）。
+# Policy / action / deployment 腿顺序
+# 运行时打印的 self.dof_names：FL → FR → RL → RR
 # 注意：这不是 MuJoCo MJCF 的 natural joint order（XML 中为 FL → FR → RR → RL），
 # 两者是不同概念，不得混用。MJCF 顺序由 robot.joint_names 反映，保持不动。
 BLACK_FOOT_NAMES = ("FL", "FR", "RL", "RR")
