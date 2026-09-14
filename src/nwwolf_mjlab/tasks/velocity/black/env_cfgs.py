@@ -82,6 +82,19 @@ BLACK_ILLEGAL_CONTACT_BODIES = (
 BLACK_ILLEGAL_CONTACT_FORCE_THRESHOLD = 1.0
 BLACK_ILLEGAL_CONTACT_HISTORY = 4
 
+# Root reset contract：pose 不随机（x/y/z/roll/pitch/yaw 均为 0 offset，
+# root 高度直接取 INIT_STATE.pos 的 0.45 m），root 六维速度独立均匀采样 [-0.5, 0.5]。
+# key 名称固定为 MjLab v1.6.0 的 SE(3) 轴名（velocity 也用 x/y/z/roll/pitch/yaw）。
+BLACK_ROOT_RESET_POSE_RANGE: dict[str, tuple[float, float]] = {}
+BLACK_ROOT_RESET_VELOCITY_RANGE: dict[str, tuple[float, float]] = {
+    "x": (-0.5, 0.5),
+    "y": (-0.5, 0.5),
+    "z": (-0.5, 0.5),
+    "roll": (-0.5, 0.5),
+    "pitch": (-0.5, 0.5),
+    "yaw": (-0.5, 0.5),
+}
+
 
 def black_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     """Create the flat-ground velocity task for Black."""
@@ -185,6 +198,13 @@ def black_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "robot",
         geom_names=foot_geom_names,
     )
+
+    # Root reset contract：pose 固定为 default initial state（不随机 x/y/z/roll/pitch/yaw），
+    # root 六维速度独立均匀采样 [-0.5, 0.5]。env origin 与 default root state 的叠加
+    # 由 mdp.reset_root_state_uniform 内部处理。
+    reset_base = cfg.events["reset_base"]
+    reset_base.params["pose_range"] = dict(BLACK_ROOT_RESET_POSE_RANGE)
+    reset_base.params["velocity_range"] = dict(BLACK_ROOT_RESET_VELOCITY_RANGE)
     cfg.events["base_com"].params["asset_cfg"] = SceneEntityCfg(
         "robot",
         body_names=("trunk",),
