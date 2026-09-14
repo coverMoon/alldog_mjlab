@@ -9,6 +9,8 @@ wheels/
 # Virtual environments
 .venv
 
+tests/
+
 # 未开源机器人结构 mesh 文件（XML 保留，mesh 不上传）
 src/nwwolf_mjlab/robots/black/xmls/assets/
 
