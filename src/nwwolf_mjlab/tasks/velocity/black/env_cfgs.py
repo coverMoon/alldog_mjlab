@@ -5,6 +5,7 @@ import math
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
+from mjlab.managers import TerminationTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import (
     ContactMatch,
@@ -13,6 +14,7 @@ from mjlab.sensor import (
     RingPatternCfg,
     TerrainHeightSensorCfg,
 )
+from mjlab.tasks.velocity import mdp
 from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 from mjlab.utils.noise import UniformNoiseCfg
@@ -65,6 +67,20 @@ BLACK_ACTOR_OBS_NOISE: dict[str, tuple[float, float]] = {
     "joint_pos": (-0.08, 0.08),
     "joint_vel": (-2.0, 2.0),
 }
+
+# 摔倒终止 contract：trunk 或任一 thigh 与 terrain 接触，且接触力 > 1.0 N。
+# 不含 calf / foot / hip。history_length 取一个 control step 内的 physics substep 数
+# （sim dt 0.005 × decimation 4 = 0.02 s），用于捕获 step 中途出现的碰撞。
+BLACK_ILLEGAL_CONTACT_SENSOR = "illegal_ground_contact"
+BLACK_ILLEGAL_CONTACT_BODIES = (
+    "trunk",
+    "FL_thigh",
+    "FR_thigh",
+    "RL_thigh",
+    "RR_thigh",
+)
+BLACK_ILLEGAL_CONTACT_FORCE_THRESHOLD = 1.0
+BLACK_ILLEGAL_CONTACT_HISTORY = 4
 
 
 def black_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
@@ -122,6 +138,26 @@ def black_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         track_air_time=True,
     )
     cfg.scene.sensors = (cfg.scene.sensors or ()) + (feet_ground_contact,)
+
+    # 摔倒终止专用 sensor：trunk / thigh 对 terrain 的接触力历史。
+    # 不复用 feet_ground_contact（那是正常行走接触）。
+    illegal_ground_contact = ContactSensorCfg(
+        name=BLACK_ILLEGAL_CONTACT_SENSOR,
+        primary=ContactMatch(
+            mode="body",
+            pattern=BLACK_ILLEGAL_CONTACT_BODIES,
+            entity="robot",
+        ),
+        secondary=ContactMatch(
+            mode="body",
+            pattern="terrain",
+        ),
+        fields=("found", "force"),
+        reduce="none",
+        num_slots=1,
+        history_length=BLACK_ILLEGAL_CONTACT_HISTORY,
+    )
+    cfg.scene.sensors = (cfg.scene.sensors or ()) + (illegal_ground_contact,)
 
     cfg.actions.pop("joint_pos")
     # Black policy action contract：四个单腿 JointPositionAction term，
@@ -235,6 +271,16 @@ def black_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             ),
         )
     cfg.observations["critic"].terms.pop("height_scan", None)
+    # 摔倒终止：用 trunk / thigh 触地替代 orientation-based 的 fell_over，
+    # 与 time_out（20.0 s）共同构成训练终止 contract。
+    cfg.terminations.pop("fell_over", None)
+    cfg.terminations["illegal_contact"] = TerminationTermCfg(
+        func=mdp.illegal_contact,
+        params={
+            "sensor_name": BLACK_ILLEGAL_CONTACT_SENSOR,
+            "force_threshold": BLACK_ILLEGAL_CONTACT_FORCE_THRESHOLD,
+        },
+    )
     cfg.terminations.pop("out_of_terrain_bounds", None)
     cfg.curriculum.pop("terrain_levels", None)
 
