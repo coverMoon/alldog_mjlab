@@ -13,7 +13,7 @@ def black_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
             hidden_dims=(512, 256, 128),
             activation="elu",
             # Black policy 直接使用已固定 scale 的 45 维 observation，
-            # 不再对 actor 做 running normalization（critic 保持 True）。
+            # 不做 running normalization（critic 保持 True）。
             obs_normalization=False,
             distribution_cfg={
                 "class_name": "GaussianDistribution",

@@ -25,7 +25,7 @@ from nwwolf_mjlab.robots.black.black_constants import (
 
 # Policy action term 顺序 contract：ActionManager 按 dict 插入顺序切分
 # flat policy action，因此必须由此显式顺序驱动构造，不能依赖字面 dict 写法。
-# 对齐旧 super-dog Black 运行时 dof order：FL → FR → RL → RR，每腿 3 维。
+# 腿顺序为 FL → FR → RL → RR，每腿 hip → thigh → calf（共 12 维）。
 BLACK_ACTION_TERM_ORDER = (
     "joint_pos_fl",
     "joint_pos_fr",
@@ -33,10 +33,9 @@ BLACK_ACTION_TERM_ORDER = (
     "joint_pos_rr",
 )
 
-# Black PPO actor 单步 observation layout contract（对齐旧 super-dog Black
-# num_one_step_observations = 45）：
+# Black PPO actor 单步 observation layout contract（共 45 维）：
 #   command → base_ang_vel → projected_gravity → joint_pos → joint_vel → action
-# 不含 base_lin_vel / height_scan，也不含 history（仍为单帧）。
+# 不含 base_lin_vel / height_scan，也不含 history（单帧）。
 BLACK_ACTOR_OBS_TERM_ORDER = (
     "command",
     "base_ang_vel",
@@ -46,9 +45,8 @@ BLACK_ACTOR_OBS_TERM_ORDER = (
     "actions",
 )
 
-# Black actor observation 数值 contract（对齐旧 super-dog Black 的固定
-# obs_scales / noise_scales）：command 用 (lin_vel, lin_vel, ang_vel) 缩放，
-# 其余为各分量的 obs_scales。
+# Black actor observation 数值 contract：command 三分量缩放分别为
+# vx 2.0 / vy 2.0 / wz 0.25，其余为各分量的固定 scale。
 BLACK_ACTOR_OBS_SCALE: dict[str, float | tuple[float, ...]] = {
     "command": (2.0, 2.0, 0.25),
     "base_ang_vel": 0.25,
@@ -58,10 +56,9 @@ BLACK_ACTOR_OBS_SCALE: dict[str, float | tuple[float, ...]] = {
     "actions": 1.0,
 }
 
-# 旧 legged_gym 的 raw noise_scales（noise_level = 1.0）。
-# MjLab v1.6.0 pipeline 为 compute → noise → clip → scale，因此噪声进入
-# policy 的幅值 = raw noise × scale，与旧 (value + raw_noise) × scale 一致；
-# 不得写成已乘过 scale 的最终幅值。
+# 各分量的 raw noise 幅值。MjLab v1.6.0 pipeline 为
+# compute → noise → clip → scale，故这里写加在 raw 值上的噪声：
+# 进入 policy 的最终幅值 = raw noise × scale，不要写成已乘过 scale 的值。
 BLACK_ACTOR_OBS_NOISE: dict[str, tuple[float, float]] = {
     "base_ang_vel": (-0.3, 0.3),
     "projected_gravity": (-0.05, 0.05),
@@ -75,8 +72,8 @@ def black_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
     cfg = make_velocity_env_cfg()
 
-    # Black flat 初始 velocity command contract（对齐旧 super-dog BlackCfg.commands）：
-    # heading command 关闭、resampling 固定 10.0 s、vx/vy ∈ [-1, 1] m/s、wz ∈ [-pi, pi] rad/s。
+    # Black flat velocity command contract：heading command 关闭、
+    # resampling 固定 10.0 s、vx/vy ∈ [-1, 1] m/s、wz ∈ [-pi, pi] rad/s。
     # v1.6.0 要求：heading_command=False 时 ranges.heading 必须为 None，否则构建环境时报错。
     twist_command = cfg.commands["twist"]
     assert isinstance(twist_command, UniformVelocityCommandCfg)
@@ -201,7 +198,7 @@ def black_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     )
     # Black PPO actor 45 维单步 observation contract：内容与 layout 显式重建。
     actor_terms = cfg.observations["actor"].terms
-    # 移除 MjLab velocity 默认中不属于旧 Black actor 的项。
+    # 移除 MjLab velocity 默认中不属于 Black actor contract 的项。
     actor_terms.pop("height_scan", None)
     actor_terms.pop("base_lin_vel")
     # joint_pos / joint_vel 必须使用 policy joint order（FL → FR → RL → RR）。
@@ -224,7 +221,7 @@ def black_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.observations["actor"].terms = {
         name: actor_terms[name] for name in BLACK_ACTOR_OBS_TERM_ORDER
     }
-    # Black actor 数值 contract：固定 scale + 旧 raw noise_scales。
+    # Black actor 数值 contract：固定 scale 与 raw noise 幅值。
     # 同样用 replace 生成独立 term cfg，避免通过共享对象改动 critic term。
     for term_name in BLACK_ACTOR_OBS_TERM_ORDER:
         noise_range = BLACK_ACTOR_OBS_NOISE.get(term_name)

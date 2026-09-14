@@ -22,8 +22,7 @@ def get_spec() -> mujoco.MjSpec:
 # Actuator
 #
 
-# 逐关节 PD 参数表，与旧 super-dog BlackCfg.control 的 dict 表达方式一致，
-# 每个关节可独立调参，为后续差异化 PD 留出接口。
+# 逐关节 PD 参数表，每个关节可独立调参，为后续差异化 PD 留出接口。
 BLACK_STIFFNESS = {
     "FL_hip_joint": 40.0,
     "FL_thigh_joint": 40.0,
@@ -81,12 +80,11 @@ BLACK_EFFORT_LIMIT = {
 # Position offsets in radians per unit action; independent of PD gains.
 BLACK_ACTION_SCALE = 0.25
 
-# Policy / action / deployment 腿顺序
-# 运行时打印的 self.dof_names：FL → FR → RL → RR
+# Policy / action / deployment 腿顺序：FL → FR → RL → RR。
 # 注意：这不是 MuJoCo MJCF 的 natural joint order（XML 中为 FL → FR → RR → RL），
-# 两者是不同概念，不得混用。MJCF 顺序由 robot.joint_names 反映，保持不动。
+# 两者是不同概念，不得混用；MJCF 顺序由 robot.joint_names 反映。
 BLACK_FOOT_NAMES = ("FL", "FR", "RL", "RR")
-# Policy action / deployment 权威关节顺序：每条腿内 hip → thigh → calf，
+# Policy action / deployment 关节顺序：每条腿内 hip → thigh → calf，
 # 腿间顺序由 BLACK_FOOT_NAMES 决定（FL → FR → RL → RR）。
 BLACK_JOINT_NAMES = tuple(
     f"{leg}_{joint}_joint"
