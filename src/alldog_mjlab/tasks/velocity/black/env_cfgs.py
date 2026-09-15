@@ -31,6 +31,7 @@ from alldog_mjlab.robots.black.black_constants import (
     BLACK_JOINT_NAMES,
 )
 from alldog_mjlab.tasks.velocity.black.params import (
+    BLACK_ACTION_RATE_WEIGHT,
     BLACK_ACTOR_OBS_NOISE,
     BLACK_ANG_VEL_XY_WEIGHT,
     BLACK_BASE_HEIGHT_TARGET,
@@ -39,14 +40,17 @@ from alldog_mjlab.tasks.velocity.black.params import (
     BLACK_COMMAND_LIN_VEL_X_RANGE,
     BLACK_COMMAND_LIN_VEL_Y_RANGE,
     BLACK_COMMAND_RESAMPLING_TIME_RANGE,
+    BLACK_DOF_ACC_WEIGHT,
     BLACK_ILLEGAL_CONTACT_FORCE_THRESHOLD,
     BLACK_ILLEGAL_CONTACT_HISTORY,
+    BLACK_JOINT_POWER_WEIGHT,
     BLACK_JOINT_RESET_POSITION_RANGE,
     BLACK_JOINT_RESET_VELOCITY_RANGE,
     BLACK_LIN_VEL_Z_WEIGHT,
     BLACK_ORIENTATION_WEIGHT,
     BLACK_ROOT_RESET_POSE_RANGE,
     BLACK_ROOT_RESET_VELOCITY_RANGE,
+    BLACK_SMOOTHNESS_WEIGHT,
     BLACK_STUCK_COMMAND_THRESHOLD,
     BLACK_STUCK_GRACE_S,
     BLACK_STUCK_TIMEOUT_S,
@@ -57,8 +61,9 @@ from alldog_mjlab.tasks.velocity.black.params import (
 )
 from alldog_mjlab.tasks.velocity.black.rewards import (
     angular_velocity_xy_l2,
-    base_height_l1_flat,
-    orientation_l1,
+    base_height_l2_flat,
+    dof_acc_l2,
+    joint_power_l1,
     track_angular_velocity_z,
     track_linear_velocity_xy,
     vertical_linear_velocity_l2,
@@ -261,85 +266,79 @@ def _configure_events(cfg: ManagerBasedRlEnvCfg) -> None:
 
 
 def _configure_rewards(cfg: ManagerBasedRlEnvCfg) -> None:
-    """Reward term 的 func / weight / params 与 selector 绑定。
+    """Black flat v1 reward baseline：显式构造最终 10 项。
 
-    只替换 Black 已冻结的项；其余 MjLab baseline term 保持原样（weight 不变）。
-    term name 与 key 顺序都不改动，dt 缩放由 RewardManager 统一处理。
+    reward baseline 已正式冻结，因此不再「继承 MjLab baseline 再零散 patch」：
+    这里直接给出完整 dict，dict 顺序即 logging / 调参表的稳定顺序。
+
+    结构来源：
+      - tracking / lin_vel_z / body_ang_vel / upright / base_height /
+        dof_acc / joint_power / action_rate / smoothness 的公式取自
+        InternRobotics/HIMLoco 官方 Go1 baseline；
+      - base height target 等机器人相关数值取自 Black。
+    native 严格等价的公式直接用 mjlab 函数（flat_orientation_l2 / action_rate_l2 /
+    action_acc_l2），其余在 black/rewards.py 实现。
+
+    dt 缩放由 RewardManager 统一处理，reward 函数只返回 raw magnitude。
     """
-    # Tracking：替换 native track_* 的 func/weight/params（native 会把 v_z² / ω_xy²
-    # 并入同一个 exponential，与 Black contract 不等价）。
-    cfg.rewards["track_linear_velocity"] = RewardTermCfg(
-        func=track_linear_velocity_xy,
-        weight=BLACK_TRACKING_LINEAR_WEIGHT,
-        params={
-            "command_name": BLACK_COMMAND_NAME,
-            "sigma": BLACK_TRACKING_SIGMA,
-        },
-    )
-    cfg.rewards["track_angular_velocity"] = RewardTermCfg(
-        func=track_angular_velocity_z,
-        weight=BLACK_TRACKING_ANGULAR_WEIGHT,
-        params={
-            "command_name": BLACK_COMMAND_NAME,
-            "sigma": BLACK_TRACKING_SIGMA,
-        },
-    )
-
-    # Orientation：upright 沿用 MjLab native term name，但 math 换成 legacy 语义
-    # （native 是 exp(-Σg_xy²/std²) 的正奖励，legacy 是 |g_x| + |g_y| 的 L1 惩罚）。
-    # legacy 的 terrain-adaptive pitch scaling 在 2026-07-03 baseline 中已关闭，
-    # 因此当前 contract 不含任何地形依赖。
-    cfg.rewards["upright"] = RewardTermCfg(
-        func=orientation_l1,
-        weight=BLACK_ORIENTATION_WEIGHT,
-    )
-
-    # Base motion stability：tracking 不包含 v_z / ω_xy，这两个职责由独立 penalty
-    # 承担。reward 函数均返回非负 raw magnitude，负号由 weight 负责。
-    cfg.rewards["lin_vel_z"] = RewardTermCfg(
-        func=vertical_linear_velocity_l2,
-        weight=BLACK_LIN_VEL_Z_WEIGHT,
-    )
-    # body_ang_vel 沿用 MjLab 原生 term name，但 math 换成 legacy 语义
-    # （native 读 world-frame body 角速度，且依赖 trunk 的 body selector）。
-    cfg.rewards["body_ang_vel"] = RewardTermCfg(
-        func=angular_velocity_xy_l2,
-        weight=BLACK_ANG_VEL_XY_WEIGHT,
-    )
-
-    for reward_name in ("foot_clearance", "foot_slip"):
-        cfg.rewards[reward_name].params["asset_cfg"] = SceneEntityCfg(
-            "robot",
-            site_names=BLACK_FOOT_NAMES,
-        )
-
-    # 仍是 MjLab baseline 的临时姿态参数，尚未冻结为 Black reward contract，
-    # 因此不放进 params.py。
-    cfg.rewards["pose"].params["std_standing"] = {
-        r".*_hip_joint": 0.05,
-        r".*_thigh_joint": 0.05,
-        r".*_calf_joint": 0.1,
+    cfg.rewards = {
+        # Command tracking（HIMLoco：exp(-error / sigma)）。
+        "track_linear_velocity": RewardTermCfg(
+            func=track_linear_velocity_xy,
+            weight=BLACK_TRACKING_LINEAR_WEIGHT,
+            params={
+                "command_name": BLACK_COMMAND_NAME,
+                "sigma": BLACK_TRACKING_SIGMA,
+            },
+        ),
+        "track_angular_velocity": RewardTermCfg(
+            func=track_angular_velocity_z,
+            weight=BLACK_TRACKING_ANGULAR_WEIGHT,
+            params={
+                "command_name": BLACK_COMMAND_NAME,
+                "sigma": BLACK_TRACKING_SIGMA,
+            },
+        ),
+        # Base stability。
+        "lin_vel_z": RewardTermCfg(
+            func=vertical_linear_velocity_l2,
+            weight=BLACK_LIN_VEL_Z_WEIGHT,
+        ),
+        "body_ang_vel": RewardTermCfg(
+            func=angular_velocity_xy_l2,
+            weight=BLACK_ANG_VEL_XY_WEIGHT,
+        ),
+        # 与 HIMLoco `_reward_orientation` 严格一致，故直接用 native。
+        "upright": RewardTermCfg(
+            func=mdp.flat_orientation_l2,
+            weight=BLACK_ORIENTATION_WEIGHT,
+        ),
+        "base_height": RewardTermCfg(
+            func=base_height_l2_flat,
+            weight=BLACK_BASE_HEIGHT_WEIGHT,
+            params={
+                "target_height": BLACK_BASE_HEIGHT_TARGET,
+            },
+        ),
+        # Regularization。
+        "dof_acc": RewardTermCfg(
+            func=dof_acc_l2,
+            weight=BLACK_DOF_ACC_WEIGHT,
+        ),
+        "joint_power": RewardTermCfg(
+            func=joint_power_l1,
+            weight=BLACK_JOINT_POWER_WEIGHT,
+        ),
+        "action_rate_l2": RewardTermCfg(
+            func=mdp.action_rate_l2,
+            weight=BLACK_ACTION_RATE_WEIGHT,
+        ),
+        # HIMLoco `smoothness` 的二阶动作差分与 native action_acc_l2 严格一致。
+        "smoothness": RewardTermCfg(
+            func=mdp.action_acc_l2,
+            weight=BLACK_SMOOTHNESS_WEIGHT,
+        ),
     }
-    cfg.rewards["pose"].params["std_walking"] = {
-        r".*_hip_joint": 0.3,
-        r".*_thigh_joint": 0.3,
-        r".*_calf_joint": 0.6,
-    }
-    cfg.rewards["pose"].params["std_running"] = {
-        r".*_hip_joint": 0.3,
-        r".*_thigh_joint": 0.3,
-        r".*_calf_joint": 0.6,
-    }
-
-    # Base height：MjLab velocity baseline 没有对应 term，因此新增 key（追加在末尾，
-    # 不重排已有 reward dict）。flat task 下 world z 就是离地高度。
-    cfg.rewards["base_height"] = RewardTermCfg(
-        func=base_height_l1_flat,
-        weight=BLACK_BASE_HEIGHT_WEIGHT,
-        params={
-            "target_height": BLACK_BASE_HEIGHT_TARGET,
-        },
-    )
 
 
 def _configure_flat_terrain(cfg: ManagerBasedRlEnvCfg) -> None:

@@ -665,205 +665,143 @@ sim.sense()
 
 ## 11. Frozen Reward Contract
 
-### 11.1 Tracking
-
-`black-flat` 的 tracking 使用 task-local 实现：
+### 11.0 Reward authority
 
 ```text
-src/alldog_mjlab/tasks/velocity/black/rewards.py
+core reward structure / math:
+    InternRobotics/HIMLoco official Go1 baseline
+    （legged_gym/legged_gym/envs/go1/go1_config.py + envs/base/legged_robot.py）
+
+Black-specific numeric / robot semantics:
+    Black legacy（机器人固有量，如 base height target）
+
+super-dog 2026-07-03 lineage (68f1c1c):
+    optional shaping / historical tuning reference / sim2real 诊断参考，
+    不再是「所有 Black reward 必须迁移」的 authority
 ```
 
-term name 继续沿用 MjLab native 名称，只替换 func / weight / params：
+super-dog 中未被本 baseline 采用的自定义 shaping 仍是有效的历史知识，可在需要时
+按训练问题重新引入，但不属于 v1。见 §11.3。
+
+### 11.1 Final reward table（10 项）
+
+`term / func / weight / params` 的完整 contract，dict 顺序即 logging 与调参表顺序：
+
+```text
+term                    func                          weight
+track_linear_velocity   track_linear_velocity_xy      +1.0
+track_angular_velocity  track_angular_velocity_z      +0.5
+lin_vel_z               vertical_linear_velocity_l2   -2.0
+body_ang_vel            angular_velocity_xy_l2        -0.05
+upright                 flat_orientation_l2 (native)  -0.2
+base_height             base_height_l2_flat           -1.0
+dof_acc                 dof_acc_l2                    -2.5e-7
+joint_power             joint_power_l1                -2e-5
+action_rate_l2          action_rate_l2 (native)       -0.01
+smoothness              action_acc_l2 (native)        -0.01
+```
+
+```text
+tracking sigma      = 0.25
+base height target  = 0.43
+```
+
+没有 zero-weight placeholder；reward 函数只返回 raw magnitude，`dt` 缩放由
+`RewardManager`（`scale_rewards_by_dt=True`）统一处理。
+
+### 11.2 Per-term semantics
 
 ```text
 track_linear_velocity
-    func = track_linear_velocity_xy
-    reward = exp(-Σ(vx/vy 误差²) / sigma)
-    weight = 2.0
-    sigma = 0.25
-
+    raw = exp(-Σ(v_cmd_xy - v_xy)² / sigma)        body-frame root lin vel
 track_angular_velocity
-    func = track_angular_velocity_z
-    reward = exp(-(wz 误差²) / sigma)
-    weight = 1.5
-    sigma = 0.25
-```
-
-`sigma` 即 legacy `tracking_sigma`，denominator 不是 `sigma²`。
-
-不使用 MjLab native `track_*`：native 会把 `v_z²` / `ω_xy²` 并入同一个
-exponential，与 Black 的 tracking contract 不等价。
-
-只使用 raw command（`command_manager.get_command`）与 body-frame root 速度
-（`root_link_lin_vel_b` / `root_link_ang_vel_b`）。
-
-`dt` 缩放由 `RewardManager`（`scale_rewards_by_dt=True`）统一完成，reward 函数
-只返回 raw 值；legacy weight 可直接作为 MjLab weight。
-
-training / play 共用同一 contract。
-
-未迁移（仍为 MjLab baseline）：
-
-```text
-pose / stand_still
-action_rate_l2 / smoothness
-foot / gait rewards
-termination reward
-```
-
-### 11.2 Base motion stability
-
-tracking 不包含 `v_z` 与 `ω_xy`，这两个职责由独立 penalty 承担：
-
-```text
+    raw = exp(-(w_cmd_z - w_z)² / sigma)           body-frame root ang vel
 lin_vel_z
-    func = vertical_linear_velocity_l2
-    raw = body-frame v_z²
-    weight = -2.0
-
+    raw = v_z²                                      body-frame root
 body_ang_vel
-    func = angular_velocity_xy_l2
-    raw = body-frame ω_x² + ω_y²
-    weight = -0.05
-```
-
-两个函数均返回非负 raw magnitude，负号由 weight 负责；无 command gating、
-无 exponential、无 abs；不乘 `dt`（由 `RewardManager` 统一处理）。
-
-`body_ang_vel` 沿用 MjLab native term name，但不使用 native math：
-`mdp.body_angular_velocity_penalty` 读的是 **world-frame** body 角速度，
-legacy 用的是 body-frame root 角速度（pitch 90° 时两者分别约为 5.0 / 104.0）。
-
-同时四个职责严格解耦：
-
-```text
-track_linear_velocity   ← vx / vy 误差
-track_angular_velocity  ← wz 误差
-lin_vel_z               ← vz
-body_ang_vel            ← ωx / ωy
-```
-
-#### flat vs rough intentional difference
-
-`black-flat` 的 `lin_vel_z` 采用 legacy 的 **terrain-level-0** 分支：
-
-```text
-reward = v_z²
-```
-
-legacy 在 rough terrain 下还有一层地形系数：
-
-```text
-terrain_levels > 0 → ×0.1
-```
-
-该系数依赖 terrain level state，属于 `black-rough` 阶段，本 task 不引入。
-这是有意的 task specialization，不是遗漏。
-
-### 11.3 Orientation
-
-沿用 MjLab native term key，但 math 换成 legacy 语义：
-
-```text
-term key:
+    raw = ω_x² + ω_y²                               body-frame root
 upright
-
-func:
-orientation_l1
-
-raw:
-|projected_gravity_b.x| + |projected_gravity_b.y|
-
-weight:
--0.8
-```
-
-- 取 body-frame root projected gravity（``asset.data.projected_gravity_b``），
-  不用 Euler 角、不用世界系 gravity、不用 IMU site / terrain normal；
-- raw 是非负 L1 penalty magnitude（upright 时为 0），负号由 weight 负责；
-- 不含 `std`、`terrain_sensor_names`、trunk body selector。
-
-与 MjLab native `upright` 的差异：native 是 `exp(-Σg_xy²/std²)` 的**正奖励**
-（upright 时 raw = 1），legacy 是 L1 **惩罚**（upright 时 raw = 0），不存在
-`weight + std` 组合使二者全局等价，因此必须替换 math。实测同一姿态下
-roll 20° + pitch -36°：legacy raw 0.864485 vs native 0.121205。
-
-来源与地形依赖：
-
-```text
-uses 2026-07-03 reward lineage (super-dog 68f1c1c)
-orientation weight = -0.8
-terrain_adaptive orientation disabled
-no terrain dependency in current contract
-```
-
-legacy `_reward_orientation` 还有一层 pitch-only 的 terrain-adaptive decay scale；
-在选定的 baseline 中 `terrain_adaptive.enabled = False`（其 orientation 子开关也
-为 False），decay scale 恒为 1，因此当前 active behavior 就是纯 L1。
-若 `black-rough` 阶段需要重新启用，应作为独立设计决策，不在本 task 引入。
-
-### 11.4 Base height
-
-MjLab velocity baseline 没有对应 term，本轮新增 key（追加在 reward dict 末尾）：
-
-```text
-term:
+    raw = g_x² + g_y²                               body-frame projected gravity
 base_height
-
-func:
-base_height_l1_flat
-
-raw:
-|root_link_pos_w.z - 0.43|
-
-weight:
--1.0
+    raw = (root_link_pos_w.z - 0.43)²               flat：world z 即离地高度
+dof_acc
+    raw = Σ((q̇_prev - q̇) / step_dt)²               control step 有限差分
+joint_power
+    raw = Σ|q̇| · |τ|                               τ 取 qfrc_actuator（关节空间）
+action_rate_l2
+    raw = Σ(a_t - a_{t-1})²
+smoothness
+    raw = Σ(a_t - 2a_{t-1} + a_{t-2})²
 ```
 
-source 与 task specialization：
+实现归属：
 
 ```text
-base_height_target = 0.43        （legacy 2026-07-03 lineage，super-dog 68f1c1c）
-base_height weight = -1.0
-state source      = asset.data.root_link_pos_w[:, 2]（root world z）
-
-black-flat specialization:
-plane terrain at world z = 0  →  world z 就是离地高度
-no terrain sensor required
-legacy rough ground-relative height semantics deferred to black-rough
+native（与 HIMLoco 严格等价）:
+    flat_orientation_l2 / action_rate_l2 / action_acc_l2
+task-local（native 不等价或缺失）:
+    track_linear_velocity_xy / track_angular_velocity_z /
+    vertical_linear_velocity_l2 / angular_velocity_xy_l2 /
+    base_height_l2_flat / joint_power_l1 / dof_acc_l2（stateful class term）
 ```
 
-legacy `_reward_base_height` 为 `|_get_base_heights() - target|`，其
-`_get_base_heights()` 在 `mesh_type == 'plane'` 时直接返回 `root_states[:, 2]`，
-因此 flat 下不需要任何地形采样；heightfield / trimesh 的 ground-relative 语义属于
-`black-rough` 阶段。函数名显式带 `flat`，避免 rough task 误用。
+不再使用的实现：`orientation_l1`（Black 后期 shaping，非 HIMLoco 公式）、
+`base_height_l1_flat`（HIMLoco 为平方惩罚）。
 
-#### reset z 与 reward target 的差异（明确 contract，不是 bug）
+`upright` 与 native exp 版 `mdp.upright` 不是同一 contract：后者是
+`exp(-Σg_xy²/std²)` 的正奖励（upright 时 raw = 1），当前 contract 的 L2 惩罚在
+upright 时 raw = 0。
+
+`dof_acc` 使用 MuJoCo 瞬时 `qacc` 的 native `joint_acc_l2` 与 HIMLoco 的
+control-step 有限差分不等价，因此用 stateful class term 保存上一 step 的 q̇；
+reset 时把缓存置为当前 q̇（首个 step 差分为 0）。
+
+### 11.3 Not part of Black flat v1 baseline
+
+以下既不在表中，也不再用 zero-weight 占位（避免「看起来还在但不确定该不该用」）：
 
 ```text
-reset / default root z = 0.45      episode 初始 root pose
-base-height reward target = 0.43   reward 期望的运行高度
+MjLab-only shaping（原 MjLab velocity baseline）:
+    pose / angular_momentum / dof_pos_limits / air_time /
+    foot_clearance / foot_swing_height / foot_slip / soft_landing
+
+super-dog 自定义 shaping（未采用，来源仍可在 super-dog 查看）:
+    hip_pos / feet_spacing / raibert / stand rewards（stand_still /
+    stand_torque_balance / stand_feet_force_balance）/ collision /
+    foot_impact_vel / gait phase shaping（trot）/ all_joint_pos /
+    progress / feet_air_time / feet_stumble / foot_slip /
+    termination reward / torques / dof_vel / dof_pos_limits /
+    dof_vel_limits / torque_limits / terrain-adaptive reward shaping
 ```
 
-两者职责不同，intentionally not forced to match；reset 瞬间 raw penalty 约为
-`|0.45 - 0.43| = 0.02`。
+foot_clearance 特别说明：HIMLoco 官方 Go1 有 `foot_clearance = -0.01`，但三家公式
+互不相同（HIMLoco：body-frame foot z 误差² × body-frame 横向速度；MjLab native：
+terrain-relative 高度误差 × world-frame 横向速度；Black 后期：phase / terrain
+adaptive），因此本轮有意不采用任何一种。这是 baseline simplification，不是遗漏。
+
+采用这些项需要新的 behavior unit 与明确动机。
 
 ------
 
 ## 12. In Progress
 
-当前下一行为单元：
+Black flat reward migration：
 
 ```text
-Black reward migration:
-stand_still reward
+COMPLETE
 ```
 
-legacy `stand_still`（2026-07-03 lineage 为 -0.8）只在静止命令下惩罚关节偏离，
-属于 command-gated reward；同时 legacy 还有 `stand_torque_balance` /
-`stand_feet_force_balance`（同属于 stand 系列，但需要左右配对索引与接触力），
-是否纳入同一 behavior unit 需先确认。本单元只处理 stand_still，不顺手迁
-`pose` / action regularization。
+当前 reward baseline 已冻结为 §11 的 10 项，train / play 共用同一 contract。
+
+下一阶段：
+
+```text
+Black flat domain randomization
+```
+
+进入 DR 前先比较 legacy 与当前 MjLab 的 friction / payload / COM / link mass /
+motor strength / Kp-Kd / initial state / inertia / disturbance / push /
+action delay / encoder bias。
 
 ------
 
@@ -873,19 +811,10 @@ legacy `stand_still`（2026-07-03 lineage 为 -0.8）只在静止命令下惩罚
 
 ### Reward
 
-旧 Black reward 已完成迁移：tracking 组、base motion stability（`lin_vel_z`、
-`body_ang_vel`）、orientation（`upright`）与 base height（见 §11）。
+Black flat v1 reward baseline 已完成并冻结（10 项，见 §11）。不再有「待迁移 reward」。
 
-尚未迁移：
-
-```text
-stand_still
-→ action / joint penalties
-→ foot / gait rewards
-→ termination reward
-```
-
-不要一次迁全部 reward。
+super-dog 的自定义 shaping 与 MjLab-only 项均未采用（见 §11.3）；若日后因训练问题
+需要重新引入，必须作为新的 behavior unit 提出，先说明动机与失败现象。
 
 ------
 
@@ -995,13 +924,17 @@ actor joint order
 
 actor scaling/noise
 
+reward table（10 项 term / func / weight / params，无 zero-weight 占位）
+
 tracking reward formula / invariance / dt scaling
 
 base motion stability penalty（v_z² / ω_xy²）formula / invariance / 与 tracking 的解耦
 
-orientation penalty（L1）formula / 单轴 tilt / 对称性 / yaw invariance / native 语义差异
+orientation penalty（L2）formula / 单轴 tilt / 对称性 / yaw invariance / native exp 语义差异
 
-base height penalty（L1）formula / target-above-below / XY·orientation·velocity invariance / 无新增 sensor
+base height penalty（L2）formula / target-above-below / XY·orientation·velocity invariance / 无地形依赖
+
+regularization 组（dof_acc 有限差分 / joint_power / action_rate / smoothness）解析值与 dt 缩放
 
 last_action mapping
 
@@ -1061,7 +994,7 @@ CUDA PASS/FAIL/SKIPPED
 2. MjLab command curriculum仍会改变训练后期 command ranges，因此当前“初始 command contract”不等于完整 curriculum contract。该行为已在本地验证中显式记录：`params.py` 的 `BLACK_COMMAND_*_RANGE` 是初始值，首次 reset 后 `command_vel` curriculum 会把 `ang_vel_z` 改写成 `[-0.5, 0.5]`。
 3. 当前 actor contract已经固定，但 critic仍属于 MjLab baseline，后续 HIM阶段不能将其误认为旧 Black privileged observation。
 4. 当前 `algorithms/him/` 中可能仍存在 Black-specific hardcoded dimensions。HIM阶段必须清理，不在当前 Black PPO阶段提前修改。
-5. Legacy Black reward 存在两个版本：当前 `black_config.py` / `black_env.py`（HEAD，含 2026-07-15 的 `1f344d9` 覆盖式同步）与 2026-06-29~07-03 的日志 lineage。**reward migration 以 2026-07-03 lineage（`68f1c1c`）为准**；`1f344d9` 不作为 reward migration authority——它同时改动了 reward / command / DR / terrain / termination / PPO，且没有对应的 reward 决策记录，故不作为迁移依据。这是迁移 source decision，不是对该提交作者意图的事实断言。已按 `68f1c1c` 迁移：`tracking_lin_vel` 2.0、`tracking_ang_vel` 1.5（两版本来就一致）、`lin_vel_z` -2.0、`ang_vel_xy` -0.05。其余项（`stand_still`、`action_rate`、`smoothness`、`dof_acc`、`joint_power`、`foot_impact_vel`、`collision`、`feet_stumble`、`feet_air_time`、`foot_clearance`、`dof_pos_limits`、`torque_limits`、`trot`、`hip_pos`、`all_joint_pos`、`foot_slip`、`progress`、`raibert`、`termination`）均需在各自 behavior unit 开始前按该 lineage 逐项落地。
+5. Legacy Black reward 存在两个版本：当前 `black_config.py` / `black_env.py`（HEAD，含 2026-07-15 的 `1f344d9` 覆盖式同步）与 2026-06-29~07-03 的日志 lineage。Black flat v1 的 reward authority 不再取二者之一：核心公式改用 InternRobotics/HIMLoco 官方 Go1 baseline，机器人数值取 Black intrinsic（见 §11.0）；`68f1c1c` 只作为 optional shaping / 历史调参 / sim2real 诊断参考。`1f344d9` 不作为迁移依据（它同时改动 reward / command / DR / terrain / termination / PPO 且无对应决策记录），这是迁移 source decision，不是对该提交作者意图的事实断言。`super-dog` 的 shaping 项若日后需要启用，须先确认取哪一版。
 
 ------
 
@@ -1071,8 +1004,7 @@ CUDA PASS/FAIL/SKIPPED
 
 ```text
 1. stuck termination            （完成）
-2. reward migration             （进行中：tracking + lin_vel_z/body_ang_vel + orientation
-                                    + base_height 完成，stand_still 待开始）
+2. reward migration             （完成：Black flat v1 reward baseline = 10 项，见 §11）
 3. domain randomization
 4. command curriculum
 5. Black flat final PPO verification

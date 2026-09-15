@@ -84,34 +84,37 @@ BLACK_STUCK_GRACE_S = 1.0
 # ---------------------------------------------------------------------------
 # Reward — tracking
 # ---------------------------------------------------------------------------
-# 指数速度跟踪。sigma 直接是 legacy 的 tracking_sigma（denominator 不是 sigma²）。
+# 指数速度跟踪。sigma 即 HIMLoco tracking_sigma（作 denominator，不是 sigma²）。
 
 BLACK_TRACKING_SIGMA = 0.25
-BLACK_TRACKING_LINEAR_WEIGHT = 2.0
-BLACK_TRACKING_ANGULAR_WEIGHT = 1.5
+BLACK_TRACKING_LINEAR_WEIGHT = 1.0
+BLACK_TRACKING_ANGULAR_WEIGHT = 0.5
 
 # ---------------------------------------------------------------------------
-# Reward — base motion stability
+# Reward — base stability
 # ---------------------------------------------------------------------------
-# 与 tracking 解耦的两个 penalty：lin_vel_z 罚 body-frame v_z²，
-# body_ang_vel 罚 body-frame ω_x² + ω_y²。
+# lin_vel_z     罚 body-frame root v_z²
+# body_ang_vel  罚 body-frame root ω_x² + ω_y²
+# upright       罚 body-frame projected gravity 的 xy L2（g_x² + g_y²）
+# base_height   罚 (root world z - target)²，flat task 下 world z 即离地高度
+# 注意 base height target 与 reset / default root 高度 0.45 m 是两个不同职责的值。
 
 BLACK_LIN_VEL_Z_WEIGHT = -2.0
 BLACK_ANG_VEL_XY_WEIGHT = -0.05
-
-# ---------------------------------------------------------------------------
-# Reward — orientation
-# ---------------------------------------------------------------------------
-# 姿态 L1 惩罚的权重（raw = |g_x^b| + |g_y^b|）。
-# legacy 的 terrain-adaptive pitch scaling 在当前 baseline 中关闭，故无自适应参数。
-
-BLACK_ORIENTATION_WEIGHT = -0.8
-
-# ---------------------------------------------------------------------------
-# Reward — base height
-# ---------------------------------------------------------------------------
-# flat task 的期望 root 高度（world z，地面为 z = 0）与 L1 惩罚权重。
-# 注意：这与 reset / default root 高度 0.45 m 是两个不同职责的值，不去对齐。
+BLACK_ORIENTATION_WEIGHT = -0.2
 
 BLACK_BASE_HEIGHT_TARGET = 0.43
 BLACK_BASE_HEIGHT_WEIGHT = -1.0
+
+# ---------------------------------------------------------------------------
+# Reward — regularization
+# ---------------------------------------------------------------------------
+# dof_acc       罚 control step 关节速度有限差分的平方（Σ((q̇_prev - q̇)/dt)²）
+# joint_power   罚 Σ|q̇|·|τ|
+# action_rate   罚 Σ(a_t - a_{t-1})²
+# smoothness    罚 Σ(a_t - 2a_{t-1} + a_{t-2})²
+
+BLACK_DOF_ACC_WEIGHT = -2.5e-7
+BLACK_JOINT_POWER_WEIGHT = -2e-5
+BLACK_ACTION_RATE_WEIGHT = -0.01
+BLACK_SMOOTHNESS_WEIGHT = -0.01
