@@ -98,3 +98,11 @@ BLACK_TRACKING_ANGULAR_WEIGHT = 1.5
 
 BLACK_LIN_VEL_Z_WEIGHT = -2.0
 BLACK_ANG_VEL_XY_WEIGHT = -0.05
+
+# ---------------------------------------------------------------------------
+# Reward — orientation
+# ---------------------------------------------------------------------------
+# 姿态 L1 惩罚的权重（raw = |g_x^b| + |g_y^b|）。
+# legacy 的 terrain-adaptive pitch scaling 在当前 baseline 中关闭，故无自适应参数。
+
+BLACK_ORIENTATION_WEIGHT = -0.8

@@ -705,7 +705,6 @@ training / play 共用同一 contract。
 未迁移（仍为 MjLab baseline）：
 
 ```text
-orientation / upright
 base_height
 pose / stand_still
 action_rate_l2 / smoothness
@@ -762,6 +761,48 @@ terrain_levels > 0 → ×0.1
 该系数依赖 terrain level state，属于 `black-rough` 阶段，本 task 不引入。
 这是有意的 task specialization，不是遗漏。
 
+### 11.3 Orientation
+
+沿用 MjLab native term key，但 math 换成 legacy 语义：
+
+```text
+term key:
+upright
+
+func:
+orientation_l1
+
+raw:
+|projected_gravity_b.x| + |projected_gravity_b.y|
+
+weight:
+-0.8
+```
+
+- 取 body-frame root projected gravity（``asset.data.projected_gravity_b``），
+  不用 Euler 角、不用世界系 gravity、不用 IMU site / terrain normal；
+- raw 是非负 L1 penalty magnitude（upright 时为 0），负号由 weight 负责；
+- 不含 `std`、`terrain_sensor_names`、trunk body selector。
+
+与 MjLab native `upright` 的差异：native 是 `exp(-Σg_xy²/std²)` 的**正奖励**
+（upright 时 raw = 1），legacy 是 L1 **惩罚**（upright 时 raw = 0），不存在
+`weight + std` 组合使二者全局等价，因此必须替换 math。实测同一姿态下
+roll 20° + pitch -36°：legacy raw 0.864485 vs native 0.121205。
+
+来源与地形依赖：
+
+```text
+uses 2026-07-03 reward lineage (super-dog 68f1c1c)
+orientation weight = -0.8
+terrain_adaptive orientation disabled
+no terrain dependency in current contract
+```
+
+legacy `_reward_orientation` 还有一层 pitch-only 的 terrain-adaptive decay scale；
+在选定的 baseline 中 `terrain_adaptive.enabled = False`（其 orientation 子开关也
+为 False），decay scale 恒为 1，因此当前 active behavior 就是纯 L1。
+若 `black-rough` 阶段需要重新启用，应作为独立设计决策，不在本 task 引入。
+
 ------
 
 ## 12. In Progress
@@ -770,12 +811,13 @@ terrain_levels > 0 → ×0.1
 
 ```text
 Black reward migration:
-orientation reward
+base_height reward
 ```
 
-legacy `orientation`（weight -0.8）与 MjLab `upright`（weight 1.0）公式不同：
-legacy 是 `|roll| + |pitch|·adaptive`，MjLab 是 `exp(-Σg_xy²/std²)`。
-本单元只处理 orientation，不顺手迁 `base_height` / `stand_still`。
+legacy `base_height`（weight -1.0）惩罚 `|base_height - 0.43|`，依赖 base height
+测量（``_get_base_heights``）；MjLab velocity baseline 没有对应 term，需要先确认
+高度参考（默认 root 高度 vs terrain 高度）再实现。本单元只处理 `base_height`，
+不顺手迁 `stand_still` / `pose`。
 
 ------
 
@@ -785,13 +827,12 @@ legacy 是 `|roll| + |pitch|·adaptive`，MjLab 是 `exp(-Σg_xy²/std²)`。
 
 ### Reward
 
-旧 Black reward 已完成迁移：tracking 组与**部分** stability 组（`lin_vel_z`、
-`body_ang_vel`，见 §11）。
+旧 Black reward 已完成迁移：tracking 组、base motion stability（`lin_vel_z`、
+`body_ang_vel`）与 orientation（`upright`，见 §11）。
 
 尚未迁移：
 
 ```text
-orientation
 base_height
 stand_still
 → action / joint penalties
@@ -913,6 +954,8 @@ tracking reward formula / invariance / dt scaling
 
 base motion stability penalty（v_z² / ω_xy²）formula / invariance / 与 tracking 的解耦
 
+orientation penalty（L1）formula / 单轴 tilt / 对称性 / yaw invariance / native 语义差异
+
 last_action mapping
 
 contact sensors
@@ -971,7 +1014,7 @@ CUDA PASS/FAIL/SKIPPED
 2. MjLab command curriculum仍会改变训练后期 command ranges，因此当前“初始 command contract”不等于完整 curriculum contract。该行为已在本地验证中显式记录：`params.py` 的 `BLACK_COMMAND_*_RANGE` 是初始值，首次 reset 后 `command_vel` curriculum 会把 `ang_vel_z` 改写成 `[-0.5, 0.5]`。
 3. 当前 actor contract已经固定，但 critic仍属于 MjLab baseline，后续 HIM阶段不能将其误认为旧 Black privileged observation。
 4. 当前 `algorithms/him/` 中可能仍存在 Black-specific hardcoded dimensions。HIM阶段必须清理，不在当前 Black PPO阶段提前修改。
-5. Legacy Black reward 存在两个版本：当前 `black_config.py` / `black_env.py`（HEAD，含 2026-07-15 的 `1f344d9` 覆盖式同步）与 2026-06-29~07-03 的日志 lineage。**reward migration 以 2026-07-03 lineage（`68f1c1c`）为准**；`1f344d9` 不作为 reward migration authority——它同时改动了 reward / command / DR / terrain / termination / PPO，且没有对应的 reward 决策记录，故不作为迁移依据。这是迁移 source decision，不是对该提交作者意图的事实断言。已按 `68f1c1c` 迁移：`tracking_lin_vel` 2.0、`tracking_ang_vel` 1.5（两版本来就一致）、`lin_vel_z` -2.0、`ang_vel_xy` -0.05。其余项（`orientation`、`base_height`、`stand_still`、`action_rate`、`smoothness`、`dof_acc`、`joint_power`、`foot_impact_vel`、`collision`、`feet_stumble`、`feet_air_time`、`foot_clearance`、`dof_pos_limits`、`torque_limits`、`trot`、`hip_pos`、`all_joint_pos`、`foot_slip`、`progress`、`raibert`、`termination`）均需在各自 behavior unit 开始前按该 lineage 逐项落地。
+5. Legacy Black reward 存在两个版本：当前 `black_config.py` / `black_env.py`（HEAD，含 2026-07-15 的 `1f344d9` 覆盖式同步）与 2026-06-29~07-03 的日志 lineage。**reward migration 以 2026-07-03 lineage（`68f1c1c`）为准**；`1f344d9` 不作为 reward migration authority——它同时改动了 reward / command / DR / terrain / termination / PPO，且没有对应的 reward 决策记录，故不作为迁移依据。这是迁移 source decision，不是对该提交作者意图的事实断言。已按 `68f1c1c` 迁移：`tracking_lin_vel` 2.0、`tracking_ang_vel` 1.5（两版本来就一致）、`lin_vel_z` -2.0、`ang_vel_xy` -0.05。其余项（`base_height`、`stand_still`、`action_rate`、`smoothness`、`dof_acc`、`joint_power`、`foot_impact_vel`、`collision`、`feet_stumble`、`feet_air_time`、`foot_clearance`、`dof_pos_limits`、`torque_limits`、`trot`、`hip_pos`、`all_joint_pos`、`foot_slip`、`progress`、`raibert`、`termination`）均需在各自 behavior unit 开始前按该 lineage 逐项落地。
 
 ------
 
@@ -981,7 +1024,8 @@ CUDA PASS/FAIL/SKIPPED
 
 ```text
 1. stuck termination            （完成）
-2. reward migration             （进行中：tracking + lin_vel_z/body_ang_vel 完成，orientation 待开始）
+2. reward migration             （进行中：tracking + lin_vel_z/body_ang_vel + orientation 完成，
+                                    base_height 待开始）
 3. domain randomization
 4. command curriculum
 5. Black flat final PPO verification
