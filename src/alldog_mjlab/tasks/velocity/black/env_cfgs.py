@@ -5,6 +5,7 @@ import math
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
+from mjlab.envs.mdp.events import reset_joints_by_offset
 from mjlab.managers import TerminationTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import (
@@ -94,6 +95,18 @@ BLACK_ROOT_RESET_VELOCITY_RANGE: dict[str, tuple[float, float]] = {
     "pitch": (-0.5, 0.5),
     "yaw": (-0.5, 0.5),
 }
+
+# Joint reset contract：以 default joint pose 为均值的对称 offset 采样，joint 速度不随机。
+# 三个分组的 offset 范围均完全落在 MjLab soft joint limits 内（不依赖 clamp）：
+#   hip   保持 default（offset 0）；
+#   thigh 保持 ±0.4007 = 0.8014 × 0.5（default magnitude 的一半）；
+#   calf  取 ±0.5945，使左右 calf 的 support（default ± 0.5945）都不超出 soft limits。
+BLACK_JOINT_RESET_POSITION_RANGE: dict[str, tuple[float, float]] = {
+    "hip": (0.0, 0.0),
+    "thigh": (-0.4007, 0.4007),
+    "calf": (-0.5945, 0.5945),
+}
+BLACK_JOINT_RESET_VELOCITY_RANGE: tuple[float, float] = (0.0, 0.0)
 
 
 def black_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
@@ -205,6 +218,25 @@ def black_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     reset_base = cfg.events["reset_base"]
     reset_base.params["pose_range"] = dict(BLACK_ROOT_RESET_POSE_RANGE)
     reset_base.params["velocity_range"] = dict(BLACK_ROOT_RESET_VELOCITY_RANGE)
+
+    # Joint reset contract：把单一的全机器人 joint reset 拆为 hip / thigh / calf
+    # 三个选择器互不重叠的 native reset event（event 执行顺序不影响结果）。
+    base_joint_reset = cfg.events.pop("reset_robot_joints")
+    assert base_joint_reset.func is reset_joints_by_offset
+    for joint_group, position_range in BLACK_JOINT_RESET_POSITION_RANGE.items():
+        cfg.events[f"reset_{joint_group}_joints"] = replace(
+            base_joint_reset,
+            params={
+                "position_range": position_range,
+                "velocity_range": BLACK_JOINT_RESET_VELOCITY_RANGE,
+                "asset_cfg": SceneEntityCfg(
+                    "robot",
+                    joint_names=tuple(
+                        f"{leg}_{joint_group}_joint" for leg in BLACK_FOOT_NAMES
+                    ),
+                ),
+            },
+        )
     cfg.events["base_com"].params["asset_cfg"] = SceneEntityCfg(
         "robot",
         body_names=("trunk",),
