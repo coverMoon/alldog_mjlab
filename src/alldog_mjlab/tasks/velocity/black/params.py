@@ -106,3 +106,12 @@ BLACK_ANG_VEL_XY_WEIGHT = -0.05
 # legacy 的 terrain-adaptive pitch scaling 在当前 baseline 中关闭，故无自适应参数。
 
 BLACK_ORIENTATION_WEIGHT = -0.8
+
+# ---------------------------------------------------------------------------
+# Reward — base height
+# ---------------------------------------------------------------------------
+# flat task 的期望 root 高度（world z，地面为 z = 0）与 L1 惩罚权重。
+# 注意：这与 reset / default root 高度 0.45 m 是两个不同职责的值，不去对齐。
+
+BLACK_BASE_HEIGHT_TARGET = 0.43
+BLACK_BASE_HEIGHT_WEIGHT = -1.0

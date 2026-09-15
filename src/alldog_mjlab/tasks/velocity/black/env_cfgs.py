@@ -33,6 +33,8 @@ from alldog_mjlab.robots.black.black_constants import (
 from alldog_mjlab.tasks.velocity.black.params import (
     BLACK_ACTOR_OBS_NOISE,
     BLACK_ANG_VEL_XY_WEIGHT,
+    BLACK_BASE_HEIGHT_TARGET,
+    BLACK_BASE_HEIGHT_WEIGHT,
     BLACK_COMMAND_ANG_VEL_Z_RANGE,
     BLACK_COMMAND_LIN_VEL_X_RANGE,
     BLACK_COMMAND_LIN_VEL_Y_RANGE,
@@ -55,6 +57,7 @@ from alldog_mjlab.tasks.velocity.black.params import (
 )
 from alldog_mjlab.tasks.velocity.black.rewards import (
     angular_velocity_xy_l2,
+    base_height_l1_flat,
     orientation_l1,
     track_angular_velocity_z,
     track_linear_velocity_xy,
@@ -327,6 +330,16 @@ def _configure_rewards(cfg: ManagerBasedRlEnvCfg) -> None:
         r".*_thigh_joint": 0.3,
         r".*_calf_joint": 0.6,
     }
+
+    # Base height：MjLab velocity baseline 没有对应 term，因此新增 key（追加在末尾，
+    # 不重排已有 reward dict）。flat task 下 world z 就是离地高度。
+    cfg.rewards["base_height"] = RewardTermCfg(
+        func=base_height_l1_flat,
+        weight=BLACK_BASE_HEIGHT_WEIGHT,
+        params={
+            "target_height": BLACK_BASE_HEIGHT_TARGET,
+        },
+    )
 
 
 def _configure_flat_terrain(cfg: ManagerBasedRlEnvCfg) -> None:
