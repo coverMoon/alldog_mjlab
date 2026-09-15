@@ -56,3 +56,30 @@ def track_angular_velocity_z(
     actual = asset.data.root_link_ang_vel_b
     error = torch.square(command[:, 2] - actual[:, 2])
     return torch.exp(-error / sigma)
+
+
+def vertical_linear_velocity_l2(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """惩罚 body-frame root 竖直线速度：``v_z²``。
+
+    black-flat 采用 legacy 的 terrain-level-0 分支（仅 ``v_z²``，无地形系数）；
+    legacy ``terrain_levels > 0 → ×0.1`` 属于 black-rough 阶段，不在本 task 引入。
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    return torch.square(asset.data.root_link_lin_vel_b[:, 2])
+
+
+def angular_velocity_xy_l2(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """惩罚 body-frame root 的 roll / pitch 角速度：``ω_x² + ω_y²``。
+
+    MjLab native ``body_angular_velocity_penalty`` 读的是 world-frame body 角速度，
+    与 legacy 的 body-frame root 角速度不是同一 contract，因此这里单独实现。
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    angular_velocity_xy = asset.data.root_link_ang_vel_b[:, :2]
+    return torch.sum(torch.square(angular_velocity_xy), dim=1)
