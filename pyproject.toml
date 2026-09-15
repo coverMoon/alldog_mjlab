@@ -1,5 +1,5 @@
 [project]
-name = "nwwolf-mjlab"
+name = "alldog-mjlab"
 version = "0.1.0"
 description = "XJTUROBOCON 四足组 机器人强化学习训练仓库"
 readme = "README.md"
@@ -16,4 +16,4 @@ requires = ["uv_build>=0.12.5,<0.13.0"]
 build-backend = "uv_build"
 
 [project.entry-points."mjlab.tasks"]
-nwwolf_mjlab = "nwwolf_mjlab"
+alldog_mjlab = "alldog_mjlab"

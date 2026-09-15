@@ -14,7 +14,7 @@ register_mjlab_task(
 )
 from .him.env_cfg import black_him_env_cfg
 from .him.rl_cfg import runner_cfg
-from nwwolf_mjlab.algorithms.him.runner import HIMRunner
+from alldog_mjlab.algorithms.him.runner import HIMRunner
 
 for _rough in (False, True):
     register_mjlab_task(

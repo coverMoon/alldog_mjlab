@@ -6,7 +6,7 @@ from mjlab.actuator import IdealPdActuatorCfg
 from mjlab.actuator.pd_actuator import IdealPdActuator, pd_torque
 from mjlab.envs.mdp.actions.actions import JointPositionAction, JointPositionActionCfg
 from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
-from nwwolf_mjlab.robots.black.black_constants import get_spec
+from alldog_mjlab.robots.black.black_constants import get_spec
 from .source_config import BlackCfg
 
 LEGS = ("FL", "FR", "RR", "RL")

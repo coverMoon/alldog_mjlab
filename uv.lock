@@ -1607,7 +1607,7 @@ wheels = [
 ]
 
 [[package]]
-name = "nwwolf-mjlab"
+name = "alldog-mjlab"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

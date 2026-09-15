@@ -12,7 +12,7 @@ wheels/
 tests/
 
 # 未开源机器人结构 mesh 文件（XML 保留，mesh 不上传）
-src/nwwolf_mjlab/robots/black/xmls/assets/
+src/alldog_mjlab/robots/black/xmls/assets/
 
 # VSCode C/C++ 插件浏览数据库（缓存文件，体积巨大）
 .vscode/

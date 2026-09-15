@@ -19,8 +19,8 @@ from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 from mjlab.utils.noise import UniformNoiseCfg
 
-from nwwolf_mjlab.robots.black import BLACK_ACTION_SCALE, get_black_robot_cfg
-from nwwolf_mjlab.robots.black.black_constants import (
+from alldog_mjlab.robots.black import BLACK_ACTION_SCALE, get_black_robot_cfg
+from alldog_mjlab.robots.black.black_constants import (
     BLACK_FOOT_NAMES,
     BLACK_JOINT_NAMES,
 )
