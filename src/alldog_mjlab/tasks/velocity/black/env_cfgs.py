@@ -25,6 +25,7 @@ from alldog_mjlab.robots.black.black_constants import (
     BLACK_FOOT_NAMES,
     BLACK_JOINT_NAMES,
 )
+from alldog_mjlab.tasks.velocity.black.terminations import StuckTermination
 
 # Policy action term 顺序 contract：ActionManager 按 dict 插入顺序切分
 # flat policy action，因此必须由此显式顺序驱动构造，不能依赖字面 dict 写法。
@@ -107,6 +108,14 @@ BLACK_JOINT_RESET_POSITION_RANGE: dict[str, tuple[float, float]] = {
     "calf": (-0.5945, 0.5945),
 }
 BLACK_JOINT_RESET_VELOCITY_RANGE: tuple[float, float] = (0.0, 0.0)
+
+# Stuck termination contract：planar command 有效（norm > 0.2 m/s）且沿该指令方向的
+# progress speed 持续低于 0.05 m/s 时终止，grace 期内不计时。计时以 control step
+# 时长累计，阈值单位为秒。
+BLACK_STUCK_TIMEOUT_S = 4.0
+BLACK_STUCK_VELOCITY_THRESHOLD = 0.05
+BLACK_STUCK_COMMAND_THRESHOLD = 0.2
+BLACK_STUCK_GRACE_S = 1.0
 
 
 def black_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
@@ -331,6 +340,19 @@ def black_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         params={
             "sensor_name": BLACK_ILLEGAL_CONTACT_SENSOR,
             "force_threshold": BLACK_ILLEGAL_CONTACT_FORCE_THRESHOLD,
+        },
+    )
+    # Stuck termination：沿 planar command 方向无 progress 的连续时长超过阈值。
+    # stateful，因此用 class-based term 而非 mdp 函数。
+    cfg.terminations["stuck"] = TerminationTermCfg(
+        func=StuckTermination,
+        params={
+            "command_name": "twist",
+            "asset_cfg": SceneEntityCfg("robot"),
+            "command_threshold": BLACK_STUCK_COMMAND_THRESHOLD,
+            "velocity_threshold": BLACK_STUCK_VELOCITY_THRESHOLD,
+            "grace_s": BLACK_STUCK_GRACE_S,
+            "timeout_s": BLACK_STUCK_TIMEOUT_S,
         },
     )
     cfg.terminations.pop("out_of_terrain_bounds", None)
