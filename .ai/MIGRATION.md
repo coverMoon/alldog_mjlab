@@ -56,6 +56,8 @@ Black 当前主要 task config：
 
 ```text
 src/alldog_mjlab/tasks/velocity/black/env_cfgs.py
+src/alldog_mjlab/tasks/velocity/black/rewards.py
+src/alldog_mjlab/tasks/velocity/black/terminations.py
 src/alldog_mjlab/tasks/velocity/black/rl_cfg.py
 ```
 
@@ -339,6 +341,7 @@ Critic observation仍然沿用当前 MjLab privileged observation设计，尚未
 ```text
 time_out
 illegal_contact
+stuck
 ```
 
 ### 6.1 Timeout
@@ -410,6 +413,28 @@ out_of_terrain_bounds
 ```
 
 flat task 不使用 orientation-based fall termination。
+
+### 6.3 Stuck
+
+```text
+command xy norm > 0.2
+progress_speed < 0.05
+grace > 1.0 s
+continuous timer > 4.0 s
+```
+
+`progress_speed` 为 body-frame root 线速度在 commanded planar direction 上的投影；
+progress 恢复或 move command 失效时计时立即归零（连续计时）。
+
+实现：
+
+```text
+src/alldog_mjlab/tasks/velocity/black/terminations.py
+class StuckTermination(ManagerTermBase)
+```
+
+per-env timer（秒）由 class term 自己持有，经 `TerminationManager.reset()` 清零；
+不使用 event，不写入 env / runner。
 
 ------
 
@@ -614,77 +639,90 @@ sim.sense()
 
 ------
 
-## 11. In Progress
+## 11. Frozen Reward Contract
+
+### 11.1 Tracking
+
+`black-flat` 的 tracking 使用 task-local 实现：
+
+```text
+src/alldog_mjlab/tasks/velocity/black/rewards.py
+```
+
+term name 继续沿用 MjLab native 名称，只替换 func / weight / params：
+
+```text
+track_linear_velocity
+    func = track_linear_velocity_xy
+    reward = exp(-Σ(vx/vy 误差²) / sigma)
+    weight = 2.0
+    sigma = 0.25
+
+track_angular_velocity
+    func = track_angular_velocity_z
+    reward = exp(-(wz 误差²) / sigma)
+    weight = 1.5
+    sigma = 0.25
+```
+
+`sigma` 即 legacy `tracking_sigma`，denominator 不是 `sigma²`。
+
+不使用 MjLab native `track_*`：native 会把 `v_z²` / `ω_xy²` 并入同一个
+exponential，与 Black 的 tracking contract 不等价。
+
+只使用 raw command（`command_manager.get_command`）与 body-frame root 速度
+（`root_link_lin_vel_b` / `root_link_ang_vel_b`）。
+
+`dt` 缩放由 `RewardManager`（`scale_rewards_by_dt=True`）统一完成，reward 函数
+只返回 raw 值；legacy weight 可直接作为 MjLab weight。
+
+training / play 共用同一 contract。
+
+未迁移（仍为 MjLab baseline）：
+
+```text
+lin_vel_z
+ang_vel_xy
+orientation / upright
+base_height
+pose
+action_rate_l2
+smoothness (未实现)
+foot / gait rewards
+termination reward
+```
+
+------
+
+## 12. In Progress
 
 当前下一行为单元：
 
 ```text
-Black planar translational stuck termination
+Black reward migration:
+posture / stability group source decision
 ```
 
-旧 Black目标参数：
-
-```text
-command_threshold = 0.2 m/s
-progress_velocity_threshold = 0.05 m/s
-grace = 1.0 s
-continuous_stuck_timeout = 4.0 s
-```
-
-语义：
-
-```text
-只检测 planar linear command vx/vy
-
-progress_speed =
-dot(
-    body-frame root linear velocity xy,
-    normalized command xy
-)
-
-command magnitude <= 0.2:
-    timer reset
-
-progress_speed >= 0.05:
-    timer reset
-
-episode elapsed <= 1.0:
-    timer reset
-
-otherwise:
-    timer += control dt
-
-timer > 4.0:
-    terminate
-```
-
-计划使用：
-
-```text
-MjLab v1.6.0 class-based ManagerTerm
-```
-
-保存 per-env timer。
-
-不要把 timer放进 env/runner。
+该组包含 `orientation`、`lin_vel_z`、`ang_vel_xy`、`base_height`、`stand_still`，
+在开始实现前必须先决定 legacy 取 HEAD 还是 2026-06-29~07-03 日志状态。
 
 ------
 
-## 12. Deferred Black Flat Work
+## 13. Deferred Black Flat Work
 
 尚未迁移/冻结：
 
 ### Reward
 
-旧 Black reward 尚未系统迁移。
+旧 Black reward 只有 tracking 组已完成迁移（见 §11）。
 
-计划拆分：
+尚未迁移：
 
 ```text
-tracking
-→ posture/stability
-→ action/joint penalties
-→ foot/gait rewards
+posture / stability
+→ action / joint penalties
+→ foot / gait rewards
+→ termination reward
 ```
 
 不要一次迁全部 reward。
@@ -736,7 +774,7 @@ deferred
 
 ------
 
-## 13. Explicitly Not Started
+## 14. Explicitly Not Started
 
 以下均未开始，不得提前宣称支持：
 
@@ -762,7 +800,7 @@ blackw-rough
 
 ------
 
-## 14. Local Verification Baseline
+## 15. Local Verification Baseline
 
 本地：
 
@@ -797,11 +835,15 @@ actor joint order
 
 actor scaling/noise
 
+tracking reward formula / invariance / dt scaling
+
 last_action mapping
 
 contact sensors
 
 illegal-contact termination
+
+stuck termination
 
 root reset
 
@@ -845,7 +887,7 @@ CUDA PASS/FAIL/SKIPPED
 
 ------
 
-## 15. Known Risks
+## 16. Known Risks
 
 当前需要持续注意：
 
@@ -853,16 +895,17 @@ CUDA PASS/FAIL/SKIPPED
 2. MjLab command curriculum仍会改变训练后期 command ranges，因此当前“初始 command contract”不等于完整 curriculum contract。
 3. 当前 actor contract已经固定，但 critic仍属于 MjLab baseline，后续 HIM阶段不能将其误认为旧 Black privileged observation。
 4. 当前 `algorithms/him/` 中可能仍存在 Black-specific hardcoded dimensions。HIM阶段必须清理，不在当前 Black PPO阶段提前修改。
+5. Legacy Black reward 权威来源存在冲突：当前 `black_config.py` / `black_env.py`（HEAD）与 2026-06-29~07-03 的 Black 日志不一致，原因是 2026-07-15 的覆盖式同步提交（`1f344d9`）把配置回退到了 06-29 之前的状态（含 `terrain_adaptive`、`termination`、`trot`/`raibert`/`foot_slip`/`progress` 等自定义 shaping）。不得把当前 `black_config.py` 当作唯一 reward 权威；进入 posture/stability 组前必须先决定取哪一版。tracking 的 weight / sigma 不受该冲突影响，已独立迁移。
 
 ------
 
-## 16. Next Migration Order
+## 17. Next Migration Order
 
 当前严格顺序：
 
 ```text
-1. stuck termination
-2. reward migration
+1. stuck termination            （完成）
+2. reward migration             （进行中：tracking 完成，posture/stability 待开始）
 3. domain randomization
 4. command curriculum
 5. Black flat final PPO verification
@@ -876,7 +919,7 @@ CUDA PASS/FAIL/SKIPPED
 
 ------
 
-## 17. Update Rule
+## 18. Update Rule
 
 每完成一个 behavior unit：
 
