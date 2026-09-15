@@ -55,11 +55,35 @@ src/alldog_mjlab/algorithms/
 Black 当前主要 task config：
 
 ```text
+src/alldog_mjlab/tasks/velocity/black/params.py
 src/alldog_mjlab/tasks/velocity/black/env_cfgs.py
 src/alldog_mjlab/tasks/velocity/black/rewards.py
 src/alldog_mjlab/tasks/velocity/black/terminations.py
 src/alldog_mjlab/tasks/velocity/black/rl_cfg.py
 ```
+
+### Configuration layout
+
+```text
+params.py
+    人工调参入口：只放训练者预期会查看 / 调整的 numeric / range 参数
+    （command range、observation noise、reset range、termination 阈值、
+    已冻结 reward 的 weight / sigma）
+
+env_cfgs.py
+    MjLab task assembly + policy / task interface contract
+    （term 顺序、selector、observation scale、sensor 身份、与 native 的差异）
+
+rewards.py
+    Black 专用 reward math
+
+terminations.py
+    Black 专用 stateful termination math
+```
+
+`params.py` **不是**第二套 runtime config：MjLab `ManagerBasedRlEnvCfg` 仍是唯一
+runtime config，环境完全由 `env_cfgs.py` 组装，`params.py` 只是它的数值来源。
+interface contract 不得放进 `params.py`，否则会被误读成普通训练超参数。
 
 本地 migration verification：
 
@@ -944,7 +968,7 @@ CUDA PASS/FAIL/SKIPPED
 当前需要持续注意：
 
 1. MuJoCo / mjwarp contact sensor在深度 penetration 情况下观察过 `found` 存在但 force为0的现象。正常落地/趴地时 force可正常达到明显大于1 N。目前 illegal-contact threshold继续保持1 N，后续根据训练日志判断是否需要处理。
-2. MjLab command curriculum仍会改变训练后期 command ranges，因此当前“初始 command contract”不等于完整 curriculum contract。
+2. MjLab command curriculum仍会改变训练后期 command ranges，因此当前“初始 command contract”不等于完整 curriculum contract。该行为已在本地验证中显式记录：`params.py` 的 `BLACK_COMMAND_*_RANGE` 是初始值，首次 reset 后 `command_vel` curriculum 会把 `ang_vel_z` 改写成 `[-0.5, 0.5]`。
 3. 当前 actor contract已经固定，但 critic仍属于 MjLab baseline，后续 HIM阶段不能将其误认为旧 Black privileged observation。
 4. 当前 `algorithms/him/` 中可能仍存在 Black-specific hardcoded dimensions。HIM阶段必须清理，不在当前 Black PPO阶段提前修改。
 5. Legacy Black reward 存在两个版本：当前 `black_config.py` / `black_env.py`（HEAD，含 2026-07-15 的 `1f344d9` 覆盖式同步）与 2026-06-29~07-03 的日志 lineage。**reward migration 以 2026-07-03 lineage（`68f1c1c`）为准**；`1f344d9` 不作为 reward migration authority——它同时改动了 reward / command / DR / terrain / termination / PPO，且没有对应的 reward 决策记录，故不作为迁移依据。这是迁移 source decision，不是对该提交作者意图的事实断言。已按 `68f1c1c` 迁移：`tracking_lin_vel` 2.0、`tracking_ang_vel` 1.5（两版本来就一致）、`lin_vel_z` -2.0、`ang_vel_xy` -0.05。其余项（`orientation`、`base_height`、`stand_still`、`action_rate`、`smoothness`、`dof_acc`、`joint_power`、`foot_impact_vel`、`collision`、`feet_stumble`、`feet_air_time`、`foot_clearance`、`dof_pos_limits`、`torque_limits`、`trot`、`hip_pos`、`all_joint_pos`、`foot_slip`、`progress`、`raibert`、`termination`）均需在各自 behavior unit 开始前按该 lineage 逐项落地。
@@ -963,6 +987,12 @@ CUDA PASS/FAIL/SKIPPED
 5. Black flat final PPO verification
 6. Black sim2real/deployment contract
 7. Black rough PPO
+```
+
+已插入完成的非 behavior 任务：
+
+```text
+configuration readability / tuning refactor v1   （完成，behavior-neutral）
 ```
 
 进入每一步前重新检查实际代码和本文件。

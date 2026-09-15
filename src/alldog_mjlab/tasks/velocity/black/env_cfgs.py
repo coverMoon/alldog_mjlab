@@ -1,7 +1,12 @@
-"""Velocity task configurations for Black."""
+"""Black flat-ground velocity task 的 MjLab task assembly。
+
+本文件回答的是「task 是怎么组装的」：term 顺序 contract、selector 绑定、
+sensor 装配、与 MjLab native 配置的差异。
+训练者要调的具体数值在 params.py，reward 数学在 rewards.py，
+stateful termination 实现在 terminations.py。
+"""
 
 from dataclasses import replace
-import math
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
@@ -25,6 +30,28 @@ from alldog_mjlab.robots.black.black_constants import (
     BLACK_FOOT_NAMES,
     BLACK_JOINT_NAMES,
 )
+from alldog_mjlab.tasks.velocity.black.params import (
+    BLACK_ACTOR_OBS_NOISE,
+    BLACK_ANG_VEL_XY_WEIGHT,
+    BLACK_COMMAND_ANG_VEL_Z_RANGE,
+    BLACK_COMMAND_LIN_VEL_X_RANGE,
+    BLACK_COMMAND_LIN_VEL_Y_RANGE,
+    BLACK_COMMAND_RESAMPLING_TIME_RANGE,
+    BLACK_ILLEGAL_CONTACT_FORCE_THRESHOLD,
+    BLACK_ILLEGAL_CONTACT_HISTORY,
+    BLACK_JOINT_RESET_POSITION_RANGE,
+    BLACK_JOINT_RESET_VELOCITY_RANGE,
+    BLACK_LIN_VEL_Z_WEIGHT,
+    BLACK_ROOT_RESET_POSE_RANGE,
+    BLACK_ROOT_RESET_VELOCITY_RANGE,
+    BLACK_STUCK_COMMAND_THRESHOLD,
+    BLACK_STUCK_GRACE_S,
+    BLACK_STUCK_TIMEOUT_S,
+    BLACK_STUCK_VELOCITY_THRESHOLD,
+    BLACK_TRACKING_ANGULAR_WEIGHT,
+    BLACK_TRACKING_LINEAR_WEIGHT,
+    BLACK_TRACKING_SIGMA,
+)
 from alldog_mjlab.tasks.velocity.black.rewards import (
     angular_velocity_xy_l2,
     track_angular_velocity_z,
@@ -32,6 +59,10 @@ from alldog_mjlab.tasks.velocity.black.rewards import (
     vertical_linear_velocity_l2,
 )
 from alldog_mjlab.tasks.velocity.black.terminations import StuckTermination
+
+# ---------------------------------------------------------------------------
+# Interface contracts（不属于训练调参，勿当作超参数阅读）
+# ---------------------------------------------------------------------------
 
 # Policy action term 顺序 contract：ActionManager 按 dict 插入顺序切分
 # flat policy action，因此必须由此显式顺序驱动构造，不能依赖字面 dict 写法。
@@ -66,19 +97,8 @@ BLACK_ACTOR_OBS_SCALE: dict[str, float | tuple[float, ...]] = {
     "actions": 1.0,
 }
 
-# 各分量的 raw noise 幅值。MjLab v1.6.0 pipeline 为
-# compute → noise → clip → scale，故这里写加在 raw 值上的噪声：
-# 进入 policy 的最终幅值 = raw noise × scale，不要写成已乘过 scale 的值。
-BLACK_ACTOR_OBS_NOISE: dict[str, tuple[float, float]] = {
-    "base_ang_vel": (-0.3, 0.3),
-    "projected_gravity": (-0.05, 0.05),
-    "joint_pos": (-0.08, 0.08),
-    "joint_vel": (-2.0, 2.0),
-}
-
-# 摔倒终止 contract：trunk 或任一 thigh 与 terrain 接触，且接触力 > 1.0 N。
-# 不含 calf / foot / hip。history_length 取一个 control step 内的 physics substep 数
-# （sim dt 0.005 × decimation 4 = 0.02 s），用于捕获 step 中途出现的碰撞。
+# 摔倒终止 sensor 身份与 body selector：trunk + 四 thigh 对 terrain。
+# 不含 calf / foot / hip。
 BLACK_ILLEGAL_CONTACT_SENSOR = "illegal_ground_contact"
 BLACK_ILLEGAL_CONTACT_BODIES = (
     "trunk",
@@ -87,78 +107,35 @@ BLACK_ILLEGAL_CONTACT_BODIES = (
     "RL_thigh",
     "RR_thigh",
 )
-BLACK_ILLEGAL_CONTACT_FORCE_THRESHOLD = 1.0
-BLACK_ILLEGAL_CONTACT_HISTORY = 4
 
-# Root reset contract：pose 不随机（x/y/z/roll/pitch/yaw 均为 0 offset，
-# root 高度直接取 INIT_STATE.pos 的 0.45 m），root 六维速度独立均匀采样 [-0.5, 0.5]。
-# key 名称固定为 MjLab v1.6.0 的 SE(3) 轴名（velocity 也用 x/y/z/roll/pitch/yaw）。
-BLACK_ROOT_RESET_POSE_RANGE: dict[str, tuple[float, float]] = {}
-BLACK_ROOT_RESET_VELOCITY_RANGE: dict[str, tuple[float, float]] = {
-    "x": (-0.5, 0.5),
-    "y": (-0.5, 0.5),
-    "z": (-0.5, 0.5),
-    "roll": (-0.5, 0.5),
-    "pitch": (-0.5, 0.5),
-    "yaw": (-0.5, 0.5),
-}
-
-# Joint reset contract：以 default joint pose 为均值的对称 offset 采样，joint 速度不随机。
-# 三个分组的 offset 范围均完全落在 MjLab soft joint limits 内（不依赖 clamp）：
-#   hip   保持 default（offset 0）；
-#   thigh 保持 ±0.4007 = 0.8014 × 0.5（default magnitude 的一半）；
-#   calf  取 ±0.5945，使左右 calf 的 support（default ± 0.5945）都不超出 soft limits。
-BLACK_JOINT_RESET_POSITION_RANGE: dict[str, tuple[float, float]] = {
-    "hip": (0.0, 0.0),
-    "thigh": (-0.4007, 0.4007),
-    "calf": (-0.5945, 0.5945),
-}
-BLACK_JOINT_RESET_VELOCITY_RANGE: tuple[float, float] = (0.0, 0.0)
-
-# Stuck termination contract：planar command 有效（norm > 0.2 m/s）且沿该指令方向的
-# progress speed 持续低于 0.05 m/s 时终止，grace 期内不计时。计时以 control step
-# 时长累计，阈值单位为秒。
-BLACK_STUCK_TIMEOUT_S = 4.0
-BLACK_STUCK_VELOCITY_THRESHOLD = 0.05
-BLACK_STUCK_COMMAND_THRESHOLD = 0.2
-BLACK_STUCK_GRACE_S = 1.0
-
-# Tracking reward contract：指数形式的速度跟踪，denominator 直接使用 legacy 的
-# tracking_sigma（不是 sigma²）。linear 只含 vx/vy 误差，angular 只含 yaw 误差。
-BLACK_TRACKING_SIGMA = 0.25
-BLACK_TRACKING_LINEAR_WEIGHT = 2.0
-BLACK_TRACKING_ANGULAR_WEIGHT = 1.5
-
-# Base motion stability contract：与 tracking 解耦的两个独立 penalty。
-# lin_vel_z 只罚 body-frame v_z（flat / terrain-level-0 语义，无地形系数）；
-# body_ang_vel 只罚 body-frame ω_x / ω_y。
-BLACK_LIN_VEL_Z_WEIGHT = -2.0
-BLACK_ANG_VEL_XY_WEIGHT = -0.05
+# Command term 名称属于 task wiring：reward / termination / observation 都按名字取它。
+BLACK_COMMAND_NAME = "twist"
 
 
-def black_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
-    """Create the flat-ground velocity task for Black."""
+def _configure_command(cfg: ManagerBasedRlEnvCfg) -> None:
+    """Black flat velocity command contract。
 
-    cfg = make_velocity_env_cfg()
-
-    # Black flat velocity command contract：heading command 关闭、
-    # resampling 固定 10.0 s、vx/vy ∈ [-1, 1] m/s、wz ∈ [-pi, pi] rad/s。
-    # v1.6.0 要求：heading_command=False 时 ranges.heading 必须为 None，否则构建环境时报错。
-    twist_command = cfg.commands["twist"]
+    heading command 关闭（v1.6.0 要求 heading_command=False 时 ranges.heading 必须为
+    None，否则构建环境时报错），数值范围见 params.py。
+    """
+    twist_command = cfg.commands[BLACK_COMMAND_NAME]
     assert isinstance(twist_command, UniformVelocityCommandCfg)
-    twist_command.resampling_time_range = (10.0, 10.0)
+    twist_command.resampling_time_range = BLACK_COMMAND_RESAMPLING_TIME_RANGE
     twist_command.heading_command = False
     twist_command.ranges.heading = None
-    twist_command.ranges.lin_vel_x = (-1.0, 1.0)
-    twist_command.ranges.lin_vel_y = (-1.0, 1.0)
-    twist_command.ranges.ang_vel_z = (-math.pi, math.pi)
+    twist_command.ranges.lin_vel_x = BLACK_COMMAND_LIN_VEL_X_RANGE
+    twist_command.ranges.lin_vel_y = BLACK_COMMAND_LIN_VEL_Y_RANGE
+    twist_command.ranges.ang_vel_z = BLACK_COMMAND_ANG_VEL_Z_RANGE
 
+
+def _configure_scene_and_sensors(cfg: ManagerBasedRlEnvCfg) -> None:
+    """Robot entity 与三个接触 / 高度 sensor 的装配。"""
     cfg.scene.entities = {
         "robot": get_black_robot_cfg(),
     }
 
     foot_names = BLACK_FOOT_NAMES
-    foot_geom_names = tuple(f"{name}_foot_collision" for name in foot_names)
+    foot_geom_names = _foot_geom_names()
 
     for sensor in cfg.scene.sensors or ():
         if sensor.name == "foot_height_scan":
@@ -212,12 +189,17 @@ def black_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     )
     cfg.scene.sensors = (cfg.scene.sensors or ()) + (illegal_ground_contact,)
 
+
+def _configure_actions(cfg: ManagerBasedRlEnvCfg) -> None:
+    """Black policy action contract：四个单腿 JointPositionAction term。
+
+    flat policy action 按 BLACK_ACTION_TERM_ORDER（FL → FR → RL → RR）拼接，
+    每 term 精确绑定对应腿的 hip/thigh/calf 三个关节（每腿 3 维，共 12 维）。
+    不使用单个全机器人 term：joint transmission 的 target 顺序在 MjLab v1.6.0
+    中恒为 Entity natural order（FL → FR → RR → RL），无法表达 policy order。
+    """
     cfg.actions.pop("joint_pos")
-    # Black policy action contract：四个单腿 JointPositionAction term，
-    # flat policy action 按 BLACK_ACTION_TERM_ORDER（FL → FR → RL → RR）拼接，
-    # 每 term 精确绑定对应腿的 hip/thigh/calf 三个关节（每腿 3 维，共 12 维）。
-    # 不使用单个全机器人 term：joint transmission 的 target 顺序在 MjLab v1.6.0
-    # 中恒为 Entity natural order（FL → FR → RR → RL），无法表达 policy order。
+
     leg_joint_names = {
         leg: tuple(f"{leg}_{joint}_joint" for joint in ("hip", "thigh", "calf"))
         for leg in BLACK_FOOT_NAMES
@@ -234,14 +216,17 @@ def black_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     assert tuple(action_terms) == BLACK_ACTION_TERM_ORDER
     cfg.actions = action_terms
 
+
+def _configure_events(cfg: ManagerBasedRlEnvCfg) -> None:
+    """Reset / domain 相关 event 的 selector 与数值绑定（不新增 DR 行为）。"""
     cfg.events["foot_friction"].params["asset_cfg"] = SceneEntityCfg(
         "robot",
-        geom_names=foot_geom_names,
+        geom_names=_foot_geom_names(),
     )
 
-    # Root reset contract：pose 固定为 default initial state（不随机 x/y/z/roll/pitch/yaw），
-    # root 六维速度独立均匀采样 [-0.5, 0.5]。env origin 与 default root state 的叠加
-    # 由 mdp.reset_root_state_uniform 内部处理。
+    # Root reset contract：pose 固定为 default initial state，root 六维速度独立均匀
+    # 采样。env origin 与 default root state 的叠加由 mdp.reset_root_state_uniform
+    # 内部处理。
     reset_base = cfg.events["reset_base"]
     reset_base.params["pose_range"] = dict(BLACK_ROOT_RESET_POSE_RANGE)
     reset_base.params["velocity_range"] = dict(BLACK_ROOT_RESET_VELOCITY_RANGE)
@@ -269,14 +254,20 @@ def black_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         body_names=("trunk",),
     )
 
-    # Tracking reward contract：替换 native track_* 的 func/weight/params
-    # （native 会把 v_z² / ω_xy² 并入同一个 exponential，与 Black contract 不等价）。
-    # term name 保持 MjLab 原生名称，dt 缩放由 RewardManager 统一处理。
+
+def _configure_rewards(cfg: ManagerBasedRlEnvCfg) -> None:
+    """Reward term 的 func / weight / params 与 selector 绑定。
+
+    只替换 Black 已冻结的项；其余 MjLab baseline term 保持原样（weight 不变）。
+    term name 与 key 顺序都不改动，dt 缩放由 RewardManager 统一处理。
+    """
+    # Tracking：替换 native track_* 的 func/weight/params（native 会把 v_z² / ω_xy²
+    # 并入同一个 exponential，与 Black contract 不等价）。
     cfg.rewards["track_linear_velocity"] = RewardTermCfg(
         func=track_linear_velocity_xy,
         weight=BLACK_TRACKING_LINEAR_WEIGHT,
         params={
-            "command_name": "twist",
+            "command_name": BLACK_COMMAND_NAME,
             "sigma": BLACK_TRACKING_SIGMA,
         },
     )
@@ -284,7 +275,7 @@ def black_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         func=track_angular_velocity_z,
         weight=BLACK_TRACKING_ANGULAR_WEIGHT,
         params={
-            "command_name": "twist",
+            "command_name": BLACK_COMMAND_NAME,
             "sigma": BLACK_TRACKING_SIGMA,
         },
     )
@@ -294,8 +285,8 @@ def black_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         body_names=("trunk",),
     )
 
-    # Base motion stability contract：tracking 不包含 v_z / ω_xy，这两个职责
-    # 由独立 penalty 承担。reward 函数均返回非负 raw magnitude，负号由 weight 负责。
+    # Base motion stability：tracking 不包含 v_z / ω_xy，这两个职责由独立 penalty
+    # 承担。reward 函数均返回非负 raw magnitude，负号由 weight 负责。
     cfg.rewards["lin_vel_z"] = RewardTermCfg(
         func=vertical_linear_velocity_l2,
         weight=BLACK_LIN_VEL_Z_WEIGHT,
@@ -310,9 +301,11 @@ def black_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     for reward_name in ("foot_clearance", "foot_slip"):
         cfg.rewards[reward_name].params["asset_cfg"] = SceneEntityCfg(
             "robot",
-            site_names=foot_names,
+            site_names=BLACK_FOOT_NAMES,
         )
 
+    # 仍是 MjLab baseline 的临时姿态参数，尚未冻结为 Black reward contract，
+    # 因此不放进 params.py。
     cfg.rewards["pose"].params["std_standing"] = {
         r".*_hip_joint": 0.05,
         r".*_thigh_joint": 0.05,
@@ -329,10 +322,9 @@ def black_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         r".*_calf_joint": 0.6,
     }
 
-    cfg.viewer.body_name = "trunk"
-    cfg.viewer.distance = 1.5
-    cfg.viewer.elevation = -10.0
 
+def _configure_flat_terrain(cfg: ManagerBasedRlEnvCfg) -> None:
+    """flat task specialization：plane terrain、无 terrain generator / scan / curriculum。"""
     assert cfg.scene.terrain is not None
     cfg.scene.terrain.terrain_type = "plane"
     cfg.scene.terrain.terrain_generator = None
@@ -340,7 +332,11 @@ def black_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.scene.sensors = tuple(
         sensor for sensor in (cfg.scene.sensors or ()) if sensor.name != "terrain_scan"
     )
-    # Black PPO actor 45 维单步 observation contract：内容与 layout 显式重建。
+    cfg.curriculum.pop("terrain_levels", None)
+
+
+def _configure_observations(cfg: ManagerBasedRlEnvCfg) -> None:
+    """Black PPO actor 45 维单步 observation contract：内容、顺序、scale 与 noise。"""
     actor_terms = cfg.observations["actor"].terms
     # 移除 MjLab velocity 默认中不属于 Black actor contract 的项。
     actor_terms.pop("height_scan", None)
@@ -379,8 +375,11 @@ def black_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             ),
         )
     cfg.observations["critic"].terms.pop("height_scan", None)
-    # 摔倒终止：用 trunk / thigh 触地替代 orientation-based 的 fell_over，
-    # 与 time_out（20.0 s）共同构成训练终止 contract。
+
+
+def _configure_terminations(cfg: ManagerBasedRlEnvCfg) -> None:
+    """终止 contract：time_out + illegal_contact + stuck。"""
+    # 摔倒终止用 trunk / thigh 触地替代 orientation-based 的 fell_over。
     cfg.terminations.pop("fell_over", None)
     cfg.terminations["illegal_contact"] = TerminationTermCfg(
         func=mdp.illegal_contact,
@@ -394,7 +393,7 @@ def black_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.terminations["stuck"] = TerminationTermCfg(
         func=StuckTermination,
         params={
-            "command_name": "twist",
+            "command_name": BLACK_COMMAND_NAME,
             "asset_cfg": SceneEntityCfg("robot"),
             "command_threshold": BLACK_STUCK_COMMAND_THRESHOLD,
             "velocity_threshold": BLACK_STUCK_VELOCITY_THRESHOLD,
@@ -403,12 +402,44 @@ def black_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         },
     )
     cfg.terminations.pop("out_of_terrain_bounds", None)
-    cfg.curriculum.pop("terrain_levels", None)
+
+
+def _configure_common_runtime(cfg: ManagerBasedRlEnvCfg) -> None:
+    """不属于上面各分组的少量 task 级字段。"""
+    cfg.viewer.body_name = "trunk"
+    cfg.viewer.distance = 1.5
+    cfg.viewer.elevation = -10.0
+
+
+def _configure_play(cfg: ManagerBasedRlEnvCfg) -> None:
+    """play 模式的既有差异：只放开 episode 长度、关闭 corruption / push / curriculum。"""
+    cfg.episode_length_s = int(1e9)
+    cfg.observations["actor"].enable_corruption = False
+    cfg.events.pop("push_robot", None)
+    cfg.curriculum = {}
+
+
+def _foot_geom_names() -> tuple[str, ...]:
+    """四足 collision geom 名（由 policy 腿顺序 contract 驱动）。"""
+    return tuple(f"{name}_foot_collision" for name in BLACK_FOOT_NAMES)
+
+
+def black_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+    """Create the flat-ground velocity task for Black."""
+
+    cfg = make_velocity_env_cfg()
+
+    _configure_command(cfg)
+    _configure_scene_and_sensors(cfg)
+    _configure_actions(cfg)
+    _configure_events(cfg)
+    _configure_rewards(cfg)
+    _configure_flat_terrain(cfg)
+    _configure_observations(cfg)
+    _configure_terminations(cfg)
+    _configure_common_runtime(cfg)
 
     if play:
-        cfg.episode_length_s = int(1e9)
-        cfg.observations["actor"].enable_corruption = False
-        cfg.events.pop("push_robot", None)
-        cfg.curriculum = {}
+        _configure_play(cfg)
 
     return cfg
