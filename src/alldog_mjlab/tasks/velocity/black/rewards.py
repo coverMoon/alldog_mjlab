@@ -101,3 +101,22 @@ def orientation_l1(
     asset: Entity = env.scene[asset_cfg.name]
     projected_gravity = asset.data.projected_gravity_b
     return torch.sum(torch.abs(projected_gravity[:, :2]), dim=1)
+
+
+def base_height_l1_flat(
+    env: ManagerBasedRlEnv,
+    target_height: float,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """惩罚 root 高度偏离期望值：``|root_link_pos_w.z - target_height|``。
+
+    命名带 ``flat``：当前 task 的地面是 world z = 0 的 plane，因此 world z 就是
+    离地高度，与 legacy ``_get_base_heights()`` 在 ``mesh_type == 'plane'`` 下的
+    分支（直接返回 ``root_states[:, 2]``）一致，不需要地形采样。
+
+    legacy rough terrain 的 ground-relative 高度语义属于 ``black-rough`` 阶段，
+    本 task 不引入任何 height sensor / terrain 依赖，也不为此预留抽象。
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    base_height = asset.data.root_link_pos_w[:, 2]
+    return torch.abs(base_height - target_height)

@@ -705,7 +705,6 @@ training / play 共用同一 contract。
 未迁移（仍为 MjLab baseline）：
 
 ```text
-base_height
 pose / stand_still
 action_rate_l2 / smoothness
 foot / gait rewards
@@ -803,6 +802,52 @@ legacy `_reward_orientation` 还有一层 pitch-only 的 terrain-adaptive decay 
 为 False），decay scale 恒为 1，因此当前 active behavior 就是纯 L1。
 若 `black-rough` 阶段需要重新启用，应作为独立设计决策，不在本 task 引入。
 
+### 11.4 Base height
+
+MjLab velocity baseline 没有对应 term，本轮新增 key（追加在 reward dict 末尾）：
+
+```text
+term:
+base_height
+
+func:
+base_height_l1_flat
+
+raw:
+|root_link_pos_w.z - 0.43|
+
+weight:
+-1.0
+```
+
+source 与 task specialization：
+
+```text
+base_height_target = 0.43        （legacy 2026-07-03 lineage，super-dog 68f1c1c）
+base_height weight = -1.0
+state source      = asset.data.root_link_pos_w[:, 2]（root world z）
+
+black-flat specialization:
+plane terrain at world z = 0  →  world z 就是离地高度
+no terrain sensor required
+legacy rough ground-relative height semantics deferred to black-rough
+```
+
+legacy `_reward_base_height` 为 `|_get_base_heights() - target|`，其
+`_get_base_heights()` 在 `mesh_type == 'plane'` 时直接返回 `root_states[:, 2]`，
+因此 flat 下不需要任何地形采样；heightfield / trimesh 的 ground-relative 语义属于
+`black-rough` 阶段。函数名显式带 `flat`，避免 rough task 误用。
+
+#### reset z 与 reward target 的差异（明确 contract，不是 bug）
+
+```text
+reset / default root z = 0.45      episode 初始 root pose
+base-height reward target = 0.43   reward 期望的运行高度
+```
+
+两者职责不同，intentionally not forced to match；reset 瞬间 raw penalty 约为
+`|0.45 - 0.43| = 0.02`。
+
 ------
 
 ## 12. In Progress
@@ -811,13 +856,14 @@ legacy `_reward_orientation` 还有一层 pitch-only 的 terrain-adaptive decay 
 
 ```text
 Black reward migration:
-base_height reward
+stand_still reward
 ```
 
-legacy `base_height`（weight -1.0）惩罚 `|base_height - 0.43|`，依赖 base height
-测量（``_get_base_heights``）；MjLab velocity baseline 没有对应 term，需要先确认
-高度参考（默认 root 高度 vs terrain 高度）再实现。本单元只处理 `base_height`，
-不顺手迁 `stand_still` / `pose`。
+legacy `stand_still`（2026-07-03 lineage 为 -0.8）只在静止命令下惩罚关节偏离，
+属于 command-gated reward；同时 legacy 还有 `stand_torque_balance` /
+`stand_feet_force_balance`（同属于 stand 系列，但需要左右配对索引与接触力），
+是否纳入同一 behavior unit 需先确认。本单元只处理 stand_still，不顺手迁
+`pose` / action regularization。
 
 ------
 
@@ -828,12 +874,11 @@ legacy `base_height`（weight -1.0）惩罚 `|base_height - 0.43|`，依赖 base
 ### Reward
 
 旧 Black reward 已完成迁移：tracking 组、base motion stability（`lin_vel_z`、
-`body_ang_vel`）与 orientation（`upright`，见 §11）。
+`body_ang_vel`）、orientation（`upright`）与 base height（见 §11）。
 
 尚未迁移：
 
 ```text
-base_height
 stand_still
 → action / joint penalties
 → foot / gait rewards
@@ -956,6 +1001,8 @@ base motion stability penalty（v_z² / ω_xy²）formula / invariance / 与 tra
 
 orientation penalty（L1）formula / 单轴 tilt / 对称性 / yaw invariance / native 语义差异
 
+base height penalty（L1）formula / target-above-below / XY·orientation·velocity invariance / 无新增 sensor
+
 last_action mapping
 
 contact sensors
@@ -1014,7 +1061,7 @@ CUDA PASS/FAIL/SKIPPED
 2. MjLab command curriculum仍会改变训练后期 command ranges，因此当前“初始 command contract”不等于完整 curriculum contract。该行为已在本地验证中显式记录：`params.py` 的 `BLACK_COMMAND_*_RANGE` 是初始值，首次 reset 后 `command_vel` curriculum 会把 `ang_vel_z` 改写成 `[-0.5, 0.5]`。
 3. 当前 actor contract已经固定，但 critic仍属于 MjLab baseline，后续 HIM阶段不能将其误认为旧 Black privileged observation。
 4. 当前 `algorithms/him/` 中可能仍存在 Black-specific hardcoded dimensions。HIM阶段必须清理，不在当前 Black PPO阶段提前修改。
-5. Legacy Black reward 存在两个版本：当前 `black_config.py` / `black_env.py`（HEAD，含 2026-07-15 的 `1f344d9` 覆盖式同步）与 2026-06-29~07-03 的日志 lineage。**reward migration 以 2026-07-03 lineage（`68f1c1c`）为准**；`1f344d9` 不作为 reward migration authority——它同时改动了 reward / command / DR / terrain / termination / PPO，且没有对应的 reward 决策记录，故不作为迁移依据。这是迁移 source decision，不是对该提交作者意图的事实断言。已按 `68f1c1c` 迁移：`tracking_lin_vel` 2.0、`tracking_ang_vel` 1.5（两版本来就一致）、`lin_vel_z` -2.0、`ang_vel_xy` -0.05。其余项（`base_height`、`stand_still`、`action_rate`、`smoothness`、`dof_acc`、`joint_power`、`foot_impact_vel`、`collision`、`feet_stumble`、`feet_air_time`、`foot_clearance`、`dof_pos_limits`、`torque_limits`、`trot`、`hip_pos`、`all_joint_pos`、`foot_slip`、`progress`、`raibert`、`termination`）均需在各自 behavior unit 开始前按该 lineage 逐项落地。
+5. Legacy Black reward 存在两个版本：当前 `black_config.py` / `black_env.py`（HEAD，含 2026-07-15 的 `1f344d9` 覆盖式同步）与 2026-06-29~07-03 的日志 lineage。**reward migration 以 2026-07-03 lineage（`68f1c1c`）为准**；`1f344d9` 不作为 reward migration authority——它同时改动了 reward / command / DR / terrain / termination / PPO，且没有对应的 reward 决策记录，故不作为迁移依据。这是迁移 source decision，不是对该提交作者意图的事实断言。已按 `68f1c1c` 迁移：`tracking_lin_vel` 2.0、`tracking_ang_vel` 1.5（两版本来就一致）、`lin_vel_z` -2.0、`ang_vel_xy` -0.05。其余项（`stand_still`、`action_rate`、`smoothness`、`dof_acc`、`joint_power`、`foot_impact_vel`、`collision`、`feet_stumble`、`feet_air_time`、`foot_clearance`、`dof_pos_limits`、`torque_limits`、`trot`、`hip_pos`、`all_joint_pos`、`foot_slip`、`progress`、`raibert`、`termination`）均需在各自 behavior unit 开始前按该 lineage 逐项落地。
 
 ------
 
@@ -1024,8 +1071,8 @@ CUDA PASS/FAIL/SKIPPED
 
 ```text
 1. stuck termination            （完成）
-2. reward migration             （进行中：tracking + lin_vel_z/body_ang_vel + orientation 完成，
-                                    base_height 待开始）
+2. reward migration             （进行中：tracking + lin_vel_z/body_ang_vel + orientation
+                                    + base_height 完成，stand_still 待开始）
 3. domain randomization
 4. command curriculum
 5. Black flat final PPO verification
