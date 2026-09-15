@@ -6,7 +6,7 @@ import math
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.envs.mdp.events import reset_joints_by_offset
-from mjlab.managers import TerminationTermCfg
+from mjlab.managers import RewardTermCfg, TerminationTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import (
     ContactMatch,
@@ -24,6 +24,10 @@ from alldog_mjlab.robots.black import BLACK_ACTION_SCALE, get_black_robot_cfg
 from alldog_mjlab.robots.black.black_constants import (
     BLACK_FOOT_NAMES,
     BLACK_JOINT_NAMES,
+)
+from alldog_mjlab.tasks.velocity.black.rewards import (
+    track_angular_velocity_z,
+    track_linear_velocity_xy,
 )
 from alldog_mjlab.tasks.velocity.black.terminations import StuckTermination
 
@@ -116,6 +120,12 @@ BLACK_STUCK_TIMEOUT_S = 4.0
 BLACK_STUCK_VELOCITY_THRESHOLD = 0.05
 BLACK_STUCK_COMMAND_THRESHOLD = 0.2
 BLACK_STUCK_GRACE_S = 1.0
+
+# Tracking reward contract：指数形式的速度跟踪，denominator 直接使用 legacy 的
+# tracking_sigma（不是 sigma²）。linear 只含 vx/vy 误差，angular 只含 yaw 误差。
+BLACK_TRACKING_SIGMA = 0.25
+BLACK_TRACKING_LINEAR_WEIGHT = 2.0
+BLACK_TRACKING_ANGULAR_WEIGHT = 1.5
 
 
 def black_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
@@ -249,6 +259,26 @@ def black_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.events["base_com"].params["asset_cfg"] = SceneEntityCfg(
         "robot",
         body_names=("trunk",),
+    )
+
+    # Tracking reward contract：替换 native track_* 的 func/weight/params
+    # （native 会把 v_z² / ω_xy² 并入同一个 exponential，与 Black contract 不等价）。
+    # term name 保持 MjLab 原生名称，dt 缩放由 RewardManager 统一处理。
+    cfg.rewards["track_linear_velocity"] = RewardTermCfg(
+        func=track_linear_velocity_xy,
+        weight=BLACK_TRACKING_LINEAR_WEIGHT,
+        params={
+            "command_name": "twist",
+            "sigma": BLACK_TRACKING_SIGMA,
+        },
+    )
+    cfg.rewards["track_angular_velocity"] = RewardTermCfg(
+        func=track_angular_velocity_z,
+        weight=BLACK_TRACKING_ANGULAR_WEIGHT,
+        params={
+            "command_name": "twist",
+            "sigma": BLACK_TRACKING_SIGMA,
+        },
     )
 
     cfg.rewards["upright"].params["asset_cfg"] = SceneEntityCfg(
