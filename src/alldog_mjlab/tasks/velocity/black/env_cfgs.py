@@ -26,8 +26,10 @@ from alldog_mjlab.robots.black.black_constants import (
     BLACK_JOINT_NAMES,
 )
 from alldog_mjlab.tasks.velocity.black.rewards import (
+    angular_velocity_xy_l2,
     track_angular_velocity_z,
     track_linear_velocity_xy,
+    vertical_linear_velocity_l2,
 )
 from alldog_mjlab.tasks.velocity.black.terminations import StuckTermination
 
@@ -126,6 +128,12 @@ BLACK_STUCK_GRACE_S = 1.0
 BLACK_TRACKING_SIGMA = 0.25
 BLACK_TRACKING_LINEAR_WEIGHT = 2.0
 BLACK_TRACKING_ANGULAR_WEIGHT = 1.5
+
+# Base motion stability contract：与 tracking 解耦的两个独立 penalty。
+# lin_vel_z 只罚 body-frame v_z（flat / terrain-level-0 语义，无地形系数）；
+# body_ang_vel 只罚 body-frame ω_x / ω_y。
+BLACK_LIN_VEL_Z_WEIGHT = -2.0
+BLACK_ANG_VEL_XY_WEIGHT = -0.05
 
 
 def black_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
@@ -285,9 +293,18 @@ def black_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "robot",
         body_names=("trunk",),
     )
-    cfg.rewards["body_ang_vel"].params["asset_cfg"] = SceneEntityCfg(
-        "robot",
-        body_names=("trunk",),
+
+    # Base motion stability contract：tracking 不包含 v_z / ω_xy，这两个职责
+    # 由独立 penalty 承担。reward 函数均返回非负 raw magnitude，负号由 weight 负责。
+    cfg.rewards["lin_vel_z"] = RewardTermCfg(
+        func=vertical_linear_velocity_l2,
+        weight=BLACK_LIN_VEL_Z_WEIGHT,
+    )
+    # body_ang_vel 沿用 MjLab 原生 term name，但 math 换成 legacy 语义
+    # （native 读 world-frame body 角速度，且依赖 trunk 的 body selector）。
+    cfg.rewards["body_ang_vel"] = RewardTermCfg(
+        func=angular_velocity_xy_l2,
+        weight=BLACK_ANG_VEL_XY_WEIGHT,
     )
 
     for reward_name in ("foot_clearance", "foot_slip"):

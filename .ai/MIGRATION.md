@@ -681,16 +681,62 @@ training / play 共用同一 contract。
 未迁移（仍为 MjLab baseline）：
 
 ```text
-lin_vel_z
-ang_vel_xy
 orientation / upright
 base_height
-pose
-action_rate_l2
-smoothness (未实现)
+pose / stand_still
+action_rate_l2 / smoothness
 foot / gait rewards
 termination reward
 ```
+
+### 11.2 Base motion stability
+
+tracking 不包含 `v_z` 与 `ω_xy`，这两个职责由独立 penalty 承担：
+
+```text
+lin_vel_z
+    func = vertical_linear_velocity_l2
+    raw = body-frame v_z²
+    weight = -2.0
+
+body_ang_vel
+    func = angular_velocity_xy_l2
+    raw = body-frame ω_x² + ω_y²
+    weight = -0.05
+```
+
+两个函数均返回非负 raw magnitude，负号由 weight 负责；无 command gating、
+无 exponential、无 abs；不乘 `dt`（由 `RewardManager` 统一处理）。
+
+`body_ang_vel` 沿用 MjLab native term name，但不使用 native math：
+`mdp.body_angular_velocity_penalty` 读的是 **world-frame** body 角速度，
+legacy 用的是 body-frame root 角速度（pitch 90° 时两者分别约为 5.0 / 104.0）。
+
+同时四个职责严格解耦：
+
+```text
+track_linear_velocity   ← vx / vy 误差
+track_angular_velocity  ← wz 误差
+lin_vel_z               ← vz
+body_ang_vel            ← ωx / ωy
+```
+
+#### flat vs rough intentional difference
+
+`black-flat` 的 `lin_vel_z` 采用 legacy 的 **terrain-level-0** 分支：
+
+```text
+reward = v_z²
+```
+
+legacy 在 rough terrain 下还有一层地形系数：
+
+```text
+terrain_levels > 0 → ×0.1
+```
+
+该系数依赖 terrain level state，属于 `black-rough` 阶段，本 task 不引入。
+这是有意的 task specialization，不是遗漏。
 
 ------
 
@@ -700,11 +746,12 @@ termination reward
 
 ```text
 Black reward migration:
-posture / stability group source decision
+orientation reward
 ```
 
-该组包含 `orientation`、`lin_vel_z`、`ang_vel_xy`、`base_height`、`stand_still`，
-在开始实现前必须先决定 legacy 取 HEAD 还是 2026-06-29~07-03 日志状态。
+legacy `orientation`（weight -0.8）与 MjLab `upright`（weight 1.0）公式不同：
+legacy 是 `|roll| + |pitch|·adaptive`，MjLab 是 `exp(-Σg_xy²/std²)`。
+本单元只处理 orientation，不顺手迁 `base_height` / `stand_still`。
 
 ------
 
@@ -714,12 +761,15 @@ posture / stability group source decision
 
 ### Reward
 
-旧 Black reward 只有 tracking 组已完成迁移（见 §11）。
+旧 Black reward 已完成迁移：tracking 组与**部分** stability 组（`lin_vel_z`、
+`body_ang_vel`，见 §11）。
 
 尚未迁移：
 
 ```text
-posture / stability
+orientation
+base_height
+stand_still
 → action / joint penalties
 → foot / gait rewards
 → termination reward
@@ -837,6 +887,8 @@ actor scaling/noise
 
 tracking reward formula / invariance / dt scaling
 
+base motion stability penalty（v_z² / ω_xy²）formula / invariance / 与 tracking 的解耦
+
 last_action mapping
 
 contact sensors
@@ -895,7 +947,7 @@ CUDA PASS/FAIL/SKIPPED
 2. MjLab command curriculum仍会改变训练后期 command ranges，因此当前“初始 command contract”不等于完整 curriculum contract。
 3. 当前 actor contract已经固定，但 critic仍属于 MjLab baseline，后续 HIM阶段不能将其误认为旧 Black privileged observation。
 4. 当前 `algorithms/him/` 中可能仍存在 Black-specific hardcoded dimensions。HIM阶段必须清理，不在当前 Black PPO阶段提前修改。
-5. Legacy Black reward 权威来源存在冲突：当前 `black_config.py` / `black_env.py`（HEAD）与 2026-06-29~07-03 的 Black 日志不一致，原因是 2026-07-15 的覆盖式同步提交（`1f344d9`）把配置回退到了 06-29 之前的状态（含 `terrain_adaptive`、`termination`、`trot`/`raibert`/`foot_slip`/`progress` 等自定义 shaping）。不得把当前 `black_config.py` 当作唯一 reward 权威；进入 posture/stability 组前必须先决定取哪一版。tracking 的 weight / sigma 不受该冲突影响，已独立迁移。
+5. Legacy Black reward 存在两个版本：当前 `black_config.py` / `black_env.py`（HEAD，含 2026-07-15 的 `1f344d9` 覆盖式同步）与 2026-06-29~07-03 的日志 lineage。**reward migration 以 2026-07-03 lineage（`68f1c1c`）为准**；`1f344d9` 不作为 reward migration authority——它同时改动了 reward / command / DR / terrain / termination / PPO，且没有对应的 reward 决策记录，故不作为迁移依据。这是迁移 source decision，不是对该提交作者意图的事实断言。已按 `68f1c1c` 迁移：`tracking_lin_vel` 2.0、`tracking_ang_vel` 1.5（两版本来就一致）、`lin_vel_z` -2.0、`ang_vel_xy` -0.05。其余项（`orientation`、`base_height`、`stand_still`、`action_rate`、`smoothness`、`dof_acc`、`joint_power`、`foot_impact_vel`、`collision`、`feet_stumble`、`feet_air_time`、`foot_clearance`、`dof_pos_limits`、`torque_limits`、`trot`、`hip_pos`、`all_joint_pos`、`foot_slip`、`progress`、`raibert`、`termination`）均需在各自 behavior unit 开始前按该 lineage 逐项落地。
 
 ------
 
@@ -905,7 +957,7 @@ CUDA PASS/FAIL/SKIPPED
 
 ```text
 1. stuck termination            （完成）
-2. reward migration             （进行中：tracking 完成，posture/stability 待开始）
+2. reward migration             （进行中：tracking + lin_vel_z/body_ang_vel 完成，orientation 待开始）
 3. domain randomization
 4. command curriculum
 5. Black flat final PPO verification
