@@ -42,6 +42,7 @@ from alldog_mjlab.tasks.velocity.black.params import (
     BLACK_JOINT_RESET_POSITION_RANGE,
     BLACK_JOINT_RESET_VELOCITY_RANGE,
     BLACK_LIN_VEL_Z_WEIGHT,
+    BLACK_ORIENTATION_WEIGHT,
     BLACK_ROOT_RESET_POSE_RANGE,
     BLACK_ROOT_RESET_VELOCITY_RANGE,
     BLACK_STUCK_COMMAND_THRESHOLD,
@@ -54,6 +55,7 @@ from alldog_mjlab.tasks.velocity.black.params import (
 )
 from alldog_mjlab.tasks.velocity.black.rewards import (
     angular_velocity_xy_l2,
+    orientation_l1,
     track_angular_velocity_z,
     track_linear_velocity_xy,
     vertical_linear_velocity_l2,
@@ -280,9 +282,13 @@ def _configure_rewards(cfg: ManagerBasedRlEnvCfg) -> None:
         },
     )
 
-    cfg.rewards["upright"].params["asset_cfg"] = SceneEntityCfg(
-        "robot",
-        body_names=("trunk",),
+    # Orientation：upright 沿用 MjLab native term name，但 math 换成 legacy 语义
+    # （native 是 exp(-Σg_xy²/std²) 的正奖励，legacy 是 |g_x| + |g_y| 的 L1 惩罚）。
+    # legacy 的 terrain-adaptive pitch scaling 在 2026-07-03 baseline 中已关闭，
+    # 因此当前 contract 不含任何地形依赖。
+    cfg.rewards["upright"] = RewardTermCfg(
+        func=orientation_l1,
+        weight=BLACK_ORIENTATION_WEIGHT,
     )
 
     # Base motion stability：tracking 不包含 v_z / ω_xy，这两个职责由独立 penalty

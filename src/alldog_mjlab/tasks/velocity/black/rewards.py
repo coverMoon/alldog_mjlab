@@ -83,3 +83,21 @@ def angular_velocity_xy_l2(
     asset: Entity = env.scene[asset_cfg.name]
     angular_velocity_xy = asset.data.root_link_ang_vel_b[:, :2]
     return torch.sum(torch.square(angular_velocity_xy), dim=1)
+
+
+def orientation_l1(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """惩罚身体倾斜：``|g_x^b| + |g_y^b|``（body-frame projected gravity 的 L1）。
+
+    legacy 的 terrain-adaptive pitch scaling 在 2026-07-03 reward baseline 中已关闭
+    （``terrain_adaptive.enabled = False``，decay scale 恒为 1），因此这里就是
+    roll / pitch 对称的纯 L1 惩罚，不含地形依赖，也不用 Euler 角。
+
+    MjLab native ``upright`` 是 ``exp(-Σg_xy²/std²)`` 的正奖励，与 legacy 的
+    L1 惩罚形式不同，无法用 weight / std 组合等价，所以单独实现。
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    projected_gravity = asset.data.projected_gravity_b
+    return torch.sum(torch.abs(projected_gravity[:, :2]), dim=1)
