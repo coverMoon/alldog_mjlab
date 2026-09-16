@@ -73,6 +73,7 @@ params.py
         params.reset.*
         params.termination.*
         params.reward.*
+        params.domain_randomization.*
     最多两层，不引入总容器 / Hydra / OmegaConf / 第二套 Config framework。
 
 env_cfgs.py
@@ -621,15 +622,9 @@ ELU
 
 ### Encoder bias
 
-当前 MjLab baseline仍存在 encoder bias domain randomization。
+encoder bias domain randomization 已冻结为 DR contract 的一项（见 §12）。
 
-旧 Black没有完全对应的同类机制。
-
-状态：
-
-```text
-deferred to DR migration
-```
+旧 Black没有完全对应的同类机制，因此这是 framework-native 行为，不是 exact migration。
 
 ------
 
@@ -788,29 +783,110 @@ adaptive），因此本轮有意不采用任何一种。这是 baseline simplifi
 
 ------
 
-## 12. In Progress
+## 12. Frozen Domain Randomization Contract
 
-Black flat reward migration：
+Black flat v1 的 DR 只包含下面 6 项。其余候选项明确 deferred（见本节末）。
+
+```text
+term            func (mjlab v1.6)        mode      operation  数值
+foot_friction   dr.geom_friction        startup   abs        0.2 ~ 1.25（同一 env 四足共享）
+payload_mass    dr.body_mass            startup   add        trunk -1 ~ +2 kg
+base_com        dr.body_com_offset      startup   add        trunk xyz ±0.05 m
+pd_gains        dr.pd_gains             reset     scale      Kp / Kd 0.9 ~ 1.1
+encoder_bias    dr.encoder_bias         startup   —          ±0.015 rad
+push_robot      mdp.push_by_setting_velocity  interval  —    每 16 s，root xy Δv ±1 m/s
+```
+
+细节：
+
+```text
+foot_friction
+    selector = 四个 *_foot_collision geom
+    shared_random = True（同一 env 内四只脚同一采样，不同 env 独立）
+    只改切向摩擦（mjlab 默认 axis 0），不改 terrain friction
+
+payload_mass
+    selector = trunk（Black 主要机身质量所在，nominal 5.7042 kg）
+    只加质量不改惯量（legacy payload 语义一致；mjlab 会就此给 UserWarning）
+
+base_com
+    相对 nominal COM 的 offset（不是 absolute COM）
+
+pd_gains
+    覆盖全部 12 个 IdealPd actuator；nominal Kp 40 / Kd 1.2 → 运行时 Kp 36~44、Kd 1.08~1.32
+
+encoder_bias
+    固定 encoder calibration bias，只影响带 bias 的 joint position observation，
+    不改变物理 qpos；episode reset 不重采样
+
+push_robot
+    只扰动 root xy；z / roll / pitch / yaw 的 Δ 严格为 0
+```
+
+### 12.1 Intentional framework differences
+
+```text
+PD gains
+    legacy HIMLoco：一个 env 共享一个 Kp factor / 一个 Kd factor
+    MjLab native ：每个 actuator target 独立采样
+    本轮接受该差异，不为 shared scalar 写 custom DR
+
+push
+    legacy HIMLoco：直接设置随机 root xy velocity
+    MjLab native ：向当前 root velocity 增加随机 increment
+    本轮接受 native 语义，不写 custom push
+```
+
+### 12.2 play 模式
+
+`play=True` 为 nominal physics：上面 6 个 DR event 整组移除，只保留 reset events
+（`reset_base` / `reset_hip_joints` / `reset_thigh_joints` / `reset_calf_joints`），
+并继续关闭 actor corruption、curriculum 与 push。
+
+### 12.3 Deferred DR（不在 v1）
+
+```text
+link mass                （官方 HIMLoco randomize_link_mass = False）
+inertia / pseudo inertia
+motor strength           （effort_limits 改 saturation boundary，与 legacy
+                          τ_out = factor × τ_computed 在未饱和时行为不同）
+external force disturbance（官方有 ±30 N / 8 s，本 v1 先用 push）
+action delay             （legacy 为 control-step action queue，1 lag = 20 ms；
+                          MjLab 为 actuator physics-step delay，1 lag = 5 ms，
+                          与 sampling cadence / deployment 对应关系需一并决定）
+restitution              （保持无 restitution DR）
+```
+
+initial joint-state variation 不再叠加官方 HIMLoco 的 `initial_joint_pos_range`：
+已由 reset contract（`params.reset.joint_position`）覆盖。
+
+motor strength / action delay 分别在 sim2real contract 阶段处理。
+
+------
+
+## 13. In Progress
+
+Black flat domain randomization：
 
 ```text
 COMPLETE
 ```
 
-当前 reward baseline 已冻结为 §11 的 10 项，train / play 共用同一 contract。
+当前 DR 已冻结为 §12 的 6 项，train 生效、play 为 nominal physics。
 
 下一阶段：
 
 ```text
-Black flat domain randomization
+Black command curriculum
 ```
 
-进入 DR 前先比较 legacy 与当前 MjLab 的 friction / payload / COM / link mass /
-motor strength / Kp-Kd / initial state / inertia / disturbance / push /
-action delay / encoder bias。
+进入 curriculum 前先比较 legacy 的 curriculum 规则（阈值 / EMA / required passes /
+buffer）与 MjLab `command_vel` staged velocity curriculum，以及
+command ranges 被 curriculum 改写后的语义。
 
 ------
 
-## 13. Deferred Black Flat Work
+## 14. Deferred Black Flat Work
 
 尚未迁移/冻结：
 
@@ -825,24 +901,20 @@ super-dog 的自定义 shaping 与 MjLab-only 项均未采用（见 §11.3）；
 
 ### Domain Randomization
 
-仍需逐项比较：
+Black flat v1 的 DR 已完成并冻结（6 项，见 §12）。
+
+仍未迁移（见 §12.3）：
 
 ```text
-friction
-payload / mass
-COM
 link mass
-motor strength
-Kp/Kd
-initial state
 inertia
-disturbance
-push
+motor strength
+external force disturbance
 action delay
-encoder bias
+restitution
 ```
 
-不要在 reward或其他任务中顺手改 DR。
+不要在 reward 或其他任务中顺手改 DR。
 
 ------
 
@@ -868,7 +940,7 @@ deferred
 
 ------
 
-## 14. Explicitly Not Started
+## 15. Explicitly Not Started
 
 以下均未开始，不得提前宣称支持：
 
@@ -894,7 +966,7 @@ blackw-rough
 
 ------
 
-## 15. Local Verification Baseline
+## 16. Local Verification Baseline
 
 本地：
 
@@ -940,6 +1012,9 @@ orientation penalty（L2）formula / 单轴 tilt / 对称性 / yaw invariance / 
 base height penalty（L2）formula / target-above-below / XY·orientation·velocity invariance / 无地形依赖
 
 regularization 组（dof_acc 有限差分 / joint_power / action_rate / smoothness）解析值与 dt 缩放
+
+domain randomization（friction 共享性 / payload / COM / PD 范围与 reset 重采样 /
+encoder bias 只影响 observation / push 只扰动 xy / play 无 DR）
 
 last_action mapping
 
@@ -991,11 +1066,11 @@ CUDA PASS/FAIL/SKIPPED
 
 ------
 
-## 16. Known Risks
+## 17. Known Risks
 
 当前需要持续注意：
 
-1. MuJoCo / mjwarp contact sensor在深度 penetration 情况下观察过 `found` 存在但 force为0的现象。正常落地/趴地时 force可正常达到明显大于1 N。目前 illegal-contact threshold继续保持1 N，后续根据训练日志判断是否需要处理。
+1. MuJoCo / mjwarp contact sensor在深度 penetration 情况下观察过 `found` 存在但 force为0的现象。正常落地/趴地时 force可正常达到明显大于1 N。目前 illegal-contact threshold继续保持1 N，后续根据训练日志判断是否需要处理。由于 trunk 与地面的接触力只在某个高度区间可靠，本地验证的强制触地 probe 会从浅到深扫几个 root 高度取首个触发，而不是固定单一高度。
 2. MjLab command curriculum仍会改变训练后期 command ranges，因此当前“初始 command contract”不等于完整 curriculum contract。该行为已在本地验证中显式记录：`params.py` 的 `BLACK_COMMAND_*_RANGE` 是初始值，首次 reset 后 `command_vel` curriculum 会把 `ang_vel_z` 改写成 `[-0.5, 0.5]`。
 3. 当前 actor contract已经固定，但 critic仍属于 MjLab baseline，后续 HIM阶段不能将其误认为旧 Black privileged observation。
 4. 当前 `algorithms/him/` 中可能仍存在 Black-specific hardcoded dimensions。HIM阶段必须清理，不在当前 Black PPO阶段提前修改。
@@ -1003,18 +1078,19 @@ CUDA PASS/FAIL/SKIPPED
 
 ------
 
-## 17. Next Migration Order
+## 18. Next Migration Order
 
-当前严格顺序：
+长期方向是「flat 先做完，再 rough，最后 sim2real / HIM」，因此：
 
 ```text
-1. stuck termination            （完成）
-2. reward migration             （完成：Black flat v1 reward baseline = 10 项，见 §11）
-3. domain randomization
+1. stuck termination                     （完成）
+2. reward migration                      （完成：Black flat v1 baseline = 10 项，见 §11）
+3. domain randomization                  （完成：6 项，见 §12）
 4. command curriculum
 5. Black flat final PPO verification
-6. Black sim2real/deployment contract
-7. Black rough PPO
+6. Black rough PPO
+7. Black sim2real/deployment contract
+8. HIM observation / estimator / algorithm integration
 ```
 
 已插入完成的非 behavior 任务：
@@ -1029,7 +1105,7 @@ configuration readability / tuning refactor v1   （完成，behavior-neutral）
 
 ------
 
-## 18. Update Rule
+## 19. Update Rule
 
 每完成一个 behavior unit：
 

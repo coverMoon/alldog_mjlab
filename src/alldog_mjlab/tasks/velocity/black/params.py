@@ -163,3 +163,54 @@ class RewardParams:
 
 
 reward = RewardParams()
+
+
+# =============================================================================
+# Domain randomization
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class DomainRandomizationParams:
+    """Black flat v1 的 domain randomization（train 生效，play 全部移除）。
+
+    friction / payload_mass / kp_scale / kd_scale / encoder_bias 均为 startup：
+    每个 env 采样一次并在 episode 内保持；pd_gains 为 reset：每次 episode reset
+    重新采样；push 为 interval：训练中周期性施加 xy 速度增量。
+    """
+
+    # Contact
+    friction: tuple[float, float] = (0.2, 1.25)
+
+    # Rigid body（trunk payload 与 nominal COM 的 offset）
+    payload_mass: tuple[float, float] = (-1.0, 2.0)
+    com_offset: dict[int, tuple[float, float]] = field(
+        default_factory=lambda: {
+            0: (-0.05, 0.05),
+            1: (-0.05, 0.05),
+            2: (-0.05, 0.05),
+        }
+    )
+
+    # Actuator（相对 nominal Kp=40 / Kd=1.2 的缩放）
+    kp_scale: tuple[float, float] = (0.9, 1.1)
+    kd_scale: tuple[float, float] = (0.9, 1.1)
+
+    # Sensor（固定 encoder calibration bias，不是 observation noise）
+    encoder_bias: tuple[float, float] = (-0.015, 0.015)
+
+    # Disturbance（间隔 [s] 与 root xy 速度增量 [m/s]）
+    push_interval: tuple[float, float] = (16.0, 16.0)
+    push_velocity: dict[str, tuple[float, float]] = field(
+        default_factory=lambda: {
+            "x": (-1.0, 1.0),
+            "y": (-1.0, 1.0),
+            "z": (0.0, 0.0),
+            "roll": (0.0, 0.0),
+            "pitch": (0.0, 0.0),
+            "yaw": (0.0, 0.0),
+        }
+    )
+
+
+domain_randomization = DomainRandomizationParams()

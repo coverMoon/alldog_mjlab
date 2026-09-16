@@ -11,7 +11,8 @@ from dataclasses import replace
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.envs.mdp.events import reset_joints_by_offset
-from mjlab.managers import RewardTermCfg, TerminationTermCfg
+from mjlab.envs.mdp import dr
+from mjlab.managers import EventTermCfg, RewardTermCfg, TerminationTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import (
     ContactMatch,
@@ -200,25 +201,35 @@ def _configure_actions(cfg: ManagerBasedRlEnvCfg) -> None:
 
 
 def _configure_events(cfg: ManagerBasedRlEnvCfg) -> None:
-    """Reset / domain 相关 event 的 selector 与数值绑定（不新增 DR 行为）。"""
-    cfg.events["foot_friction"].params["asset_cfg"] = SceneEntityCfg(
-        "robot",
-        geom_names=_foot_geom_names(),
+    """Reset 与 domain randomization 的 event contract。
+
+    dict 顺序即下表，reset 在前、DR 在后：
+
+        reset_base / reset_hip_joints / reset_thigh_joints / reset_calf_joints
+        foot_friction / payload_mass / base_com / pd_gains / encoder_bias / push_robot
+
+    数值全部来自 params（`_configure_play()` 会移除整组 DR）。
+    """
+    dr_params = params.domain_randomization
+    base_events = dict(cfg.events)
+    trunk_cfg = SceneEntityCfg("robot", body_names=("trunk",))
+
+    # ---- reset contract ----
+    # pose 固定为 default initial state，root 六维速度独立均匀采样；env origin 与
+    # default root state 的叠加由 mdp.reset_root_state_uniform 内部处理。
+    reset_base = replace(
+        base_events["reset_base"],
+        params={
+            "pose_range": dict(params.reset.root_pose),
+            "velocity_range": dict(params.reset.root_velocity),
+        },
     )
-
-    # Root reset contract：pose 固定为 default initial state，root 六维速度独立均匀
-    # 采样。env origin 与 default root state 的叠加由 mdp.reset_root_state_uniform
-    # 内部处理。
-    reset_base = cfg.events["reset_base"]
-    reset_base.params["pose_range"] = dict(params.reset.root_pose)
-    reset_base.params["velocity_range"] = dict(params.reset.root_velocity)
-
-    # Joint reset contract：把单一的全机器人 joint reset 拆为 hip / thigh / calf
-    # 三个选择器互不重叠的 native reset event（event 执行顺序不影响结果）。
-    base_joint_reset = cfg.events.pop("reset_robot_joints")
+    # 把单一的全机器人 joint reset 拆为 hip / thigh / calf 三个选择器互不重叠的
+    # native reset event（event 执行顺序不影响结果）。
+    base_joint_reset = base_events["reset_robot_joints"]
     assert base_joint_reset.func is reset_joints_by_offset
-    for joint_group, position_range in params.reset.joint_position.items():
-        cfg.events[f"reset_{joint_group}_joints"] = replace(
+    joint_resets = {
+        f"reset_{joint_group}_joints": replace(
             base_joint_reset,
             params={
                 "position_range": position_range,
@@ -231,10 +242,75 @@ def _configure_events(cfg: ManagerBasedRlEnvCfg) -> None:
                 ),
             },
         )
-    cfg.events["base_com"].params["asset_cfg"] = SceneEntityCfg(
-        "robot",
-        body_names=("trunk",),
-    )
+        for joint_group, position_range in params.reset.joint_position.items()
+    }
+
+    cfg.events = {
+        "reset_base": reset_base,
+        **joint_resets,
+        # ---- domain randomization contract ----
+        # 四只脚的切向摩擦：同一 env 内共享一个采样，不同 env 独立。
+        "foot_friction": EventTermCfg(
+            func=dr.geom_friction,
+            mode="startup",
+            params={
+                "asset_cfg": SceneEntityCfg(
+                    "robot", geom_names=_foot_geom_names()
+                ),
+                "operation": "abs",
+                "ranges": dr_params.friction,
+                "shared_random": True,
+            },
+        ),
+        # 躯干 payload：在 nominal trunk mass 上做 add。与 legacy 一致，只加质量
+        # 不改惯量（mjlab dr.body_mass 会就此给出 UserWarning，是本 baseline 的预期语义）。
+        "payload_mass": EventTermCfg(
+            func=dr.body_mass,
+            mode="startup",
+            params={
+                "asset_cfg": trunk_cfg,
+                "operation": "add",
+                "ranges": dr_params.payload_mass,
+            },
+        ),
+        # 躯干 COM offset（相对 nominal，不设 absolute COM）。
+        "base_com": EventTermCfg(
+            func=dr.body_com_offset,
+            mode="startup",
+            params={
+                "asset_cfg": trunk_cfg,
+                "operation": "add",
+                "ranges": dict(dr_params.com_offset),
+            },
+        ),
+        # PD 增益缩放：12 个 IdealPd actuator，每个 episode reset 重新采样。
+        "pd_gains": EventTermCfg(
+            func=dr.pd_gains,
+            mode="reset",
+            params={
+                "asset_cfg": SceneEntityCfg("robot"),
+                "kp_range": dr_params.kp_scale,
+                "kd_range": dr_params.kd_scale,
+                "operation": "scale",
+            },
+        ),
+        # 固定 encoder calibration bias（startup 采样一次，episode reset 不重采）。
+        "encoder_bias": EventTermCfg(
+            func=dr.encoder_bias,
+            mode="startup",
+            params={
+                "asset_cfg": SceneEntityCfg("robot"),
+                "bias_range": dr_params.encoder_bias,
+            },
+        ),
+        # 周期性 xy 速度增量扰动（native push 为 add increment，非直接赋值）。
+        "push_robot": EventTermCfg(
+            func=mdp.push_by_setting_velocity,
+            mode="interval",
+            interval_range_s=dr_params.push_interval,
+            params={"velocity_range": dict(dr_params.push_velocity)},
+        ),
+    }
 
 
 def _configure_rewards(cfg: ManagerBasedRlEnvCfg) -> None:
@@ -409,10 +485,18 @@ def _configure_common_runtime(cfg: ManagerBasedRlEnvCfg) -> None:
 
 
 def _configure_play(cfg: ManagerBasedRlEnvCfg) -> None:
-    """play 模式的既有差异：只放开 episode 长度、关闭 corruption / push / curriculum。"""
+    """play 模式：nominal physics（移除整组 DR），只保留 reset events。"""
     cfg.episode_length_s = int(1e9)
     cfg.observations["actor"].enable_corruption = False
-    cfg.events.pop("push_robot", None)
+    for event_name in (
+        "foot_friction",
+        "payload_mass",
+        "base_com",
+        "pd_gains",
+        "encoder_bias",
+        "push_robot",
+    ):
+        cfg.events.pop(event_name, None)
     cfg.curriculum = {}
 
 
