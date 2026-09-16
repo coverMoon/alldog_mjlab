@@ -66,9 +66,14 @@ src/alldog_mjlab/tasks/velocity/black/rl_cfg.py
 
 ```text
 params.py
-    人工调参入口：只放训练者预期会查看 / 调整的 numeric / range 参数
-    （command range、observation noise、reset range、termination 阈值、
-    已冻结 reward 的 weight / sigma）
+    人工调参入口：若干 frozen typed parameter group，只放训练者预期会查看 /
+    调整的 numeric / range 参数。访问形式 category first：
+        params.command.*
+        params.observation_noise.*
+        params.reset.*
+        params.termination.*
+        params.reward.*
+    最多两层，不引入总容器 / Hydra / OmegaConf / 第二套 Config framework。
 
 env_cfgs.py
     MjLab task assembly + policy / task interface contract

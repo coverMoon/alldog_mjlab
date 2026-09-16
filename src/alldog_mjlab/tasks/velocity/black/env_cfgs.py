@@ -30,35 +30,7 @@ from alldog_mjlab.robots.black.black_constants import (
     BLACK_FOOT_NAMES,
     BLACK_JOINT_NAMES,
 )
-from alldog_mjlab.tasks.velocity.black.params import (
-    BLACK_ACTION_RATE_WEIGHT,
-    BLACK_ACTOR_OBS_NOISE,
-    BLACK_ANG_VEL_XY_WEIGHT,
-    BLACK_BASE_HEIGHT_TARGET,
-    BLACK_BASE_HEIGHT_WEIGHT,
-    BLACK_COMMAND_ANG_VEL_Z_RANGE,
-    BLACK_COMMAND_LIN_VEL_X_RANGE,
-    BLACK_COMMAND_LIN_VEL_Y_RANGE,
-    BLACK_COMMAND_RESAMPLING_TIME_RANGE,
-    BLACK_DOF_ACC_WEIGHT,
-    BLACK_ILLEGAL_CONTACT_FORCE_THRESHOLD,
-    BLACK_ILLEGAL_CONTACT_HISTORY,
-    BLACK_JOINT_POWER_WEIGHT,
-    BLACK_JOINT_RESET_POSITION_RANGE,
-    BLACK_JOINT_RESET_VELOCITY_RANGE,
-    BLACK_LIN_VEL_Z_WEIGHT,
-    BLACK_ORIENTATION_WEIGHT,
-    BLACK_ROOT_RESET_POSE_RANGE,
-    BLACK_ROOT_RESET_VELOCITY_RANGE,
-    BLACK_SMOOTHNESS_WEIGHT,
-    BLACK_STUCK_COMMAND_THRESHOLD,
-    BLACK_STUCK_GRACE_S,
-    BLACK_STUCK_TIMEOUT_S,
-    BLACK_STUCK_VELOCITY_THRESHOLD,
-    BLACK_TRACKING_ANGULAR_WEIGHT,
-    BLACK_TRACKING_LINEAR_WEIGHT,
-    BLACK_TRACKING_SIGMA,
-)
+from alldog_mjlab.tasks.velocity.black import params
 from alldog_mjlab.tasks.velocity.black.rewards import (
     angular_velocity_xy_l2,
     base_height_l2_flat,
@@ -130,12 +102,12 @@ def _configure_command(cfg: ManagerBasedRlEnvCfg) -> None:
     """
     twist_command = cfg.commands[BLACK_COMMAND_NAME]
     assert isinstance(twist_command, UniformVelocityCommandCfg)
-    twist_command.resampling_time_range = BLACK_COMMAND_RESAMPLING_TIME_RANGE
+    twist_command.resampling_time_range = params.command.resampling_time
     twist_command.heading_command = False
     twist_command.ranges.heading = None
-    twist_command.ranges.lin_vel_x = BLACK_COMMAND_LIN_VEL_X_RANGE
-    twist_command.ranges.lin_vel_y = BLACK_COMMAND_LIN_VEL_Y_RANGE
-    twist_command.ranges.ang_vel_z = BLACK_COMMAND_ANG_VEL_Z_RANGE
+    twist_command.ranges.lin_vel_x = params.command.lin_vel_x
+    twist_command.ranges.lin_vel_y = params.command.lin_vel_y
+    twist_command.ranges.ang_vel_z = params.command.ang_vel_z
 
 
 def _configure_scene_and_sensors(cfg: ManagerBasedRlEnvCfg) -> None:
@@ -195,7 +167,7 @@ def _configure_scene_and_sensors(cfg: ManagerBasedRlEnvCfg) -> None:
         fields=("found", "force"),
         reduce="none",
         num_slots=1,
-        history_length=BLACK_ILLEGAL_CONTACT_HISTORY,
+        history_length=params.termination.illegal_contact_history,
     )
     cfg.scene.sensors = (cfg.scene.sensors or ()) + (illegal_ground_contact,)
 
@@ -238,19 +210,19 @@ def _configure_events(cfg: ManagerBasedRlEnvCfg) -> None:
     # 采样。env origin 与 default root state 的叠加由 mdp.reset_root_state_uniform
     # 内部处理。
     reset_base = cfg.events["reset_base"]
-    reset_base.params["pose_range"] = dict(BLACK_ROOT_RESET_POSE_RANGE)
-    reset_base.params["velocity_range"] = dict(BLACK_ROOT_RESET_VELOCITY_RANGE)
+    reset_base.params["pose_range"] = dict(params.reset.root_pose)
+    reset_base.params["velocity_range"] = dict(params.reset.root_velocity)
 
     # Joint reset contract：把单一的全机器人 joint reset 拆为 hip / thigh / calf
     # 三个选择器互不重叠的 native reset event（event 执行顺序不影响结果）。
     base_joint_reset = cfg.events.pop("reset_robot_joints")
     assert base_joint_reset.func is reset_joints_by_offset
-    for joint_group, position_range in BLACK_JOINT_RESET_POSITION_RANGE.items():
+    for joint_group, position_range in params.reset.joint_position.items():
         cfg.events[f"reset_{joint_group}_joints"] = replace(
             base_joint_reset,
             params={
                 "position_range": position_range,
-                "velocity_range": BLACK_JOINT_RESET_VELOCITY_RANGE,
+                "velocity_range": params.reset.joint_velocity,
                 "asset_cfg": SceneEntityCfg(
                     "robot",
                     joint_names=tuple(
@@ -285,58 +257,58 @@ def _configure_rewards(cfg: ManagerBasedRlEnvCfg) -> None:
         # Command tracking（HIMLoco：exp(-error / sigma)）。
         "track_linear_velocity": RewardTermCfg(
             func=track_linear_velocity_xy,
-            weight=BLACK_TRACKING_LINEAR_WEIGHT,
+            weight=params.reward.tracking_linear,
             params={
                 "command_name": BLACK_COMMAND_NAME,
-                "sigma": BLACK_TRACKING_SIGMA,
+                "sigma": params.reward.tracking_sigma,
             },
         ),
         "track_angular_velocity": RewardTermCfg(
             func=track_angular_velocity_z,
-            weight=BLACK_TRACKING_ANGULAR_WEIGHT,
+            weight=params.reward.tracking_angular,
             params={
                 "command_name": BLACK_COMMAND_NAME,
-                "sigma": BLACK_TRACKING_SIGMA,
+                "sigma": params.reward.tracking_sigma,
             },
         ),
         # Base stability。
         "lin_vel_z": RewardTermCfg(
             func=vertical_linear_velocity_l2,
-            weight=BLACK_LIN_VEL_Z_WEIGHT,
+            weight=params.reward.lin_vel_z,
         ),
         "body_ang_vel": RewardTermCfg(
             func=angular_velocity_xy_l2,
-            weight=BLACK_ANG_VEL_XY_WEIGHT,
+            weight=params.reward.ang_vel_xy,
         ),
         # 与 HIMLoco `_reward_orientation` 严格一致，故直接用 native。
         "upright": RewardTermCfg(
             func=mdp.flat_orientation_l2,
-            weight=BLACK_ORIENTATION_WEIGHT,
+            weight=params.reward.orientation,
         ),
         "base_height": RewardTermCfg(
             func=base_height_l2_flat,
-            weight=BLACK_BASE_HEIGHT_WEIGHT,
+            weight=params.reward.base_height,
             params={
-                "target_height": BLACK_BASE_HEIGHT_TARGET,
+                "target_height": params.reward.base_height_target,
             },
         ),
         # Regularization。
         "dof_acc": RewardTermCfg(
             func=dof_acc_l2,
-            weight=BLACK_DOF_ACC_WEIGHT,
+            weight=params.reward.dof_acc,
         ),
         "joint_power": RewardTermCfg(
             func=joint_power_l1,
-            weight=BLACK_JOINT_POWER_WEIGHT,
+            weight=params.reward.joint_power,
         ),
         "action_rate_l2": RewardTermCfg(
             func=mdp.action_rate_l2,
-            weight=BLACK_ACTION_RATE_WEIGHT,
+            weight=params.reward.action_rate,
         ),
         # HIMLoco `smoothness` 的二阶动作差分与 native action_acc_l2 严格一致。
         "smoothness": RewardTermCfg(
             func=mdp.action_acc_l2,
-            weight=BLACK_SMOOTHNESS_WEIGHT,
+            weight=params.reward.smoothness,
         ),
     }
 
@@ -381,8 +353,15 @@ def _configure_observations(cfg: ManagerBasedRlEnvCfg) -> None:
     }
     # Black actor 数值 contract：固定 scale 与 raw noise 幅值。
     # 同样用 replace 生成独立 term cfg，避免通过共享对象改动 critic term。
+    # term → noise 的映射属于 observation wiring，因此留在这里而不是参数对象内部。
+    actor_noise = {
+        "base_ang_vel": params.observation_noise.base_ang_vel,
+        "projected_gravity": params.observation_noise.projected_gravity,
+        "joint_pos": params.observation_noise.joint_pos,
+        "joint_vel": params.observation_noise.joint_vel,
+    }
     for term_name in BLACK_ACTOR_OBS_TERM_ORDER:
-        noise_range = BLACK_ACTOR_OBS_NOISE.get(term_name)
+        noise_range = actor_noise.get(term_name)
         cfg.observations["actor"].terms[term_name] = replace(
             actor_terms[term_name],
             scale=BLACK_ACTOR_OBS_SCALE[term_name],
@@ -403,7 +382,7 @@ def _configure_terminations(cfg: ManagerBasedRlEnvCfg) -> None:
         func=mdp.illegal_contact,
         params={
             "sensor_name": BLACK_ILLEGAL_CONTACT_SENSOR,
-            "force_threshold": BLACK_ILLEGAL_CONTACT_FORCE_THRESHOLD,
+            "force_threshold": params.termination.illegal_contact_force,
         },
     )
     # Stuck termination：沿 planar command 方向无 progress 的连续时长超过阈值。
@@ -413,10 +392,10 @@ def _configure_terminations(cfg: ManagerBasedRlEnvCfg) -> None:
         params={
             "command_name": BLACK_COMMAND_NAME,
             "asset_cfg": SceneEntityCfg("robot"),
-            "command_threshold": BLACK_STUCK_COMMAND_THRESHOLD,
-            "velocity_threshold": BLACK_STUCK_VELOCITY_THRESHOLD,
-            "grace_s": BLACK_STUCK_GRACE_S,
-            "timeout_s": BLACK_STUCK_TIMEOUT_S,
+            "command_threshold": params.termination.stuck_command_threshold,
+            "velocity_threshold": params.termination.stuck_velocity_threshold,
+            "grace_s": params.termination.stuck_grace,
+            "timeout_s": params.termination.stuck_timeout,
         },
     )
     cfg.terminations.pop("out_of_terrain_bounds", None)
