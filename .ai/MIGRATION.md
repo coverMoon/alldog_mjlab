@@ -213,32 +213,71 @@ Action contract 不依赖 actuator/model natural order。
 
 ## 4. Frozen Command Contract
 
-当前 Black velocity command：
+Black flat v1 的 command 是**固定范围 + MjLab native sampler**，训练全程不变。
 
 ```text
-resampling time = 10.0 s
+generator:
+    MjLab v1.6 UniformVelocityCommand
+    （body-frame 速度指令，按 resampling 重采样）
 
-heading command = False
+range:
+    vx   [-1, 1] m/s
+    vy   [-1, 1] m/s
+    wz   [-π, π] rad/s
 
-vx ∈ [-1.0, 1.0] m/s
-vy ∈ [-1.0, 1.0] m/s
-wz ∈ [-π, π] rad/s
+resampling:
+    10 s（固定，不随机）
+
+heading command:
+    disabled（rel_heading_envs = 0，ranges.heading = None）
+
+native sampler 比例:
+    standing     10%   （指令强制为 [0, 0, 0]）
+    forward-only 20%   （vx ≥ 0.3 且 vy = wz = 0；standing 优先）
+    world-frame   0%
+    reset 初速度  0%
+
+curriculum:
+    disabled（terrain curriculum 与 command curriculum 均已移除）
 ```
 
-当前命令来源：
+因此 `params.command.*` 是**最终训练 contract**，不是「curriculum 前的初始范围」；
+`cfg.curriculum == {}`。
+
+### 4.1 What was intentionally not migrated
 
 ```text
-twist
+official HIMLoco:
+    performance-based lin_vel_x curriculum（tracking > 0.8 扩 ±0.2 / max ±2）
+    + 与之耦合的 high/low speed env command sampler
+
+super-dog（68f1c1c 及后期）:
+    buffer / EMA / pass streak / required_passes / max_curriculum
+    low/high command bucket
+    terrain_probe / stand_probe / stop_probe
 ```
 
-注意：
+这些都是 historical optional training strategy，可在 super-dog 查看；本项目 v1 不复刻。
 
-当前 MjLab command curriculum 仍然存在，并可能在训练过程中修改 velocity ranges。
+### 4.2 Framework difference
 
-该行为尚未完成迁移，暂时 deferred。
+```text
+This is not an exact HIMLoco command migration.
+```
+
+official HIMLoco 的 curriculum 与其 command sampler 耦合，不能只取更新公式；
+super-dog 的 curriculum 又依赖 buffer/EMA/streak 状态机与三类 probe env。
+
+Black flat v1 有意简化为：
+
+```text
+固定范围 + MjLab native standing / forward-only sampling
+```
+
+保留 10% standing 覆盖以训练零指令行为，保留 20% forward-only 覆盖以增加前进样本；
+standing / forward 的判定与采样完全复用 framework。
 
 ------
-
 ## 5. Frozen Actor Observation Contract
 
 当前 PPO actor使用单帧：
@@ -839,9 +878,12 @@ push
 
 ### 12.2 play 模式
 
-`play=True` 为 nominal physics：上面 6 个 DR event 整组移除，只保留 reset events
-（`reset_base` / `reset_hip_joints` / `reset_thigh_joints` / `reset_calf_joints`），
-并继续关闭 actor corruption、curriculum 与 push。
+`play=True` 为 nominal physics：上面 6 个 DR event 整组移除（push 也在其中），
+只保留 reset events（`reset_base` / `reset_hip_joints` / `reset_thigh_joints` /
+`reset_calf_joints`），并继续关闭 actor corruption。
+
+train / play 的区别仅剩：DR、actor observation corruption、episode 长度；command
+contract 两侧完全相同（见 §4）。
 
 ### 12.3 Deferred DR（不在 v1）
 
@@ -866,23 +908,20 @@ motor strength / action delay 分别在 sim2real contract 阶段处理。
 
 ## 13. In Progress
 
-Black flat domain randomization：
-
 ```text
-COMPLETE
+Black flat reward:   COMPLETE（§11）
+Black flat DR:       COMPLETE（§12）
+Black flat command:  COMPLETE（§4）
 ```
 
-当前 DR 已冻结为 §12 的 6 项，train 生效、play 为 nominal physics。
+command 已冻结为固定范围 + native sampler，且不再有任何 curriculum（§4）。
+train / play 的 command contract 完全相同。
 
 下一阶段：
 
 ```text
-Black command curriculum
+Black flat final PPO verification
 ```
-
-进入 curriculum 前先比较 legacy 的 curriculum 规则（阈值 / EMA / required passes /
-buffer）与 MjLab `command_vel` staged velocity curriculum，以及
-command ranges 被 curriculum 改写后的语义。
 
 ------
 
@@ -920,13 +959,15 @@ restitution
 
 ### Command Curriculum
 
-旧 Black command curriculum与 MjLab当前 staged velocity curriculum尚未对齐。
-
-状态：
+Black flat v1 有意不迁任何 command curriculum（见 §4）：范围固定，standalone 由
+§4 的 native sampler 提供 standing / forward-only 覆盖。
 
 ```text
-deferred
+状态: not migrated by design（不是 deferred 的 TODO）
 ```
+
+官方 HIMLoco 的 performance-based curriculum 与 super-dog 的 buffer/EMA/probe 机制
+如需启用，应作为新的 behavior unit 提出，并先说明要解决的训练问题。
 
 ------
 
@@ -991,7 +1032,7 @@ effort limit
 
 action dimension/order/mapping
 
-command contract
+command contract（固定范围 / native sampler 比例 / 无 curriculum 且 step counter 推进后仍不变）
 
 45-D actor observation
 
@@ -1071,10 +1112,9 @@ CUDA PASS/FAIL/SKIPPED
 当前需要持续注意：
 
 1. MuJoCo / mjwarp contact sensor在深度 penetration 情况下观察过 `found` 存在但 force为0的现象。正常落地/趴地时 force可正常达到明显大于1 N。目前 illegal-contact threshold继续保持1 N，后续根据训练日志判断是否需要处理。由于 trunk 与地面的接触力只在某个高度区间可靠，本地验证的强制触地 probe 会从浅到深扫几个 root 高度取首个触发，而不是固定单一高度。
-2. MjLab command curriculum仍会改变训练后期 command ranges，因此当前“初始 command contract”不等于完整 curriculum contract。该行为已在本地验证中显式记录：`params.py` 的 `BLACK_COMMAND_*_RANGE` 是初始值，首次 reset 后 `command_vel` curriculum 会把 `ang_vel_z` 改写成 `[-0.5, 0.5]`。
-3. 当前 actor contract已经固定，但 critic仍属于 MjLab baseline，后续 HIM阶段不能将其误认为旧 Black privileged observation。
-4. 当前 `algorithms/him/` 中可能仍存在 Black-specific hardcoded dimensions。HIM阶段必须清理，不在当前 Black PPO阶段提前修改。
-5. Legacy Black reward 存在两个版本：当前 `black_config.py` / `black_env.py`（HEAD，含 2026-07-15 的 `1f344d9` 覆盖式同步）与 2026-06-29~07-03 的日志 lineage。Black flat v1 的 reward authority 不再取二者之一：核心公式改用 InternRobotics/HIMLoco 官方 Go1 baseline，机器人数值取 Black intrinsic（见 §11.0）；`68f1c1c` 只作为 optional shaping / 历史调参 / sim2real 诊断参考。`1f344d9` 不作为迁移依据（它同时改动 reward / command / DR / terrain / termination / PPO 且无对应决策记录），这是迁移 source decision，不是对该提交作者意图的事实断言。`super-dog` 的 shaping 项若日后需要启用，须先确认取哪一版。
+2. 当前 actor contract已经固定，但 critic仍属于 MjLab baseline，后续 HIM阶段不能将其误认为旧 Black privileged observation。
+3. 当前 `algorithms/him/` 中可能仍存在 Black-specific hardcoded dimensions。HIM阶段必须清理，不在当前 Black PPO阶段提前修改。
+4. Legacy Black reward 存在两个版本：当前 `black_config.py` / `black_env.py`（HEAD，含 2026-07-15 的 `1f344d9` 覆盖式同步）与 2026-06-29~07-03 的日志 lineage。Black flat v1 的 reward authority 不再取二者之一：核心公式改用 InternRobotics/HIMLoco 官方 Go1 baseline，机器人数值取 Black intrinsic（见 §11.0）；`68f1c1c` 只作为 optional shaping / 历史调参 / sim2real 诊断参考。`1f344d9` 不作为迁移依据（它同时改动 reward / command / DR / terrain / termination / PPO 且无对应决策记录），这是迁移 source decision，不是对该提交作者意图的事实断言。`super-dog` 的 shaping 项若日后需要启用，须先确认取哪一版。
 
 ------
 
@@ -1086,7 +1126,7 @@ CUDA PASS/FAIL/SKIPPED
 1. stuck termination                     （完成）
 2. reward migration                      （完成：Black flat v1 baseline = 10 项，见 §11）
 3. domain randomization                  （完成：6 项，见 §12）
-4. command curriculum
+4. command baseline                      （完成：固定范围 + native sampler，无 curriculum，见 §4）
 5. Black flat final PPO verification
 6. Black rough PPO
 7. Black sim2real/deployment contract

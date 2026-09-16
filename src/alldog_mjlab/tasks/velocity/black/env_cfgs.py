@@ -96,19 +96,31 @@ BLACK_COMMAND_NAME = "twist"
 
 
 def _configure_command(cfg: ManagerBasedRlEnvCfg) -> None:
-    """Black flat velocity command contract。
+    """Black flat v1 command contract：固定范围 + MjLab native sampler。
 
-    heading command 关闭（v1.6.0 要求 heading_command=False 时 ranges.heading 必须为
-    None，否则构建环境时报错），数值范围见 params.py。
+    - 范围与重采样间隔来自 params.command，训练全程固定（不迁移任何 command
+      curriculum，`command_vel` 在本函数里移除）；
+    - heading command 关闭（v1.6.0 要求 heading_command=False 时 ranges.heading 必须
+      为 None，否则构建环境时报错）；`rel_heading_envs` 在 heading 关闭时不生效，
+      显式写 0 以免被误读为启用；
+    - standing / forward-only / world-frame 比例为 native sampler 契约，显式冻结。
     """
     twist_command = cfg.commands[BLACK_COMMAND_NAME]
     assert isinstance(twist_command, UniformVelocityCommandCfg)
     twist_command.resampling_time_range = params.command.resampling_time
-    twist_command.heading_command = False
-    twist_command.ranges.heading = None
     twist_command.ranges.lin_vel_x = params.command.lin_vel_x
     twist_command.ranges.lin_vel_y = params.command.lin_vel_y
     twist_command.ranges.ang_vel_z = params.command.ang_vel_z
+    twist_command.heading_command = False
+    twist_command.rel_heading_envs = 0.0
+    twist_command.ranges.heading = None
+    twist_command.rel_standing_envs = params.command.standing_fraction
+    twist_command.rel_forward_envs = params.command.forward_fraction
+    twist_command.rel_world_envs = params.command.world_fraction
+    twist_command.init_velocity_prob = params.command.init_velocity_prob
+    # MjLab velocity baseline 自带 staged velocity curriculum；Black flat v1 不迁移
+    # 任何 command curriculum，范围从训练开始到结束保持不变。
+    cfg.curriculum.pop("command_vel", None)
 
 
 def _configure_scene_and_sensors(cfg: ManagerBasedRlEnvCfg) -> None:

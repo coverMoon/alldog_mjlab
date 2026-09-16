@@ -25,13 +25,24 @@ import math
 
 @dataclass(frozen=True)
 class CommandParams:
-    """Velocity command 数值范围（m/s、rad/s 与 s）。"""
+    """Black flat v1 的最终 command contract（训练全程固定，无 curriculum）。
+
+    生成器为 MjLab v1.6 `UniformVelocityCommand`：body-frame 速度指令，按
+    `resampling_time` 重采样。行/角速度单位为 m/s 与 rad/s。
+    """
 
     resampling_time: tuple[float, float] = (10.0, 10.0)
 
     lin_vel_x: tuple[float, float] = (-1.0, 1.0)
     lin_vel_y: tuple[float, float] = (-1.0, 1.0)
     ang_vel_z: tuple[float, float] = (-math.pi, math.pi)
+
+    # native sampler 比例：standing env 指令置 0；forward-only env 取 vx >= 0.3
+    # 且 vy = ang_vel_z = 0；world-frame env 与 reset 初速度随机均未启用。
+    standing_fraction: float = 0.1
+    forward_fraction: float = 0.2
+    world_fraction: float = 0.0
+    init_velocity_prob: float = 0.0
 
 
 command = CommandParams()
@@ -174,9 +185,10 @@ reward = RewardParams()
 class DomainRandomizationParams:
     """Black flat v1 的 domain randomization（train 生效，play 全部移除）。
 
-    friction / payload_mass / kp_scale / kd_scale / encoder_bias 均为 startup：
-    每个 env 采样一次并在 episode 内保持；pd_gains 为 reset：每次 episode reset
-    重新采样；push 为 interval：训练中周期性施加 xy 速度增量。
+    startup（每 env 采样一次并在 episode 内保持）：friction、payload_mass、
+    com_offset、encoder_bias；
+    reset（每次 episode reset 重新采样）：pd_gains；
+    interval（训练中周期性施加 xy 速度增量）：push_interval / push_velocity。
     """
 
     # Contact
