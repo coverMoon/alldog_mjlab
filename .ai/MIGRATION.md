@@ -909,9 +909,10 @@ motor strength / action delay 分别在 sim2real contract 阶段处理。
 ## 13. In Progress
 
 ```text
-Black flat reward:   COMPLETE（§11）
-Black flat DR:       COMPLETE（§12）
-Black flat command:  COMPLETE（§4）
+Black flat reward:                 COMPLETE（§11）
+Black flat DR:                     COMPLETE（§12）
+Black flat command:                COMPLETE（§4）
+Black flat final PPO verification: COMPLETE（§16.1）
 ```
 
 command 已冻结为固定范围 + native sampler，且不再有任何 curriculum（§4）。
@@ -920,8 +921,11 @@ train / play 的 command contract 完全相同。
 下一阶段：
 
 ```text
-Black flat final PPO verification
+Black rough PPO
 ```
+
+（按 §18 的长期顺序；sim2real / deployment contract 阶段需一并处理 §17.1 的 ONNX
+metadata 导出问题。）
 
 ------
 
@@ -1086,6 +1090,79 @@ inference
 
 新增 behavior unit必须增加对应 contract test，但不得弱化已有 smoke。
 
+### 16.1 Final PPO verification run record
+
+Black flat PPO 的最终验证在 2026-09-17 完成，verdict 见本小节末尾。
+
+```text
+code state        HEAD 61626dc（production 无改动）
+task              black-flat
+training command  uv run train black-flat --env.scene.num-envs 4096 \
+                      --agent.max-iterations 500 --agent.logger tensorboard \
+                      --agent.run-name sanity500
+device            NVIDIA RTX 4060 Laptop 8 GB（cuda:0，单卡）
+num_envs          4096
+iterations        500（= max_iterations，正常跑到最后一次 save）
+steps_per_env     24
+transitions       4096 × 24 × 500 ≈ 4.92e7
+checkpoint        logs/rsl_rl/black_velocity/2026-09-17_10-35-28_sanity500/model_499.pt
+日志              <run_dir>/events.out.tfevents.*    （tensorboard logger）
+```
+
+训练曲线（从 run 的 event 文件实测，首值 → 末段）：
+
+```text
+Train/mean_reward                    -0.68  → 22.49
+Train/mean_episode_length             23.7  → 1000（= 20 s 满）
+Episode_Reward/track_linear_velocity  0.002 → 0.889（raw ≈ 0.89）
+Episode_Reward/track_angular_velocity 0.001 → 0.411（raw ≈ 0.82）
+Episode_Termination/illegal_contact    37.8 → 0.0
+Episode_Termination/time_out            4.2 → 3.09（末段终止 ≈100% 为走满 20 s）
+Episode_Termination/stuck                 0 → 0
+Loss/entropy                          16.96 → 1.46
+Policy/mean_std                        0.99 → 0.275
+Perf/total_fps                              ≈ 96k
+```
+
+独立进程 checkpoint 重载 + 固定 command 短评估（play contract：无 DR / 无 corruption，
+16 envs，每档 5 s，确定性策略）：
+
+```text
+command                abs err (vx / vy / wz)      root z   终止
+stand                  0.001 / 0.001 / 0.003       0.452    0
+forward   [0.5,0,0]    0.036 / 0.018 / 0.036       0.455    0
+backward  [-0.5,0,0]   0.050 / 0.033 / 0.052       0.434    0
+lat left  [0,0.5,0]    0.012 / 0.130 / 0.042       0.449    0
+lat right [0,-0.5,0]   0.022 / 0.060 / 0.088       0.428    0
+yaw left  [0,0,1.0]    0.016 / 0.028 / 0.088       0.441    0
+yaw right [0,0,-1.0]   0.032 / 0.037 / 0.138       0.451    0
+combined  [0.5,.3,.5]  0.027 / 0.037 / 0.044       0.453    0
+
+8 档 × 16 envs × 5 s 内 0 次终止（无 illegal_contact / stuck）
+```
+
+play 定性（用户在 viser viewer 中手动改变 command 观察）：
+
+```text
+stand / forward / backward / lateral / yaw / combined 均正常响应
+未触发 illegal_contact / stuck
+已知弱点：轻微拖脚（foot dragging）
+```
+
+verdict：
+
+```text
+Black flat PPO pipeline:              VERIFIED
+Black flat locomotion baseline:       VERIFIED（基于 500-iteration run）
+10 000-iteration 长程收敛性:           NOT VERIFIED（按用户决定不跑满）
+```
+
+即结论是「训练 pipeline 能稳定跑通并产生基本可用 flat locomotion policy」，
+不是最终性能结论：rough terrain / 强扰动恢复 / 高速 / 完美 trot / sim2real 均未验证。
+
+拖脚不作为 reward 配置缺陷处理：v1 baseline 有意不含 foot_clearance（见 §11.3），
+若需要抬脚高度约束，须作为新的 behavior unit 提出（见 §14）。
+
 标准验证：
 
 ```bash
@@ -1115,6 +1192,81 @@ CUDA PASS/FAIL/SKIPPED
 2. 当前 actor contract已经固定，但 critic仍属于 MjLab baseline，后续 HIM阶段不能将其误认为旧 Black privileged observation。
 3. 当前 `algorithms/him/` 中可能仍存在 Black-specific hardcoded dimensions。HIM阶段必须清理，不在当前 Black PPO阶段提前修改。
 4. Legacy Black reward 存在两个版本：当前 `black_config.py` / `black_env.py`（HEAD，含 2026-07-15 的 `1f344d9` 覆盖式同步）与 2026-06-29~07-03 的日志 lineage。Black flat v1 的 reward authority 不再取二者之一：核心公式改用 InternRobotics/HIMLoco 官方 Go1 baseline，机器人数值取 Black intrinsic（见 §11.0）；`68f1c1c` 只作为 optional shaping / 历史调参 / sim2real 诊断参考。`1f344d9` 不作为迁移依据（它同时改动 reward / command / DR / terrain / termination / PPO 且无对应决策记录），这是迁移 source decision，不是对该提交作者意图的事实断言。`super-dog` 的 shaping 项若日后需要启用，须先确认取哪一版。
+5. 训练每次 save 都会打印 `[WARN] ONNX export failed (training continues): 'joint_pos'`：`.pt` 与训练均不受影响，但导出的 onnx 缺少部署 metadata。现象 / 分析 / 结论与处理时机见 §17.1，不在当前 Black flat PPO 阶段处理。
+6. 最终验证观察到的策略弱点：轻微拖脚（foot dragging）。v1 baseline 有意不含 foot_clearance（§11.3），因此这不是配置错误；若需要抬脚高度约束，须作为新的 behavior unit 提出（§14）。另：最终验证只跑到 500 iteration（用户决定不跑满 10 000），因此长程收敛性未验证（§16.1）。
+
+### 17.1 Policy export / ONNX metadata
+
+现象：
+
+Black flat PPO 训练中每次 save 都会打印
+
+```text
+[WARN] ONNX export failed (training continues): 'joint_pos'
+```
+
+500-iteration sanity run 中 11/11 次出现（从第一次 `model_0.pt` 起）。
+
+分析：
+
+`mjlab/tasks/velocity/rl/runner.py` 的 `VelocityOnPolicyRunner.save()` 顺序为
+`super().save()`（.pt）→ `export_policy_to_onnx()`（.onnx）→ `get_base_metadata()`
+→ `attach_metadata_to_onnx()`，失败在第三步：
+`mjlab/rl/exporter_utils.py:47` 硬编码
+
+```python
+joint_action = env.action_manager.get_term("joint_pos")
+```
+
+而 Black 的 action 契约是四个分腿 term（`joint_pos_fl` / `_fr` / `_rl` / `_rr`，见 §3.3），
+不存在名为 `joint_pos` 的 term，该行抛 `KeyError('joint_pos')`，被 `except` 兜住只打 WARN。
+
+本地已直接复现（只构建 env，不训练）：
+
+```text
+action terms     : ['joint_pos_fl', 'joint_pos_fr', 'joint_pos_rl', 'joint_pos_rr']
+action total dim : 12
+metadata FAILED  : KeyError('joint_pos')
+出错行            : exporter_utils.py, line 47, in get_base_metadata
+```
+
+MjLab 官方 velocity 任务使用单个 `"joint_pos"` term（`velocity_env_cfg.py:168`），
+因此上游不会遇到该错误；这是 Black 分腿 action term 契约（有意为之）与 MjLab
+导出工具约定不一致的结果，不是环境或依赖问题。
+
+影响范围：
+
+```text
+训练             不受影响（WARN 之后继续训练，run 能跑到最后一次 save）
+checkpoint       不受影响（.pt 在失败步骤之前已经写完）
+play / 评估      不受影响（play 只读 .pt，不读 onnx）
+.onnx 文件       会生成且结构合法（onnx.checker 通过，inputs=['obs'], outputs=['actions']）
+.onnx metadata   metadata_props 为空
+```
+
+缺失的字段即 `get_base_metadata()` 本应写入的内容：
+
+```text
+joint_names / joint_stiffness / joint_damping / default_joint_pos / action_scale
+command_names
+observation_names / observation_terms_scale / observation_terms_clip
+observation_terms_flatten_history_dim / observation_terms_history_length
+```
+
+即：网络权重在，但「策略输出如何映射到真机」的元数据不在。
+
+结论：
+
+- 当前 Black flat PPO 阶段不需要处理；不要因为看到该 WARN 而改动 action term 命名
+  （会触碰 §3.3 已冻结的 policy 顺序契约，且 MjLab v1.6.0 的 `preserve_order` 不能可靠
+  重排 JOINT action 目标）。
+- 该问题归属 Black sim2real / deployment contract 阶段，必须解决并验证，二选一：
+  (a) 由 Black / 部署侧提供自己的导出与 metadata（不改 action term 名，也不改 MjLab 源码）；
+  (b) 改成单个 `joint_pos` term（需重新验证 action 顺序契约，风险更高）。
+- 无论取哪种方案，部署契约都必须显式给出「policy 顺序 FL→FR→RL→RR ↔ MuJoCo 模型顺序」
+  的映射（见 §3.1），因此这不是额外负担，而是部署阶段本来就需要的产物。
+- 验收条件：导出路径不再出现该 WARN，或明确采用「onnx + 独立映射表」方案并证明能完整
+  还原 joint 顺序 / action_scale / default pose。
 
 ------
 
@@ -1127,9 +1279,9 @@ CUDA PASS/FAIL/SKIPPED
 2. reward migration                      （完成：Black flat v1 baseline = 10 项，见 §11）
 3. domain randomization                  （完成：6 项，见 §12）
 4. command baseline                      （完成：固定范围 + native sampler，无 curriculum，见 §4）
-5. Black flat final PPO verification
+5. Black flat final PPO verification     （完成：500-iteration run + 独立进程 reload + 8-command play/eval，见 §16.1）
 6. Black rough PPO
-7. Black sim2real/deployment contract
+7. Black sim2real/deployment contract     （须一并处理 §17.1 的 ONNX metadata 导出）
 8. HIM observation / estimator / algorithm integration
 ```
 
