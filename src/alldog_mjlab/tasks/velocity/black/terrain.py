@@ -62,6 +62,11 @@ class BlackRoughSlopeTerrainCfg(SubTerrainCfg):
     `noise_downsample` 间距采样再双线性插值的均匀噪声，与 legacy
     `random_uniform_terrain` 一致。噪声叠加在整个 patch 上（包含 spawn platform），
     与 legacy 的 `height_field_raw += noise` 相同。
+
+    heightfield 保留 legacy 的 absolute zero（geom z offset = elevation_min ×
+    vertical_scale），因此表面高度即 `noise × vertical_scale`，patch 边缘与相邻
+    terrain / border 在 z = 0 衔接；spawn origin z 同样按 legacy 语义取 patch 中心
+    ±1 m 区域的最大 raw height。
     """
 
     slope_range: tuple[float, float] = (0.0, 0.7)
@@ -104,6 +109,12 @@ class BlackRoughSlopeTerrainCfg(SubTerrainCfg):
             elevation_max - elevation_min if elevation_max != elevation_min else 1
         )
 
+        # 高度场保持原始 absolute zero：geom 下移 elevation_min，使表面高度重新等于
+        # ``noise * vertical_scale``（与 legacy 的 ``height_field_raw`` 一致，patch 边缘
+        # 回到 z = 0，与相邻 terrain / border 衔接）。native 的
+        # ``HfDiscreteObstaclesTerrainCfg`` 用同一手法。
+        hfield_z_offset = elevation_min * self.vertical_scale
+
         max_physical_height = elevation_range * self.vertical_scale
         base_thickness = max_physical_height * self.base_thickness_ratio
 
@@ -126,18 +137,25 @@ class BlackRoughSlopeTerrainCfg(SubTerrainCfg):
             userdata=normalized_elevation.flatten().astype(np.float32).tolist(),
         )
 
-        physical_heights = normalized_elevation * max_physical_height
+        physical_heights = (
+            hfield_z_offset + normalized_elevation * max_physical_height
+        )
         material_name = color_by_height(spec, noise, unique_id, physical_heights)
 
         hfield_geom = body.add_geom(
             type=mujoco.mjtGeom.mjGEOM_HFIELD,
             hfieldname=field.name,
-            pos=[self.size[0] / 2, self.size[1] / 2, 0.0],
+            pos=[self.size[0] / 2, self.size[1] / 2, hfield_z_offset],
             material=material_name,
         )
 
-        # 非 inverted 金字塔的最高点是中心 platform，因此 spawn 高度取全局最大表面高度。
-        spawn_height = max_physical_height
+        # legacy ``add_terrain_to_map()``：env origin z = patch 中心 ±1 m 区域的
+        # 最大 raw terrain height（slope + rough noise 都已包含），不是全局最大值。
+        x1 = int((self.size[0] / 2 - 1.0) / self.horizontal_scale)
+        x2 = int((self.size[0] / 2 + 1.0) / self.horizontal_scale)
+        y1 = int((self.size[1] / 2 - 1.0) / self.horizontal_scale)
+        y2 = int((self.size[1] / 2 + 1.0) / self.horizontal_scale)
+        spawn_height = float(np.max(noise[x1:x2, y1:y2])) * self.vertical_scale
         origin = np.array([self.size[0] / 2, self.size[1] / 2, spawn_height])
 
         # Black rough v1 不使用 flat patch sampling（reset 沿用 flat contract）。

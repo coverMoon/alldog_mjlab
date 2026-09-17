@@ -981,9 +981,14 @@ obstacle height  = 0.06 + 0.2 d   （choice 模式：±h 与 ±h/2 混合坑与�
    分布评估），只把 curriculum term 置空。
 8. 本轮不接入 terrain_scan / height_scan（actor 与 critic 与 flat 相同），也不加入
    out_of_terrain_bounds；两者属于后续 behavior unit。
-9. spawn 高度：各 slope terrain 与 legacy 一致取 plateau 层（rough slope 取含噪声的
-   全局最大，因此 spawn 可高于局部表面最多 2 x amplitude，d = 0.9 时约 0.21 m 上限，
-   实测 ≤ 0.11 m）；spawn 永不低于所在 patch 的表面（ray-cast 逐格验证）。
+9. rough slope 高度场保留 legacy 的 absolute zero：geom z offset = elevation_min ×
+   vertical_scale，因此其物理表面严格等于 raw heightfield × vertical_scale
+   （patch 边缘落在 z = 0，与相邻 terrain / border 衔接；native 的
+   HfDiscreteObstaclesTerrainCfg 用同一手法）。spawn origin z 同样按 legacy
+   ``add_terrain_to_map()`` 语义，取 patch 中心 ±1 m 区域的最大 raw terrain height
+   （不是全局最大值，也不是 elevation range）；rough slope 的 plateau 带噪声，因此
+   该项的 spawn 可高于其 XY 处局部表面，上限为 2 × amplitude（d = 0.9 时约 0.21 m，
+   实测 worst 0.17 m），spawn 永不低于所在 patch 的表面（ray-cast 逐格验证）。
 10. obstacle height 用 int() 截断（native 实现）：d = 0.7 得到 39 units = 0.195 m
    而不是精确 0.2 m，且 ±h/2 在奇数 units 下略不对称（-0.1 / +0.095）。
 ```
