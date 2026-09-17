@@ -906,30 +906,133 @@ motor strength / action delay 分别在 sim2real contract 阶段处理。
 
 ------
 
-## 13. In Progress
+## 13. Frozen Black Rough Terrain Contract
+
+Black rough v1 的 terrain 由 MjLab v1.6.0 native terrain generator 生成
+（`TerrainEntity` + `TerrainGeneratorCfg` curriculum 模式），只新增一个 task-local
+sub-terrain primitive（rough slope），不引入第二套 terrain framework。
+
+数值在 `params.terrain.*`，terrain 数学在 `tasks/velocity/black/terrain.py`，装配在
+`env_cfgs.black_rough_env_cfg()`（= `black_flat_env_cfg()` + rough terrain 覆盖，
+不复制 flat 配置）。
+
+### 13.1 Legacy 来源与映射
+
+legacy Black（super-dog）terrain 来自 `legged_gym/utils/terrain.py`
+（`Terrain.curiculum()` + `make_terrain()`）叠加 Isaac Gym `terrain_utils`
+（`HIMLoco/isaacgym/python/isaacgym/terrain_utils.py`）；数值取 `68f1c1c`
+（2026-07-03 lineage）的 `black_config.py`。HEAD 的 stair-mixed proportions
+（`[0.1, 0.1, 0.1, 0.25, 0.25, 0.2, ...]`）不采用，与 §11.0 的 reward authority
+是同一条 lineage 决策。
+
+```text
+legacy（68f1c1c）                      Black rough v1（MjLab v1.6.0）
+terrain_length / width = 8.0 / 8.0     generator.size = (8.0, 8.0)
+horizontal_scale = 0.1                 sub-terrain horizontal_scale = 0.1
+vertical_scale = 0.005                 sub-terrain vertical_scale = 0.005
+num_rows = 10                          generator.num_rows = 10
+num_cols = 20                          curriculum 模式忽略；列数 = terrain 类型数 = 5
+difficulty = row / num_rows            difficulty_range = (0.0, 0.9)（按 row/(num_rows-1) 插值）
+curriculum = True                      generator.curriculum = True + cfg.curriculum["terrain_levels"]
+max_init_terrain_level = 5             TerrainEntityCfg.max_init_terrain_level = 5
+border_size = 25                       generator.border_width = 20.0（native preset 值）
+pyramid platform_size = 3.0            platform_width = 3.0
+```
+
+terrain 类型与 spawn 权重（legacy `terrain_proportions`）冻结为：
+
+```text
+flat                 0.20   BoxFlatTerrainCfg
+smooth_slope_up      0.15   HfPyramidSlopedTerrainCfg(inverted=False)
+smooth_slope_down    0.15   HfPyramidSlopedTerrainCfg(inverted=True)
+rough_slope          0.30   BlackRoughSlopeTerrainCfg（task-local）
+discrete_obstacles   0.20   HfDiscreteObstaclesTerrainCfg(mode="choice")
+```
+
+难度语义（d = row difficulty ∈ {0.0, 0.1, ..., 0.9}，不含 1.0）：
+
+```text
+slope            = 0.7 * d        （smooth 与 rough 相同；max 0.63）
+rough noise      = ±(0.015 + 0.1 d)，step 0.005，downsample 0.2（双线性）
+obstacle height  = 0.06 + 0.2 d   （choice 模式：±h 与 ±h/2 混合坑与凸起）
+```
+
+未迁移（本轮明确不含）：stairs / wave / stepping stones / gap / bridge / wall。
+
+### 13.2 Intentional framework differences
+
+```text
+1. 列语义：legacy 用列编码 proportion（20 列）；MjLab curriculum 模式一个 terrain
+   一列（5 列），proportion 变成 env spawn 权重，因此实际网格是 10 x 5。
+2. border：legacy 的 border 是 heightfield 的一部分（25 m 平面）；MjLab 的
+   border_width 是 z = 0 的 flat apron + 1 m 裙边，取 native rough preset 的 20 m。
+3. rough slope 组装：MjLab 没有 slope + noise 的 native composition，因此
+   BlackRoughSlopeTerrainCfg 组合 native 的 slope 数学与 native 的 uniform noise
+   数学（两个 int16 高度场相加），复用 native 的 hfield / color_by_height 构造。
+4. uniform noise 插值：MjLab native preset 用 RectBivariateSpline 默认三次样条，
+   会在采样点之间 overshoot 超出 ±amplitude；legacy 用 interp2d(kind='linear')。
+   Black rough v1 取 kx = ky = 1（双线性）= legacy 语义，使 ±amplitude 契约可验证。
+5. plateau 截断：native 与 legacy 一致地在 platform 角点高度截断（plateau 实际略大于
+   platform_width），配置的 slope 只体现在 plateau 之外的 ramp 段。
+6. env 分配：env 按 proportion 分配到 (row, col)，多个 env 可共享同一 patch
+   （native 文档语义；legacy 同样共享）。
+7. play：MjLab native rough task 在 play 下把 generator 切成 random 模式 + 5 x 5 小网格；
+   Black rough v1 的 play 保留与训练相同的 generator 布局与 spawn 比例（便于按训练
+   分布评估），只把 curriculum term 置空。
+8. 本轮不接入 terrain_scan / height_scan（actor 与 critic 与 flat 相同），也不加入
+   out_of_terrain_bounds；两者属于后续 behavior unit。
+9. spawn 高度：各 slope terrain 与 legacy 一致取 plateau 层（rough slope 取含噪声的
+   全局最大，因此 spawn 可高于局部表面最多 2 x amplitude，d = 0.9 时约 0.21 m 上限，
+   实测 ≤ 0.11 m）；spawn 永不低于所在 patch 的表面（ray-cast 逐格验证）。
+10. obstacle height 用 int() 截断（native 实现）：d = 0.7 得到 39 units = 0.195 m
+   而不是精确 0.2 m，且 ±h/2 在奇数 units 下略不对称（-0.1 / +0.095）。
+```
+
+### 13.3 Terrain curriculum
+
+```text
+cfg.curriculum.keys() == {"terrain_levels"}
+func = mjlab.tasks.velocity.mdp.terrain_levels_vel（native）
+params.command_name = "twist"
+command_vel 已移除（command contract 与 flat 相同）
+```
+
+推进 / 回退公式由 native 实现，与 legacy `_update_terrain_curriculum()` 一致：
+walked distance > size[0] / 2 升一级；walked distance < ||command_xy|| x
+max_episode_length_s x 0.5 降一级；达到 num_rows 时随机新 level；首次 reset
+（common_step_counter == 0）不改 level，因此 `max_init_terrain_level` 生效
+（`randint(0, max_init_terrain_level + 1)`，inclusive，与 legacy 相同）。
+
+------
+
+## 14. In Progress
 
 ```text
 Black flat reward:                 COMPLETE（§11）
 Black flat DR:                     COMPLETE（§12）
 Black flat command:                COMPLETE（§4）
-Black flat final PPO verification: COMPLETE（§16.1）
+Black flat final PPO verification: COMPLETE（§17.1）
+Black rough terrain generator:     COMPLETE（§13）
 ```
 
 command 已冻结为固定范围 + native sampler，且不再有任何 curriculum（§4）。
 train / play 的 command contract 完全相同。
 
+本轮只完成 rough terrain generator + terrain curriculum；
+**Black rough PPO 尚未训练**（reward / termination / observation 仍是 flat contract）。
+
 下一阶段：
 
 ```text
-Black rough PPO
+terrain scan + critic privileged height
 ```
 
-（按 §18 的长期顺序；sim2real / deployment contract 阶段需一并处理 §17.1 的 ONNX
-metadata 导出问题。）
+（之后才是 Black rough PPO 训练；sim2real / deployment contract 阶段需一并处理
+§18.1 的 ONNX metadata 导出问题。）
 
 ------
 
-## 14. Deferred Black Flat Work
+## 15. Deferred Black Flat Work
 
 尚未迁移/冻结：
 
@@ -985,12 +1088,19 @@ Black flat v1 有意不迁任何 command curriculum（见 §4）：范围固定�
 
 ------
 
-## 15. Explicitly Not Started
+## 16. Explicitly Not Started
 
 以下均未开始，不得提前宣称支持：
 
 ```text
-black-rough
+black-rough PPO 训练
+    （任务已注册，但当前只有 terrain generator + terrain curriculum，见 §13）
+
+terrain scan / critic privileged height observation
+
+rough base height / terrain-aware reward 语义
+
+out_of_terrain_bounds termination
 
 Black sim2real/deployment contract
 
@@ -1011,15 +1121,24 @@ blackw-rough
 
 ------
 
-## 16. Local Verification Baseline
+## 17. Local Verification Baseline
 
 本地：
 
 ```text
-tests/check_black_flat.py
+tests/check_black_flat.py        flat 的 migration verification tool
+tests/check_black_rough.py       rough 的 terrain verification tool（本轮新增）
+tests/render_black_rough.py      rough terrain 的可视化渲染（本轮新增，人工检查用）
 ```
 
 作为 migration verification tool。
+
+`tests/check_black_rough.py` 覆盖（见 §13）：flat 仍为 plane / 空 curriculum；
+rough generator 的 size / num_rows / difficulty_range / border / max_init / 5 类
+sub-terrain 与 proportion；curriculum 只含 terrain_levels；逐行难度 0.0 → 0.9；
+slope = 0.7d、rough noise ±(0.015 + 0.1d) / step 0.005 / downsample 0.2、
+obstacle height 0.06 + 0.2d；50 个 spawn origin 的 ray-cast 落面检查；少量 env 的
+zero / random rollout smoke。
 
 当前应持续覆盖：
 
@@ -1090,7 +1209,7 @@ inference
 
 新增 behavior unit必须增加对应 contract test，但不得弱化已有 smoke。
 
-### 16.1 Final PPO verification run record
+### 17.1 Final PPO verification run record
 
 Black flat PPO 的最终验证在 2026-09-17 完成，verdict 见本小节末尾。
 
@@ -1161,7 +1280,7 @@ Black flat locomotion baseline:       VERIFIED（基于 500-iteration run）
 不是最终性能结论：rough terrain / 强扰动恢复 / 高速 / 完美 trot / sim2real 均未验证。
 
 拖脚不作为 reward 配置缺陷处理：v1 baseline 有意不含 foot_clearance（见 §11.3），
-若需要抬脚高度约束，须作为新的 behavior unit 提出（见 §14）。
+若需要抬脚高度约束，须作为新的 behavior unit 提出（见 §15）。
 
 标准验证：
 
@@ -1184,7 +1303,7 @@ CUDA PASS/FAIL/SKIPPED
 
 ------
 
-## 17. Known Risks
+## 18. Known Risks
 
 当前需要持续注意：
 
@@ -1192,10 +1311,10 @@ CUDA PASS/FAIL/SKIPPED
 2. 当前 actor contract已经固定，但 critic仍属于 MjLab baseline，后续 HIM阶段不能将其误认为旧 Black privileged observation。
 3. 当前 `algorithms/him/` 中可能仍存在 Black-specific hardcoded dimensions。HIM阶段必须清理，不在当前 Black PPO阶段提前修改。
 4. Legacy Black reward 存在两个版本：当前 `black_config.py` / `black_env.py`（HEAD，含 2026-07-15 的 `1f344d9` 覆盖式同步）与 2026-06-29~07-03 的日志 lineage。Black flat v1 的 reward authority 不再取二者之一：核心公式改用 InternRobotics/HIMLoco 官方 Go1 baseline，机器人数值取 Black intrinsic（见 §11.0）；`68f1c1c` 只作为 optional shaping / 历史调参 / sim2real 诊断参考。`1f344d9` 不作为迁移依据（它同时改动 reward / command / DR / terrain / termination / PPO 且无对应决策记录），这是迁移 source decision，不是对该提交作者意图的事实断言。`super-dog` 的 shaping 项若日后需要启用，须先确认取哪一版。
-5. 训练每次 save 都会打印 `[WARN] ONNX export failed (training continues): 'joint_pos'`：`.pt` 与训练均不受影响，但导出的 onnx 缺少部署 metadata。现象 / 分析 / 结论与处理时机见 §17.1，不在当前 Black flat PPO 阶段处理。
-6. 最终验证观察到的策略弱点：轻微拖脚（foot dragging）。v1 baseline 有意不含 foot_clearance（§11.3），因此这不是配置错误；若需要抬脚高度约束，须作为新的 behavior unit 提出（§14）。另：最终验证只跑到 500 iteration（用户决定不跑满 10 000），因此长程收敛性未验证（§16.1）。
+5. 训练每次 save 都会打印 `[WARN] ONNX export failed (training continues): 'joint_pos'`：`.pt` 与训练均不受影响，但导出的 onnx 缺少部署 metadata。现象 / 分析 / 结论与处理时机见 §18.1，不在当前 Black flat PPO 阶段处理。
+6. 最终验证观察到的策略弱点：轻微拖脚（foot dragging）。v1 baseline 有意不含 foot_clearance（§11.3），因此这不是配置错误；若需要抬脚高度约束，须作为新的 behavior unit 提出（§15）。另：最终验证只跑到 500 iteration（用户决定不跑满 10 000），因此长程收敛性未验证（§17.1）。
 
-### 17.1 Policy export / ONNX metadata
+### 18.1 Policy export / ONNX metadata
 
 现象：
 
@@ -1270,7 +1389,7 @@ observation_terms_flatten_history_dim / observation_terms_history_length
 
 ------
 
-## 18. Next Migration Order
+## 19. Next Migration Order
 
 长期方向是「flat 先做完，再 rough，最后 sim2real / HIM」，因此：
 
@@ -1279,9 +1398,11 @@ observation_terms_flatten_history_dim / observation_terms_history_length
 2. reward migration                      （完成：Black flat v1 baseline = 10 项，见 §11）
 3. domain randomization                  （完成：6 项，见 §12）
 4. command baseline                      （完成：固定范围 + native sampler，无 curriculum，见 §4）
-5. Black flat final PPO verification     （完成：500-iteration run + 独立进程 reload + 8-command play/eval，见 §16.1）
+5. Black flat final PPO verification     （完成：500-iteration run + 独立进程 reload + 8-command play/eval，见 §17.1）
 6. Black rough PPO
-7. Black sim2real/deployment contract     （须一并处理 §17.1 的 ONNX metadata 导出）
+   （已完成前置：rough terrain generator + terrain curriculum，见 §13；
+     下一前置：terrain scan + critic privileged height）
+7. Black sim2real/deployment contract     （须一并处理 §18.1 的 ONNX metadata 导出）
 8. HIM observation / estimator / algorithm integration
 ```
 
@@ -1297,7 +1418,7 @@ configuration readability / tuning refactor v1   （完成，behavior-neutral）
 
 ------
 
-## 19. Update Rule
+## 20. Update Rule
 
 每完成一个 behavior unit：
 

@@ -12,7 +12,12 @@ from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.envs.mdp.events import reset_joints_by_offset
 from mjlab.envs.mdp import dr
-from mjlab.managers import EventTermCfg, RewardTermCfg, TerminationTermCfg
+from mjlab.managers import (
+    CurriculumTermCfg,
+    EventTermCfg,
+    RewardTermCfg,
+    TerminationTermCfg,
+)
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import (
     ContactMatch,
@@ -42,6 +47,7 @@ from alldog_mjlab.tasks.velocity.black.rewards import (
     vertical_linear_velocity_l2,
 )
 from alldog_mjlab.tasks.velocity.black.terminations import StuckTermination
+from alldog_mjlab.tasks.velocity.black.terrain import black_rough_terrain_generator_cfg
 
 # ---------------------------------------------------------------------------
 # Interface contracts（不属于训练调参，勿当作超参数阅读）
@@ -413,6 +419,40 @@ def _configure_flat_terrain(cfg: ManagerBasedRlEnvCfg) -> None:
     cfg.curriculum.pop("terrain_levels", None)
 
 
+def _configure_rough_terrain(cfg: ManagerBasedRlEnvCfg) -> None:
+    """rough task specialization：curriculum terrain generator（一个 terrain 一列）。
+
+    覆盖 `_configure_flat_terrain()` 的 plane / 无 generator；generator 内部
+    `curriculum=True`，因此列数 = terrain 类型数（5），`proportion` 是 env 分配权重。
+
+    `terrain_scan` 与 flat 一致不在本版本接入（actor / critic 均无 height_scan
+    consumer）；下一个 behavior unit 才需要它。
+    """
+    assert cfg.scene.terrain is not None
+    cfg.scene.terrain.terrain_type = "generator"
+    cfg.scene.terrain.terrain_generator = black_rough_terrain_generator_cfg()
+    cfg.scene.terrain.max_init_terrain_level = params.terrain.max_init_terrain_level
+
+    cfg.scene.sensors = tuple(
+        sensor for sensor in (cfg.scene.sensors or ()) if sensor.name != "terrain_scan"
+    )
+
+
+def _configure_terrain_curriculum(cfg: ManagerBasedRlEnvCfg) -> None:
+    """rough v1 只启用 terrain curriculum（native `terrain_levels_vel`）。
+
+    难度推进 / 回退公式由 MjLab native 实现（walked distance 与 command x
+    max_episode_length_s x 0.5 对比），与 legacy `_update_terrain_curriculum()` 一致；
+    command curriculum 仍关闭（见 `_configure_command()`）。
+    """
+    cfg.curriculum = {
+        "terrain_levels": CurriculumTermCfg(
+            func=mdp.terrain_levels_vel,
+            params={"command_name": BLACK_COMMAND_NAME},
+        ),
+    }
+
+
 def _configure_observations(cfg: ManagerBasedRlEnvCfg) -> None:
     """Black PPO actor 45 维单步 observation contract：内容、顺序、scale 与 noise。"""
     actor_terms = cfg.observations["actor"].terms
@@ -534,5 +574,26 @@ def black_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
     if play:
         _configure_play(cfg)
+
+    return cfg
+
+
+def black_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+    """Create the rough-terrain velocity task for Black（flat contract + rough terrain）。
+
+    不复制一整套配置：先搭出 flat cfg（robot / action / observation / reward /
+    reset / termination / DR / command 全部沿用已冻结 contract），再覆盖 terrain
+    与 terrain curriculum。
+
+    play 模式沿用 flat play contract（无 DR / 无 corruption / episode 极长 /
+    `curriculum = {}`），并保留同一 generator 布局与 env 分配比例，因此 play 看到的
+    terrain 分布与训练一致（与 MjLab native rough task 在 play 下切成 random 小网格
+    的做法不同，见 MIGRATION.md）。
+    """
+    cfg = black_flat_env_cfg(play=play)
+
+    _configure_rough_terrain(cfg)
+    if not play:
+        _configure_terrain_curriculum(cfg)
 
     return cfg

@@ -7,9 +7,12 @@
     params.reset.*
     params.termination.*
     params.reward.*
+    params.domain_randomization.*
+    params.terrain.*
 
 policy / task 的 interface contract（term 顺序、selector、observation scale、
 sensor 身份、MjLab wiring）不属于调参，留在 env_cfgs.py。
+terrain 的具体数学在 terrain.py。
 
 本文件不是第二套 runtime config：MjLab ``ManagerBasedRlEnvCfg`` 仍是唯一 runtime
 config，这里只是它的数值来源。
@@ -226,3 +229,62 @@ class DomainRandomizationParams:
 
 
 domain_randomization = DomainRandomizationParams()
+
+
+# =============================================================================
+# Terrain
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class TerrainParams:
+    """Black rough v1 的 terrain generator 数值。
+
+    patch 尺寸与高度场分辨率与 legacy Black 一致（4 m 半径 / 0.1 m / 0.005 m）。
+    MjLab v1.6 curriculum 的 row difficulty 按 ``row / (num_rows - 1)`` 在
+    ``difficulty_range`` 内插值，因此取 ``(0.0, 0.9)`` + ``num_rows = 10`` 以恢复
+    legacy 的 ``row / num_rows`` 语义（0.0, 0.1, ..., 0.9，不含 1.0）。
+
+    ``*_proportion`` 是 curriculum 模式下每个 terrain 的 env 分配权重（不是列数），
+    对应 legacy ``terrain_proportions``（其中 smooth slope 的一半为下坡）。
+    """
+
+    # Patch 与网格
+    size: tuple[float, float] = (8.0, 8.0)
+    num_rows: int = 10
+    difficulty_range: tuple[float, float] = (0.0, 0.9)
+    # MjLab border 为 z = 0 的 flat apron（与 legacy heightfield border_size=25 m
+    # 语义不同），取 MjLab native rough preset 的 20.0 m。
+    border_width: float = 20.0
+
+    # 高度场分辨率（legacy 同值）
+    horizontal_scale: float = 0.1
+    vertical_scale: float = 0.005
+    platform_width: float = 3.0
+
+    # 各 terrain 的 env 分配权重
+    flat_proportion: float = 0.20
+    smooth_slope_up_proportion: float = 0.15
+    smooth_slope_down_proportion: float = 0.15
+    rough_slope_proportion: float = 0.30
+    obstacles_proportion: float = 0.20
+
+    # smooth slope：max slope = 0.7 x 0.9 = 0.63
+    slope_range: tuple[float, float] = (0.0, 0.7)
+
+    # rough slope 噪声：amplitude = rough_noise_base + rough_noise_gain x difficulty
+    rough_noise_base: float = 0.015
+    rough_noise_gain: float = 0.1
+    rough_noise_step: float = 0.005
+    rough_noise_downsample: float = 0.2
+
+    # discrete obstacles：height = 0.06 + difficulty x 0.2
+    obstacle_height_range: tuple[float, float] = (0.06, 0.26)
+    obstacle_width_range: tuple[float, float] = (1.0, 2.0)
+    obstacle_count: int = 20
+
+    # 初始 terrain level 上限（inclusive，与 legacy max_init_terrain_level 同义）
+    max_init_terrain_level: int = 5
+
+
+terrain = TerrainParams()
