@@ -13,15 +13,17 @@
 当前阶段：
 
 ```text
-Black flat PPO behavior migration
+Black rough PPO behavior migration
 ```
 
-当前目标是先完成并冻结 Black flat PPO 的行为语义，然后再进入 rough terrain、sim2real 和 HIM。
+Black flat 的行为语义已全部冻结（reward / DR / command / final PPO verification，见 §11 / §12 / §4 / §17.1）。
+当前处于 rough：terrain generator + terrain curriculum + terrain scan / critic privileged height
+均已完成（§13 / §13.4）；rough reward / termination 与 rough PPO 训练尚未开始。
 
 当前尚未进入：
 
 ```text
-Black rough
+Black rough PPO 训练（reward / termination 仍是 flat 语义）
 Black sim2real
 HIM observation/history
 HIM algorithm integration
@@ -31,7 +33,7 @@ BlackW migration
 当前 task：
 
 ```text
-black-flat
+black-rough（flat contract + rough terrain + terrain scan）
 ```
 
 ------
@@ -59,6 +61,7 @@ src/alldog_mjlab/tasks/velocity/black/params.py
 src/alldog_mjlab/tasks/velocity/black/env_cfgs.py
 src/alldog_mjlab/tasks/velocity/black/rewards.py
 src/alldog_mjlab/tasks/velocity/black/terminations.py
+src/alldog_mjlab/tasks/velocity/black/terrain.py
 src/alldog_mjlab/tasks/velocity/black/rl_cfg.py
 ```
 
@@ -979,12 +982,14 @@ obstacle height  = 0.06 + 0.2 d   （choice 模式：±h 与 ±h/2 混合坑与�
 7. play：MjLab native rough task 在 play 下把 generator 切成 random 模式 + 5 x 5 小网格；
    Black rough v1 的 play 保留与训练相同的 generator 布局与 spawn 比例（便于按训练
    分布评估），只把 curriculum term 置空。
-8. 本轮不接入 terrain_scan / height_scan（actor 与 critic 与 flat 相同），也不加入
-   out_of_terrain_bounds；两者属于后续 behavior unit。
+8. 不加入 out_of_terrain_bounds（仍属于后续 behavior unit）。terrain_scan 已在
+   13.4 接入 rough critic（actor 仍 45 维）。
 9. rough slope 高度场保留 legacy 的 absolute zero：geom z offset = elevation_min ×
    vertical_scale，因此其物理表面严格等于 raw heightfield × vertical_scale
-   （patch 边缘落在 z = 0，与相邻 terrain / border 衔接；native 的
-   HfDiscreteObstaclesTerrainCfg 用同一手法）。spawn origin z 同样按 legacy
+   （slope 分量在 patch 边缘为 0，但 rough noise 覆盖整个 patch，因此实际边缘
+   不保证严格 z = 0，相邻 patch 可存在与 legacy 一致的小噪声高度不连续；
+   native 的 HfDiscreteObstaclesTerrainCfg 用同一 absolute-zero 手法）。
+   spawn origin z 同样按 legacy
    ``add_terrain_to_map()`` 语义，取 patch 中心 ±1 m 区域的最大 raw terrain height
    （不是全局最大值，也不是 elevation range）；rough slope 的 plateau 带噪声，因此
    该项的 spawn 可高于其 XY 处局部表面，上限为 2 × amplitude（d = 0.9 时约 0.21 m，
@@ -1008,6 +1013,62 @@ max_episode_length_s x 0.5 降一级；达到 num_rows 时随机新 level；首�
 （common_step_counter == 0）不改 level，因此 `max_init_terrain_level` 生效
 （`randint(0, max_init_terrain_level + 1)`，inclusive，与 legacy 相同）。
 
+### 13.4 Terrain scan 与 critic privileged height
+
+rough 的 terrain scan 复用 MjLab v1.6 native `terrain_scan` sensor（`RayCastSensorCfg`），
+只把 frame 绑到 `robot/trunk`（与 native rough task 相同）：
+
+```text
+name                 terrain_scan（恰好一个；flat 会移除它）
+frame                robot 的 trunk body
+ray_alignment        "yaw"（随 yaw 旋转，不随 roll / pitch 倾斜；ray 恒为 world-down）
+pattern              GridPatternCfg(size=(1.6, 1.0), resolution=0.1) = 17 x 11 = 187 rays
+max_distance         5.0 m
+exclude_parent_body  True
+include_geom_groups  (0,)（仅 terrain）
+```
+
+`terrain_scan` 的唯一 consumer 是 critic 的 187 维 `height_scan` term；actor 不含它。
+
+observation 维度 contract：
+
+```text
+black-flat   actor 45 / critic 72   （无 terrain_scan）
+black-rough  actor 45 / critic 259 = flat critic 72 + height_scan 187
+```
+
+critic term 顺序被显式冻结（不依赖 native `critic_terms = {**actor_terms, ...}` 的 dict 顺序）：
+
+```text
+base_lin_vel, base_ang_vel, projected_gravity, joint_pos, joint_vel, actions,
+command, foot_height, foot_air_time, foot_contact, foot_contact_forces,
+height_scan            ← 仅 rough，追加在最后
+```
+
+height_scan 数值语义为 native `mjlab.envs.mdp.height_scan()`：
+
+```text
+raw   = sensor frame z - terrain hit z   （offset = 0；ray miss 时取 max_distance）
+scale = 1 / max_distance = 0.2
+noise = 无
+clip  = 无
+```
+
+Intentional difference（**不是 legacy 238-D / HIM privileged observation migration**）：
+
+```text
+legacy（super-dog black_env.py）
+    heights = clip(root_z - 0.5 - measured_heights, -1, 1) * 5.0
+    采样 x ∈ [-0.8, 0.8] step 0.1、y ∈ [-0.5, 0.5] step 0.1（187 点，与 MjLab 同网格）
+    height noise raw scale = 0.1
+    privileged = 45 + base_lin_vel 3 + external disturbance 3 + heights 187 = 238
+
+Black rough PPO v1
+    MjLab native height_scan 语义（offset 0、scale 0.2、无 noise / clip）
+    不含 external disturbance 分量；45 + 3 + 187 的 238-D layout 属于后续 HIM
+    observation contract，不在本 baseline 内
+```
+
 ------
 
 ## 14. In Progress
@@ -1018,22 +1079,23 @@ Black flat DR:                     COMPLETE（§12）
 Black flat command:                COMPLETE（§4）
 Black flat final PPO verification: COMPLETE（§17.1）
 Black rough terrain generator:     COMPLETE（§13）
+Black rough terrain scan / critic privileged height: COMPLETE（§13.4）
 ```
 
 command 已冻结为固定范围 + native sampler，且不再有任何 curriculum（§4）。
 train / play 的 command contract 完全相同。
 
-本轮只完成 rough terrain generator + terrain curriculum；
-**Black rough PPO 尚未训练**（reward / termination / observation 仍是 flat contract）。
+本轮只完成 rough 的 terrain scan + critic privileged height；
+**Black rough PPO 尚未训练**（reward / termination 仍是 flat contract）。
 
 下一阶段：
 
 ```text
-terrain scan + critic privileged height
+rough base height / terrain-aware reward 语义
 ```
 
-（之后才是 Black rough PPO 训练；sim2real / deployment contract 阶段需一并处理
-§18.1 的 ONNX metadata 导出问题。）
+（rough reward / termination 收尾之后才是 Black rough PPO 训练；sim2real /
+deployment contract 阶段需一并处理 §18.1 的 ONNX metadata 导出问题。）
 
 ------
 
@@ -1085,11 +1147,11 @@ Black flat v1 有意不迁任何 command curriculum（见 §4）：范围固定�
 
 ### Critic Observation
 
-当前 critic仍沿用 MjLab privileged observation。
+flat critic 沿用 MjLab privileged observation（72 维）。
+rough critic 在 flat 72 维之后追加 187 维 terrain height scan（共 259 维，见 §13.4）。
+旧 Black/HIM privileged critic layout（238-D）尚未迁移。
 
-旧 Black/HIM privileged critic layout尚未迁移。
-
-不要在 PPO actor任务中修改 critic layout。
+不要在 PPO actor 任务中修改 critic layout。
 
 ------
 
@@ -1099,9 +1161,7 @@ Black flat v1 有意不迁任何 command curriculum（见 §4）：范围固定�
 
 ```text
 black-rough PPO 训练
-    （任务已注册，但当前只有 terrain generator + terrain curriculum，见 §13）
-
-terrain scan / critic privileged height observation
+    （任务已注册，但 reward / termination 仍是 flat contract，见 §13）
 
 rough base height / terrain-aware reward 语义
 
@@ -1132,18 +1192,21 @@ blackw-rough
 
 ```text
 tests/check_black_flat.py        flat 的 migration verification tool
-tests/check_black_rough.py       rough 的 terrain verification tool（本轮新增）
-tests/render_black_rough.py      rough terrain 的可视化渲染（本轮新增，人工检查用）
+tests/check_black_rough.py       rough 的 terrain / terrain scan verification tool
+tests/render_black_rough.py      rough terrain 的可视化渲染（人工检查用）
 ```
 
 作为 migration verification tool。
 
-`tests/check_black_rough.py` 覆盖（见 §13）：flat 仍为 plane / 空 curriculum；
-rough generator 的 size / num_rows / difficulty_range / border / max_init / 5 类
-sub-terrain 与 proportion；curriculum 只含 terrain_levels；逐行难度 0.0 → 0.9；
-slope = 0.7d、rough noise ±(0.015 + 0.1d) / step 0.005 / downsample 0.2、
-obstacle height 0.06 + 0.2d；50 个 spawn origin 的 ray-cast 落面检查；少量 env 的
-zero / random rollout smoke。
+`tests/check_black_rough.py` 覆盖（见 §13 / §13.4）：flat 仍为 plane / 空 curriculum /
+无 terrain_scan；rough generator 的 size / num_rows / difficulty_range / border /
+max_init / 5 类 sub-terrain 与 proportion；curriculum 只含 terrain_levels；逐行难度
+0.0 → 0.9；slope = 0.7d、rough noise ±(0.015 + 0.1d) / step 0.005 / downsample 0.2、
+obstacle height 0.06 + 0.2d；50 个 spawn origin 的 ray-cast 落面检查；terrain_scan
+sensor 唯一性与 frame / alignment / grid 187 rays / max_distance；actor 45-D 与
+critic 259-D（末 187 维 = height_scan，scale 0.2、无 noise）的 config 与 runtime 断言；
+ray miss = 0 与 scan 数值 sanity；teleport 探针区分 flat / 双 slope / rough slope /
+obstacle 的 scan 形状；少量 env 的 zero / random rollout smoke。
 
 当前应持续覆盖：
 
@@ -1406,7 +1469,8 @@ observation_terms_flatten_history_dim / observation_terms_history_length
 5. Black flat final PPO verification     （完成：500-iteration run + 独立进程 reload + 8-command play/eval，见 §17.1）
 6. Black rough PPO
    （已完成前置：rough terrain generator + terrain curriculum，见 §13；
-     下一前置：terrain scan + critic privileged height）
+     terrain scan + critic privileged height，见 §13.4；
+     下一前置：rough base height / terrain-aware reward 语义，之后 out_of_terrain_bounds）
 7. Black sim2real/deployment contract     （须一并处理 §18.1 的 ONNX metadata 导出）
 8. HIM observation / estimator / algorithm integration
 ```

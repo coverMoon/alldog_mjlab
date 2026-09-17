@@ -20,8 +20,9 @@ tasks/
 
 - 机器人模型、初始姿态和控制参数归 `robots/black`。
 - 环境配置通过 MjLab velocity factory 创建，每次调用返回独立配置。
-- `black-rough` 目前只在 `black-flat` 之上覆盖 terrain generator 与 terrain
-  curriculum；reward / termination / observation / DR / command 仍是 flat contract，
-  rough PPO 尚未训练（见 `.ai/MIGRATION.md` §13）。
+- `black-rough` 在 `black-flat` 之上覆盖 terrain generator、terrain curriculum、terrain
+  scan 与 critic privileged height（critic 由 72 维增至 259 维，actor 仍 45 维）；
+  reward / termination / DR / command 仍是 flat contract，rough PPO 尚未训练
+  （见 `.ai/MIGRATION.md` §13 / §13.4）。
 - 自定义 MDP term 在实际需要时增加；HIM 算法应放在 `algorithms/himloco`，任务侧只维护所需观测和运行配置。
 - 之前的 HIM 任务原型已移到仓库 `archive/himloco_prototype/`，不参与正式任务发现。
