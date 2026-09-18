@@ -18,12 +18,13 @@ Black rough PPO behavior migration
 
 Black flat 的行为语义已全部冻结（reward / DR / command / final PPO verification，见 §11 / §12 / §4 / §17.1）。
 当前处于 rough：terrain generator + terrain curriculum + terrain scan / critic privileged height
-均已完成（§13 / §13.4）；rough reward / termination 与 rough PPO 训练尚未开始。
++ terrain-relative base-height reward 均已完成（§13 / §13.4 / §11.4）；
+rough 其余 reward / termination 与 rough PPO 训练尚未开始。
 
 当前尚未进入：
 
 ```text
-Black rough PPO 训练（reward / termination 仍是 flat 语义）
+Black rough PPO 训练（其余 9 项 reward 与 termination 仍是 flat 语义）
 Black sim2real
 HIM observation/history
 HIM algorithm integration
@@ -33,7 +34,7 @@ BlackW migration
 当前 task：
 
 ```text
-black-rough（flat contract + rough terrain + terrain scan）
+black-rough（flat contract + rough terrain + terrain scan + terrain-relative base height）
 ```
 
 ------
@@ -765,7 +766,9 @@ body_ang_vel
 upright
     raw = g_x² + g_y²                               body-frame projected gravity
 base_height
-    raw = (root_link_pos_w.z - 0.43)²               flat：world z 即离地高度
+    raw = (base_height - 0.43)²
+    flat : base_height = root_link_pos_w.z               （world-z 语义）
+    rough: base_height = mean(terrain_scan 中央 35 ray)  （local terrain-relative，见 §11.4）
 dof_acc
     raw = Σ((q̇_prev - q̇) / step_dt)²               control step 有限差分
 joint_power
@@ -784,7 +787,8 @@ native（与 HIMLoco 严格等价）:
 task-local（native 不等价或缺失）:
     track_linear_velocity_xy / track_angular_velocity_z /
     vertical_linear_velocity_l2 / angular_velocity_xy_l2 /
-    base_height_l2_flat / joint_power_l1 / dof_acc_l2（stateful class term）
+    base_height_l2_flat / base_height_l2_terrain（rough） /
+    joint_power_l1 / dof_acc_l2（stateful class term）
 ```
 
 不再使用的实现：`orientation_l1`（Black 后期 shaping，非 HIMLoco 公式）、
@@ -822,6 +826,60 @@ terrain-relative 高度误差 × world-frame 横向速度；Black 后期：phase
 adaptive），因此本轮有意不采用任何一种。这是 baseline simplification，不是遗漏。
 
 采用这些项需要新的 behavior unit 与明确动机。
+
+### 11.4 Black rough base-height reward
+
+Black rough 的 ``base_height`` 与 flat 用**同一个 reward key / weight / L2 kernel**，
+只把 base height 的**测量方式**从 world z 换成 local terrain-relative clearance：
+
+```text
+                       func                          base_height
+flat   base_height_l2_flat      root_link_pos_w.z（world-z）
+rough  base_height_l2_terrain   mean(terrain_scan 中央 footprint 的 raw 高度)
+```
+
+``raw`` 取自 native ``mjlab.envs.mdp.height_scan()``（**不是** critic ObservationManager
+里已 scale = 0.2 的那份），即每条 ray 的 ``trunk_z - terrain_hit_z``（offset 0）。
+footprint 为 ``terrain_scan`` 的中央区域：
+
+```text
+x ∈ [-0.3, +0.3]   7 values
+y ∈ [-0.2, +0.2]   5 values
+35 rays（从 187 条 native ray 中按 mask 选出；索引由 pattern 实际 offsets 推导，
+不手写 magic indices）
+```
+
+reward：
+
+```text
+raw = (mean(raw_footprint) - 0.43)²        weight = -1.0
+```
+
+无 clip / scale / ×5 / height noise。target 0.43 与 reset root z 0.45 的差异与 flat 相同
+（见 §7）。其余 9 项 reward 的 func / weight / params 完全不变，``upright`` 仍是 native
+``flat_orientation_l2``（**不是** terrain-normal 语义）。
+
+legacy 对照（**intentional difference，不是 exact reproduction**）：
+
+```text
+legacy BlackEnv（black_env.py ``_init_base_height_points`` + base ``_get_base_heights``）
+    footprint 11 x 9 = 99 点：x ∈ [-0.30, 0.30] step 0.06、y ∈ [-0.18, 0.18] step 0.045
+    （0.60 x 0.36 m），随 robot yaw 旋转
+    高度取 heightfield 3-cell min：min(h[px,py], h[px+1,py], h[px,py+1])
+    base_height = mean(root_z - terrain_height)
+    reward = |base_height - target|              ← L1 kernel
+
+Black rough v1
+    35 条 native ray 的直接命中值（0.1 m 网格，与 legacy 的 0.06 / 0.045 不同）
+    kernel 保持 L2（与 flat 一致，不恢复 legacy L1）
+    不含 legacy 的 3-cell min 采样
+```
+
+关键 invariance（已由 ``tests/check_black_rough.py`` 验证）：terrain 与 root 同时升高
+``+0.10 m`` 时 local clearance 不变 → reward 不变（``flat`` 的 world-z 语义在同一情形下
+从 ``1.0e-4`` 增到 ``1.21e-2``）。因此 rough 在坡 / 坑上的 ``base_height`` 惩罚不再因
+world z 偏移而系统性偏大（实测：同批 env 的 world-z 惩罚均值在 slope 列达 ``0.19``，
+terrain-relative 仅 ``4e-4``）。
 
 ------
 
@@ -1080,21 +1138,22 @@ Black flat command:                COMPLETE（§4）
 Black flat final PPO verification: COMPLETE（§17.1）
 Black rough terrain generator:     COMPLETE（§13）
 Black rough terrain scan / critic privileged height: COMPLETE（§13.4）
+Black rough base-height reward:  COMPLETE（§11.4）
 ```
 
 command 已冻结为固定范围 + native sampler，且不再有任何 curriculum（§4）。
 train / play 的 command contract 完全相同。
 
-本轮只完成 rough 的 terrain scan + critic privileged height；
-**Black rough PPO 尚未训练**（reward / termination 仍是 flat contract）。
+本轮只把 rough 的 ``base_height`` 换成 local terrain-relative 语义（其余 9 项仍与 flat 相同）；
+**Black rough PPO 尚未训练**。
 
 下一阶段：
 
 ```text
-rough base height / terrain-aware reward 语义
+out_of_terrain_bounds termination
 ```
 
-（rough reward / termination 收尾之后才是 Black rough PPO 训练；sim2real /
+（rough termination 收尾之后才是 Black rough PPO 训练；sim2real /
 deployment contract 阶段需一并处理 §18.1 的 ONNX metadata 导出问题。）
 
 ------
@@ -1161,9 +1220,7 @@ rough critic 在 flat 72 维之后追加 187 维 terrain height scan（共 259 �
 
 ```text
 black-rough PPO 训练
-    （任务已注册，但 reward / termination 仍是 flat contract，见 §13）
-
-rough base height / terrain-aware reward 语义
+    （任务已注册，但 reward 除 base_height 外仍是 flat contract，termination 亦然，见 §13）
 
 out_of_terrain_bounds termination
 
@@ -1206,7 +1263,11 @@ obstacle height 0.06 + 0.2d；50 个 spawn origin 的 ray-cast 落面检查；te
 sensor 唯一性与 frame / alignment / grid 187 rays / max_distance；actor 45-D 与
 critic 259-D（末 187 维 = height_scan，scale 0.2、无 noise）的 config 与 runtime 断言；
 ray miss = 0 与 scan 数值 sanity；teleport 探针区分 flat / 双 slope / rough slope /
-obstacle 的 scan 形状；少量 env 的 zero / random rollout smoke。
+obstacle 的 scan 形状；base_height reward 的 flat（world-z）/ rough（terrain-relative）
+config 差异与其余 9 项不变量；rough 的 35 ray footprint 索引 contract（x ∈ [-0.3, 0.3] /
+y ∈ [-0.2, 0.2]，index = i_y × 17 + i_x）与数值 invariance（flat 等价 / raised-terrain
+不变 / slope / too high-low 对称 / footprint 外 ray 不参与）+ 逐 terrain 实测表；
+少量 env 的 zero / random rollout smoke。
 
 当前应持续覆盖：
 
@@ -1470,7 +1531,8 @@ observation_terms_flatten_history_dim / observation_terms_history_length
 6. Black rough PPO
    （已完成前置：rough terrain generator + terrain curriculum，见 §13；
      terrain scan + critic privileged height，见 §13.4；
-     下一前置：rough base height / terrain-aware reward 语义，之后 out_of_terrain_bounds）
+     terrain-relative base-height reward，见 §11.4；
+     下一前置：out_of_terrain_bounds termination）
 7. Black sim2real/deployment contract     （须一并处理 §18.1 的 ONNX metadata 导出）
 8. HIM observation / estimator / algorithm integration
 ```

@@ -43,6 +43,7 @@ from alldog_mjlab.tasks.velocity.black import params
 from alldog_mjlab.tasks.velocity.black.rewards import (
     angular_velocity_xy_l2,
     base_height_l2_flat,
+    base_height_l2_terrain,
     dof_acc_l2,
     joint_power_l1,
     track_angular_velocity_z,
@@ -435,6 +436,26 @@ def _configure_rewards(cfg: ManagerBasedRlEnvCfg) -> None:
     }
 
 
+def _configure_rough_rewards(cfg: ManagerBasedRlEnvCfg) -> None:
+    """rough 只把 ``base_height`` 换成 local terrain-relative 语义。
+
+    只替换 func / params：reward key 仍为 ``base_height``、weight 仍为
+    ``params.reward.base_height``、顺序仍为第 6 项，因此 rough 与 flat 的 reward 表
+    除该项测量方式（world z vs local terrain clearance）外完全一致。
+    其余 9 项 func / weight / params 均不变。
+    """
+    term = cfg.rewards["base_height"]
+    assert term.func is base_height_l2_flat
+    cfg.rewards["base_height"] = replace(
+        term,
+        func=base_height_l2_terrain,
+        params={
+            "target_height": params.reward.base_height_target,
+            "sensor_name": BLACK_TERRAIN_SCAN_SENSOR,
+        },
+    )
+
+
 def _configure_flat_terrain(cfg: ManagerBasedRlEnvCfg) -> None:
     """flat task specialization：plane terrain、无 terrain generator / scan / curriculum。
 
@@ -629,7 +650,7 @@ def _foot_geom_names() -> tuple[str, ...]:
 def _build_black_env_cfg(play: bool, rough: bool) -> ManagerBasedRlEnvCfg:
     """flat / rough 共用装配路径：二者只差 terrain specialization 与 critic height scan。
 
-    顺序：command / scene+sensors / actions / events / rewards
+    顺序：command / scene+sensors / actions / events / rewards（rough 再覆盖 base_height）
     → flat 或 rough terrain → observations（rough 追加 critic height scan）
     → terminations / common runtime → terrain curriculum（仅 rough 训练）→ play。
 
@@ -646,6 +667,7 @@ def _build_black_env_cfg(play: bool, rough: bool) -> ManagerBasedRlEnvCfg:
     _configure_events(cfg)
     _configure_rewards(cfg)
     if rough:
+        _configure_rough_rewards(cfg)
         _configure_rough_terrain(cfg)
     else:
         _configure_flat_terrain(cfg)

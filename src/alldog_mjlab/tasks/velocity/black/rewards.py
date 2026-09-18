@@ -8,7 +8,8 @@
   track_angular_velocity_z     HIMLoco yaw tracking（同上）
   vertical_linear_velocity_l2  body-frame root v_z²
   angular_velocity_xy_l2       body-frame root ω_x² + ω_y²（native 读 world frame）
-  base_height_l2_flat          flat task 的 root 高度 L2
+  base_height_l2_flat          flat task 的 world-z root 高度 L2
+  base_height_l2_terrain       rough task 的 local terrain-relative root 高度 L2
   joint_power_l1               |q̇| · |τ|（native 无 joint power）
   dof_acc_l2                   control step 关节速度有限差分（native joint_acc_l2 用 qacc）
 """
@@ -19,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
+from mjlab.envs import mdp as envs_mdp
 from mjlab.managers import ManagerTermBase
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
@@ -28,6 +30,15 @@ if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
 
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
+
+# rough base-height footprint：legacy BlackEnv 的 99 点 footprint（0.60 x 0.36 m）在
+# native terrain_scan（0.1 m 网格）上的最近近似，即中央 x ∈ [-0.3, 0.3]、
+# y ∈ [-0.2, 0.2] 的 7 x 5 = 35 条 ray。命名常量代替手写 indices。
+_BASE_HEIGHT_FOOTPRINT_X = 0.3
+_BASE_HEIGHT_FOOTPRINT_Y = 0.2
+_BASE_HEIGHT_FOOTPRINT_NUM_RAYS = 35
+# float32 网格值（如 0.30000001192）略大于十进制边界，用 tolerance 判定归属。
+_BASE_HEIGHT_FOOTPRINT_TOLERANCE = 1e-4
 
 
 def track_linear_velocity_xy(
@@ -112,6 +123,58 @@ def base_height_l2_flat(
     asset: Entity = env.scene[asset_cfg.name]
     base_height = asset.data.root_link_pos_w[:, 2]
     return torch.square(base_height - target_height)
+
+
+class base_height_l2_terrain(ManagerTermBase):
+    """rough task 的 local terrain-relative root 高度 L2。
+
+    native ``height_scan()`` 的 raw 输出已经是每条 ray 的局部离地高度
+    （``trunk_z - terrain_hit_z``，offset 0），因此 base height 就是 footprint 内 ray
+    的均值：``reward = (mean(raw_footprint) - target_height)²``。与
+    ``base_height_l2_flat`` 的唯一差别是测量方式（world z vs local clearance），
+    kernel / target / weight 均相同。
+
+    footprint 由 native ``terrain_scan`` 的中央区域表达（见模块常量）。索引在
+    ``__init__`` 中从 sensor pattern 的真实 offsets 推导（不手写 magic indices），
+    并校验冻结边界。
+
+    与 legacy 的 intentional difference：legacy 用 11 x 9 = 99 点 footprint
+    （0.60 x 0.36 m、dx 0.06 / dy 0.045）加 heightfield 3-cell min 采样与 L1 kernel；
+    本 round 用 35 条 native ray 的直接命中值，L2 kernel 不变（见 MIGRATION.md）。
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv) -> None:
+        super().__init__(env)
+        sensor_name: str = cfg.params["sensor_name"]
+        pattern = env.scene[sensor_name].cfg.pattern
+        offsets, _ = pattern.generate_rays(None, str(self.device))
+        tolerance = _BASE_HEIGHT_FOOTPRINT_TOLERANCE
+        mask = (offsets[:, 0].abs() <= _BASE_HEIGHT_FOOTPRINT_X + tolerance) & (
+            offsets[:, 1].abs() <= _BASE_HEIGHT_FOOTPRINT_Y + tolerance
+        )
+        self._indices = mask.nonzero(as_tuple=False).squeeze(-1)
+        selected = offsets[self._indices]
+        assert selected.shape[0] == _BASE_HEIGHT_FOOTPRINT_NUM_RAYS, selected.shape
+        assert (
+            abs(float(selected[:, 0].abs().max()) - _BASE_HEIGHT_FOOTPRINT_X)
+            <= _BASE_HEIGHT_FOOTPRINT_TOLERANCE
+        ), float(selected[:, 0].abs().max())
+        assert (
+            abs(float(selected[:, 1].abs().max()) - _BASE_HEIGHT_FOOTPRINT_Y)
+            <= _BASE_HEIGHT_FOOTPRINT_TOLERANCE
+        ), float(selected[:, 1].abs().max())
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        target_height: float,
+        sensor_name: str,
+        **kwargs: Any,
+    ) -> torch.Tensor:
+        del kwargs  # footprint 索引已在 __init__ 中解析。
+        raw_scan = envs_mdp.height_scan(env, sensor_name=sensor_name)
+        base_height = raw_scan[:, self._indices].mean(dim=1)
+        return torch.square(base_height - target_height)
 
 
 def joint_power_l1(
