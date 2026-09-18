@@ -17,14 +17,15 @@ Black rough PPO behavior migration
 ```
 
 Black flat 的行为语义已全部冻结（reward / DR / command / final PPO verification，见 §11 / §12 / §4 / §17.1）。
-当前处于 rough：terrain generator + terrain curriculum + terrain scan / critic privileged height
-+ terrain-relative base-height reward 均已完成（§13 / §13.4 / §11.4）；
-rough 其余 reward / termination 与 rough PPO 训练尚未开始。
+Black rough v1 的 planned behavior unit 也已完成：terrain generator + terrain curriculum
++ terrain scan / critic privileged height + terrain-relative base-height reward +
+out_of_terrain_bounds termination（§13 / §13.4 / §11.4 / §6.4）；
+rough 其余 9 项 reward 仍是 flat 语义，但已无待迁移的 planned behavior unit。
 
 当前尚未进入：
 
 ```text
-Black rough PPO 训练（其余 9 项 reward 与 termination 仍是 flat 语义）
+Black rough PPO sanity training（尚未启动，也未验证训练效果）
 Black sim2real
 HIM observation/history
 HIM algorithm integration
@@ -34,7 +35,8 @@ BlackW migration
 当前 task：
 
 ```text
-black-rough（flat contract + rough terrain + terrain scan + terrain-relative base height）
+black-rough（flat contract + rough terrain + terrain scan + terrain-relative base height
+             + OOB safety truncation）
 ```
 
 ------
@@ -412,9 +414,9 @@ Critic observation仍然沿用当前 MjLab privileged observation设计，尚未
 当前 training termination：
 
 ```text
-time_out
-illegal_contact
-stuck
+black-flat   train / play : time_out + illegal_contact + stuck
+black-rough  train        : time_out + illegal_contact + stuck + out_of_terrain_bounds
+black-rough  play         : time_out + illegal_contact + stuck
 ```
 
 ### 6.1 Timeout
@@ -482,10 +484,11 @@ control dt 0.02 s
 
 ```text
 fell_over / bad_orientation 70°
-out_of_terrain_bounds
 ```
 
 flat task 不使用 orientation-based fall termination。
+`out_of_terrain_bounds` 在 common contract 里移除，由 §6.4 仅对 black-rough training
+重新追加。
 
 ### 6.3 Stuck
 
@@ -508,6 +511,51 @@ class StuckTermination(ManagerTermBase)
 
 per-env timer（秒）由 class term 自己持有，经 `TerminationManager.reset()` 清零；
 不使用 event，不写入 env / runner。
+
+### 6.4 out_of_terrain_bounds（仅 black-rough training）
+
+使用 MjLab v1.6.0 native ``mjlab.tasks.velocity.mdp.out_of_terrain_bounds``，不写 custom
+OOB 实现（native 已正确处理 effective grid shape / curriculum 模式 / border_width）。
+
+```text
+cfg.terminations["out_of_terrain_bounds"] = TerminationTermCfg(
+    func=mdp.out_of_terrain_bounds,      # params 为空：用 native default margin
+    time_out=True,
+)
+```
+
+边界公式（native）：
+
+```text
+num_rows, num_cols = terrain.terrain_origins.shape[:2]      # effective grid（非 cfg 字段）
+half_x = 0.5 x (num_rows x size[0]) + border_width
+half_y = 0.5 x (num_cols x size[1]) + border_width
+limit  = max(0, half - margin)
+out    = |root_x_w| > limit_x  OR  |root_y_w| > limit_y      # 严格 >，非 >=
+```
+
+当前 Black rough 数值（由 runtime terrain config 推导，非硬编码）：
+
+```text
+effective grid   10 x 5（curriculum 模式一个 terrain 一列）
+patch            8 x 8 m
+border_width     20 m
+margin           0.3 m（native default，未显式传入）
+half_x / half_y  60.0 / 40.0 m
+limit_x / limit_y  59.7 / 39.7 m
+train  注册（末尾追加）
+play   移除
+flat   不注册（也不依赖 always-False）
+```
+
+`time_out=True` 表示这是 **truncation** 而非 terminal failure：OOB 是有限生成 map 造成的
+artificial truncation，不是机器人自身的 physical failure，因此 MjLab / RSL-RL 会把它作为
+truncated 传给 PPO 并正确 bootstrap value（测试已断言
+``termination_manager.time_outs`` 为 True 而 ``terminated`` 为 False）。
+
+Intentional framework difference：legacy super-dog ``check_termination()`` 只有 contact
+failure 与 episode time out，没有 global terrain OOB；MjLab Black rough v1 把它作为有限
+生成 terrain 的 safety truncation，**不是** legacy-equivalent。
 
 ------
 
@@ -1040,8 +1088,8 @@ obstacle height  = 0.06 + 0.2 d   （choice 模式：±h 与 ±h/2 混合坑与�
 7. play：MjLab native rough task 在 play 下把 generator 切成 random 模式 + 5 x 5 小网格；
    Black rough v1 的 play 保留与训练相同的 generator 布局与 spawn 比例（便于按训练
    分布评估），只把 curriculum term 置空。
-8. 不加入 out_of_terrain_bounds（仍属于后续 behavior unit）。terrain_scan 已在
-   13.4 接入 rough critic（actor 仍 45 维）。
+8. out_of_terrain_bounds 不在 common termination 中（见 §6.4），仅 black-rough
+   training 末尾追加；terrain_scan 已在 13.4 接入 rough critic（actor 仍 45 维）。
 9. rough slope 高度场保留 legacy 的 absolute zero：geom z offset = elevation_min ×
    vertical_scale，因此其物理表面严格等于 raw heightfield × vertical_scale
    （slope 分量在 patch 边缘为 0，但 rough noise 覆盖整个 patch，因此实际边缘
@@ -1139,22 +1187,23 @@ Black flat final PPO verification: COMPLETE（§17.1）
 Black rough terrain generator:     COMPLETE（§13）
 Black rough terrain scan / critic privileged height: COMPLETE（§13.4）
 Black rough base-height reward:  COMPLETE（§11.4）
+Black rough out_of_terrain_bounds: COMPLETE（§6.4）
 ```
 
 command 已冻结为固定范围 + native sampler，且不再有任何 curriculum（§4）。
 train / play 的 command contract 完全相同。
 
-本轮只把 rough 的 ``base_height`` 换成 local terrain-relative 语义（其余 9 项仍与 flat 相同）；
-**Black rough PPO 尚未训练**。
+本轮追加 rough training 的 native OOB safety truncation（time_out=True）；
+**Black rough PPO 尚未训练**（无 sanity / full run，也没有任何训练效果结论）。
 
 下一阶段：
 
 ```text
-out_of_terrain_bounds termination
+Black rough PPO sanity training
 ```
 
-（rough termination 收尾之后才是 Black rough PPO 训练；sim2real /
-deployment contract 阶段需一并处理 §18.1 的 ONNX metadata 导出问题。）
+（sanity 训练通过后才考虑长训练；sim2real / deployment contract 阶段需一并处理
+§18.1 的 ONNX metadata 导出问题。）
 
 ------
 
@@ -1220,9 +1269,7 @@ rough critic 在 flat 72 维之后追加 187 维 terrain height scan（共 259 �
 
 ```text
 black-rough PPO 训练
-    （任务已注册，但 reward 除 base_height 外仍是 flat contract，termination 亦然，见 §13）
-
-out_of_terrain_bounds termination
+    （任务已注册，planned behavior unit 已完成，但尚未做过 sanity training，见 §13）
 
 Black sim2real/deployment contract
 
@@ -1267,6 +1314,11 @@ obstacle 的 scan 形状；base_height reward 的 flat（world-z）/ rough（ter
 config 差异与其余 9 项不变量；rough 的 35 ray footprint 索引 contract（x ∈ [-0.3, 0.3] /
 y ∈ [-0.2, 0.2]，index = i_y × 17 + i_x）与数值 invariance（flat 等价 / raised-terrain
 不变 / slope / too high-low 对称 / footprint 外 ray 不参与）+ 逐 terrain 实测表；
+termination contract（flat train/play 与 rough play 不含 OOB、rough train 末尾恰好一个
+native OOB、time_out=True、params 为空）与 OOB runtime（由 runtime terrain config 推导的
+effective 10 x 5 grid / 60.0 / 40.0 / 59.7 / 39.7 、严格 > 边界 probe、
+``time_outs`` True 而 ``terminated`` False 的 truncation 语义、OOB reset 后 curriculum
+level 合法且无 NaN、plane 恒 False、正常 rollout OOB fires = 0）；
 少量 env 的 zero / random rollout smoke。
 
 当前应持续覆盖：
@@ -1532,7 +1584,8 @@ observation_terms_flatten_history_dim / observation_terms_history_length
    （已完成前置：rough terrain generator + terrain curriculum，见 §13；
      terrain scan + critic privileged height，见 §13.4；
      terrain-relative base-height reward，见 §11.4；
-     下一前置：out_of_terrain_bounds termination）
+     out_of_terrain_bounds safety truncation，见 §6.4；
+     下一前置：无 —— 可开始 sanity training，但尚未开始）
 7. Black sim2real/deployment contract     （须一并处理 §18.1 的 ONNX metadata 导出）
 8. HIM observation / estimator / algorithm integration
 ```

@@ -593,7 +593,11 @@ def _configure_observations(cfg: ManagerBasedRlEnvCfg) -> None:
 
 
 def _configure_terminations(cfg: ManagerBasedRlEnvCfg) -> None:
-    """终止 contract：time_out + illegal_contact + stuck。"""
+    """终止 contract：time_out + illegal_contact + stuck（flat / rough 共用）。
+
+    ``out_of_terrain_bounds`` 在这里移除（MjLab velocity baseline 自带它）：flat 不注册
+    该 term，rough 由 `_configure_rough_terminations()` 在末尾追加。
+    """
     # 摔倒终止用 trunk / thigh 触地替代 orientation-based 的 fell_over。
     cfg.terminations.pop("fell_over", None)
     cfg.terminations["illegal_contact"] = TerminationTermCfg(
@@ -619,6 +623,22 @@ def _configure_terminations(cfg: ManagerBasedRlEnvCfg) -> None:
     cfg.terminations.pop("out_of_terrain_bounds", None)
 
 
+def _configure_rough_terminations(cfg: ManagerBasedRlEnvCfg) -> None:
+    """rough 在末尾追加 native ``out_of_terrain_bounds`` safety truncation。
+
+    OOB 是有限生成 terrain 造成的 artificial truncation，不是机器人自身的 physical
+    failure，因此沿用 MjLab v1.6 native baseline 的 ``time_out=True``（PPO 会对该
+    env 做 value bootstrap，而非当作 terminal failure）；``margin`` 用 native
+    default 0.3 m，不显式传入（本轮没有 Black-specific tuning evidence）。
+
+    flat 不注册该 term；rough play 由 `_configure_play()` 移除。
+    """
+    cfg.terminations["out_of_terrain_bounds"] = TerminationTermCfg(
+        func=mdp.out_of_terrain_bounds,
+        time_out=True,
+    )
+
+
 def _configure_common_runtime(cfg: ManagerBasedRlEnvCfg) -> None:
     """不属于上面各分组的少量 task 级字段。"""
     cfg.viewer.body_name = "trunk"
@@ -627,9 +647,14 @@ def _configure_common_runtime(cfg: ManagerBasedRlEnvCfg) -> None:
 
 
 def _configure_play(cfg: ManagerBasedRlEnvCfg) -> None:
-    """play 模式：nominal physics（移除整组 DR），只保留 reset events。"""
+    """play 模式：nominal physics（移除整组 DR），只保留 reset events。
+
+    ``out_of_terrain_bounds`` 也在 play 下移除（与 MjLab native rough play 一致）；
+    其余 termination（illegal_contact / stuck / time_out）不变。
+    """
     cfg.episode_length_s = int(1e9)
     cfg.observations["actor"].enable_corruption = False
+    cfg.terminations.pop("out_of_terrain_bounds", None)
     for event_name in (
         "foot_friction",
         "payload_mass",
@@ -652,7 +677,8 @@ def _build_black_env_cfg(play: bool, rough: bool) -> ManagerBasedRlEnvCfg:
 
     顺序：command / scene+sensors / actions / events / rewards（rough 再覆盖 base_height）
     → flat 或 rough terrain → observations（rough 追加 critic height scan）
-    → terminations / common runtime → terrain curriculum（仅 rough 训练）→ play。
+    → terminations（rough 追加 out_of_terrain_bounds）/ common runtime
+    → terrain curriculum（仅 rough 训练）→ play。
 
     rough 专门化保留 native `terrain_scan` sensor（flat 专门化会移除它），因此不再
     需要从 flat 配置事后恢复 sensor，也不复制 MjLab baseline 的 sensor / observation
@@ -675,6 +701,8 @@ def _build_black_env_cfg(play: bool, rough: bool) -> ManagerBasedRlEnvCfg:
     if rough:
         _configure_rough_privileged_observation(cfg)
     _configure_terminations(cfg)
+    if rough:
+        _configure_rough_terminations(cfg)
     _configure_common_runtime(cfg)
     if rough and not play:
         _configure_terrain_curriculum(cfg)
