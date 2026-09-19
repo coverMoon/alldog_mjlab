@@ -13,20 +13,23 @@
 当前阶段：
 
 ```text
-Black rough PPO behavior migration
+Black rough PPO baseline verification: COMPLETE
 ```
 
 Black flat 的行为语义已全部冻结（reward / DR / command / final PPO verification，见 §11 / §12 / §4 / §17.1）。
-Black rough v1 的 planned behavior unit 也已完成：terrain generator + terrain curriculum
+Black rough v1 的 planned behavior unit 已完成：terrain generator + terrain curriculum
 + terrain scan / critic privileged height + terrain-relative base-height reward +
-out_of_terrain_bounds termination（§13 / §13.4 / §11.4 / §6.4）；
-rough 其余 9 项 reward 仍是 flat 语义，但已无待迁移的 planned behavior unit。
+out_of_terrain_bounds termination（§13 / §13.4 / §11.4 / §6.4）；rough 的 sanity / baseline
+训练也已完成（约 500 iteration，见 §17.2），当前 checkpoint 可做基本 locomotion。
+
+rough 侧存在一个已知 backend 问题：MJWarp GPU convex CCD 在本任务的多接触状态下会触发
+capacity-related CUDA runtime fault（见 §10 MJWarp contact capacity）。项目侧已用
+`nconmax = 128` 作为 runtime workaround（§17.2）；upstream 根因尚未修复。
 
 当前尚未进入：
 
 ```text
-Black rough PPO sanity training（尚未启动，也未验证训练效果）
-Black sim2real
+Black sim2real / deployment contract（含 §18.1 ONNX metadata）
 HIM observation/history
 HIM algorithm integration
 BlackW migration
@@ -36,7 +39,7 @@ BlackW migration
 
 ```text
 black-rough（flat contract + rough terrain + terrain scan + terrain-relative base height
-             + OOB safety truncation）
+             + OOB safety truncation + nconmax workaround）
 ```
 
 ------
@@ -752,6 +755,26 @@ sim.forward()
 sim.sense()
 ```
 
+### MJWarp contact capacity（nconmax）
+
+```text
+MjLab v1.6 velocity baseline:  cfg.sim.nconmax = 35
+Black flat（train / play）:     35（保持 baseline）
+Black rough（train / play）:    128
+```
+
+原因：Black rough 的多接触状态已在 MJWarp GPU convex narrowphase CCD 中触发
+capacity-related CUDA runtime fault。固定 bad simulator state 下，`nconmax = 35` 可确定性
+复现（4/4），`>= 48` 不再触发；长 rollout 在 35 下 6 次里 5 次崩溃（崩在哪步在 ~2600–
+3500 间浮动），128 / 256 均稳定。项目选择 128 作为保守余量。
+
+- 这是 **project-side capacity workaround**，不是 legacy Black behavior contract；
+- **不改变** reward / observation / action / terrain / policy contract：除该 field 外，
+  rough 的 config 与改动前逐字段一致，flat（train / play）完全不变；
+- **不是** upstream MJWarp 根因修复，也不声称 128 是理论最小正确值；
+- 证据（固定 state 复现、sanitizer、长 rollout）见 §17.2；
+- 不要把该值传播到 flat，也不要顺手改动 `njmax` 等其它 sim capacity。
+
 ------
 
 ## 11. Frozen Reward Contract
@@ -1188,22 +1211,24 @@ Black rough terrain generator:     COMPLETE（§13）
 Black rough terrain scan / critic privileged height: COMPLETE（§13.4）
 Black rough base-height reward:  COMPLETE（§11.4）
 Black rough out_of_terrain_bounds: COMPLETE（§6.4）
+Black rough PPO sanity / baseline training: COMPLETE（§17.2）
+Black rough MJWarp contact capacity workaround: COMPLETE（§10 / §17.2）
 ```
 
 command 已冻结为固定范围 + native sampler，且不再有任何 curriculum（§4）。
 train / play 的 command contract 完全相同。
 
-本轮追加 rough training 的 native OOB safety truncation（time_out=True）；
-**Black rough PPO 尚未训练**（无 sanity / full run，也没有任何训练效果结论）。
+本轮为 rough 增加 MJWarp contact capacity workaround（`nconmax = 128`，§10），并验证固定
+bad state 与长 rollout 均不再触发该 backend fault。rough 的 sanity / baseline 训练已于早前
+完成（§17.2），属于 pipeline / baseline verification，**不是** long-run convergence 结论。
 
 下一阶段：
 
 ```text
-Black rough PPO sanity training
+Black sim2real / deployment contract
 ```
 
-（sanity 训练通过后才考虑长训练；sim2real / deployment contract 阶段需一并处理
-§18.1 的 ONNX metadata 导出问题。）
+（sim2real 阶段需一并处理 §18.1 的 ONNX metadata 导出问题；不要提前宣称 sim2real 已支持。）
 
 ------
 
@@ -1268,9 +1293,6 @@ rough critic 在 flat 72 维之后追加 187 维 terrain height scan（共 259 �
 以下均未开始，不得提前宣称支持：
 
 ```text
-black-rough PPO 训练
-    （任务已注册，planned behavior unit 已完成，但尚未做过 sanity training，见 §13）
-
 Black sim2real/deployment contract
 
 HIM single-step/history observation contract
@@ -1482,6 +1504,38 @@ CPU PASS/FAIL
 CUDA PASS/FAIL/SKIPPED
 ```
 
+### 17.2 Black rough PPO baseline 与 MJWarp capacity workaround 验证记录
+
+rough sanity / baseline run（由用户手动运行，agent 未代跑）：
+
+```text
+logs/rsl_rl/black_velocity/2026-09-18_19-24-21_sanity200/    run_name sanity200，至 model_199.pt
+logs/rsl_rl/black_velocity/2026-09-18_19-37-17/              resume 续训，至 model_498.pt（共约 500 iteration）
+```
+
+该 run 的记录配置（`params/agent.yaml` / `params/env.yaml`）：`num_steps_per_env 24`、
+`max_iterations 300`、`save_interval 50`、`resume true`；`num_envs 4096`、
+`terrain_type generator`、`episode_length_s 20.0`。artifact 完整（model_498.pt + tfevents + .onnx），
+末次记录（step 498）：`Train/mean_reward` 13.39、`Train/mean_episode_length` 914.4（上限 1000）、
+`Episode_Termination` illegal_contact 0.92 / stuck 0 / time_out 3.54 / out_of_terrain_bounds 0。
+checkpoint 在 play 下可完成基本 locomotion。
+
+范围：这是 **pipeline / baseline verification**（约 500 iteration），**不是** long-run
+convergence 结论（未做长训练，也未做 8-command 定量评估）。
+
+MJWarp capacity 验证（固定 bad simulator state，`tests/repro_black_rough_multiccd.py`）：
+
+```text
+同一 bad state + 1 次 state restore + 1 次 sim.step()
+    nconmax = 35     → 确定性 crash（ccd_kernel_builder，CUDA memory-access fault）
+    nconmax >= 48    → clean（48 / 64 / 96 / 128 / 256）
+生产 rough cfg（nconmax = 128，无 CLI override）    → clean
+长 rollout（5000 control steps，model_498，CUDA graph OFF，nconmax = 128） → 无 crash
+```
+
+诊断结论：CUDA graph 与 MULTICCD 都不是根因；无 NaN / Inf；compute-sanitizer 指向 CCD
+kernel 的 capacity-related boundary access；upstream MJWarp 根因尚未修复。
+
 ------
 
 ## 18. Known Risks
@@ -1585,7 +1639,8 @@ observation_terms_flatten_history_dim / observation_terms_history_length
      terrain scan + critic privileged height，见 §13.4；
      terrain-relative base-height reward，见 §11.4；
      out_of_terrain_bounds safety truncation，见 §6.4；
-     下一前置：无 —— 可开始 sanity training，但尚未开始）
+     sanity / baseline 训练（约 500 iteration）完成，见 §17.2；
+     下一前置：无 —— 长训练 / 定量评估仍未做）
 7. Black sim2real/deployment contract     （须一并处理 §18.1 的 ONNX metadata 导出）
 8. HIM observation / estimator / algorithm integration
 ```

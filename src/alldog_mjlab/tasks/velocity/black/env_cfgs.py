@@ -129,6 +129,16 @@ BLACK_TERRAIN_SCAN_SENSOR = "terrain_scan"
 BLACK_TERRAIN_SCAN_BODY = "trunk"
 BLACK_TERRAIN_SCAN_MAX_DISTANCE = 5.0
 
+# Black rough 的 MJWarp contact capacity。这是 backend / runtime workaround，不是
+# legacy Black behavior contract，也不是训练者调参项。
+# MjLab v1.6 velocity baseline 的 `SimulationCfg.nconmax = 35`
+# （mjlab/tasks/velocity/velocity_env_cfg.py）；Black rough 沿用该值时，多接触状态会在
+# MJWarp GPU convex narrowphase CCD 中触发 capacity-related CUDA runtime fault：
+# 固定 bad simulator state 下 nconmax=35 可确定性复现，>=48 不再触发。
+# 本项目取 128 留出余量（这是 project-side workaround：upstream MJWarp 根因尚未修复，
+# 也不声称 128 是理论最小值）。flat 保持 baseline 35 不变。
+BLACK_ROUGH_NCONMAX = 128
+
 
 def _configure_command(cfg: ManagerBasedRlEnvCfg) -> None:
     """Black flat v1 command contract：固定范围 + MjLab native sampler。
@@ -456,6 +466,20 @@ def _configure_rough_rewards(cfg: ManagerBasedRlEnvCfg) -> None:
     )
 
 
+def _configure_rough_sim(cfg: ManagerBasedRlEnvCfg) -> None:
+    """Black rough 的 MJWarp contact-capacity workaround：``cfg.sim.nconmax = 128``。
+
+    MjLab v1.6 velocity baseline 默认 ``nconmax = 35``；Black rough 的多接触状态已在
+    MJWarp GPU convex narrowphase CCD 中触发 capacity-related runtime fault：固定 bad
+    simulator state 下 35 可确定性复现，``>= 48`` 不再触发。本项目取 128 留出余量。
+
+    这是 backend / runtime workaround，不是 legacy Black behavior contract，也不表示
+    upstream MJWarp 根因已修复。只改 ``nconmax``；``njmax`` 等其余 sim capacity 保持
+    baseline 不变。
+    """
+    cfg.sim.nconmax = BLACK_ROUGH_NCONMAX
+
+
 def _configure_flat_terrain(cfg: ManagerBasedRlEnvCfg) -> None:
     """flat task specialization：plane terrain、无 terrain generator / scan / curriculum。
 
@@ -675,9 +699,9 @@ def _foot_geom_names() -> tuple[str, ...]:
 def _build_black_env_cfg(play: bool, rough: bool) -> ManagerBasedRlEnvCfg:
     """flat / rough 共用装配路径：二者只差 terrain specialization 与 critic height scan。
 
-    顺序：command / scene+sensors / actions / events / rewards（rough 再覆盖 base_height）
-    → flat 或 rough terrain → observations（rough 追加 critic height scan）
-    → terminations（rough 追加 out_of_terrain_bounds）/ common runtime
+    顺序：command / scene+sensors / actions / events / rewards（rough 再覆盖 base_height
+    与 sim contact capacity）→ flat 或 rough terrain → observations（rough 追加 critic
+    height scan）→ terminations（rough 追加 out_of_terrain_bounds）/ common runtime
     → terrain curriculum（仅 rough 训练）→ play。
 
     rough 专门化保留 native `terrain_scan` sensor（flat 专门化会移除它），因此不再
@@ -693,6 +717,7 @@ def _build_black_env_cfg(play: bool, rough: bool) -> ManagerBasedRlEnvCfg:
     _configure_events(cfg)
     _configure_rewards(cfg)
     if rough:
+        _configure_rough_sim(cfg)
         _configure_rough_rewards(cfg)
         _configure_rough_terrain(cfg)
     else:
