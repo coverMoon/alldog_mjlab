@@ -19,7 +19,8 @@ Black deployment contract / sim2sim compatibility
 Black flat PPO baseline、Black rough PPO baseline（约 500 iteration，见 §17.2）与 rough 的
 MJWarp runtime workaround（`nconmax = 128`，见 §10）均已完成；当前处于部署契约 / sim2sim 阶段
 （§19），其中 deployment contract 已冻结（§19.1）、actor-only TorchScript 导出与数值验证已
-完成（§19.3 / §17.3）、legacy `rl_sar` 的 45-D 单帧部署 config 已完成（§19.6 / §17.4）。
+完成（§19.3 / §17.3）、legacy `rl_sar` 的 45-D 单帧部署 config 已完成（§19.6 / §17.4）、
+sim2sim observation / action trace 已数值对齐（§19.7 / §17.5）。
 MJWarp GPU convex CCD 的 upstream 根因尚未修复。
 
 当前尚未进入：
@@ -34,7 +35,7 @@ BlackW migration
 当前 task：
 
 ```text
-Black PPO sim2sim observation / action trace verification（§19.5 步骤 5）
+Black PPO MuJoCo locomotion rollout verification（§19.5 步骤 5 的剩余部分）
 ```
 
 ------
@@ -1211,6 +1212,7 @@ Black rough PPO sanity / baseline training: COMPLETE（§17.2）
 Black rough MJWarp contact capacity workaround: COMPLETE（§10 / §17.2）
 Black actor-only TorchScript export:  COMPLETE（§19.3 / §17.3）
 Black legacy rl_sar 45-D deployment config: COMPLETE（§19.6 / §17.4）
+Black sim2sim observation / action trace: COMPLETE（§19.7 / §17.5）
 Black deployment / sim2sim contract:  IN PROGRESS（§19）
 ```
 
@@ -1219,8 +1221,9 @@ train / play 的 command contract 完全相同。
 
 当前单元是部署契约 / sim2sim 兼容（§19）：deployment contract 已冻结（§19.1）、
 actor-only TorchScript 导出与数值对齐已完成（§19.3 / §17.3）、legacy `rl_sar` 的
-45-D 单帧部署 config 已建立并验证可加载（§19.6 / §17.4）。下一步是让该 config 在
-sim2sim 中实际跑起来并对比 observation / action trace，之后再接 `quadruped_control`。
+45-D 单帧部署 config 已建立并验证可加载（§19.6 / §17.4）、sim2sim 数据链已数值对齐
+（§19.7 / §17.5）。下一步是在同一 sim2sim 中验证 locomotion rollout 行为，之后再接
+`quadruped_control`。
 rough 的 sanity / baseline 训练属于 pipeline / baseline verification，**不是** long-run
 convergence 结论。
 
@@ -1600,6 +1603,43 @@ rl_sar HEAD         cd46b93（coverMoon/rl_sar-for-super-dog，变更前 clean�
 
 未做：MuJoCo backend rollout、observation/action trace 数值对比、运动表现评价（下一单元）。
 
+### 17.5 Black PPO sim2sim observation/action trace 验证记录
+
+```text
+MuJoCo backend   /home/windnotebook/PROJECT/Dog/real_robot/black 的 mujoco_runner（ROS 2）
+MuJoCo 启动      ros2 launch mujoco_runner mujoco.launch.py rname:=black scene:=flat \
+                     render:=false real_time:=true publish_gap_model:=false
+rl_sar 启动      rl_sim --ros-args -p robot_name:=black -p policy_config:=mjlab_ppo
+（非零 command） navigation mode + /cmd_vel（键盘命令会被 RunModel 的 joy_timeout 清零）
+trace            2 次 session，共 2829 个 policy step（1324 / 1505），连续无缺号
+instrumentation  rl_sar 侧 env-gated（RL_SAR_TRACE）临时 trace，验证后已整体回退，
+                 git diff 为空并已重新 build（回退后 smoke：InitRL OK / 0 ERROR）
+reference        独立 numpy 实现，从 raw simulator state（quat / gyro / command / q / dq /
+                 previous action）按 deployment contract 重算 45-D；joint reorder 由显式
+                 joint_mapping 完成，不以 rl_sar 处理后的张量为输入
+```
+
+```text
+obs.command      ≤ 2.0e-9        raw_action（Python torch 2.14 vs libtorch 2.0.1） ≤ 9.6e-7
+obs.ang_vel      ≤ 5.0e-9        scaled_residual（0.25 * action）                  ≤ 2.4e-7
+obs.gravity      ≤ 2.2e-7        q_target（default + 0.25 * action）              ≤ 2.9e-7
+obs.q_rel        ≤ 8.0e-8        obs.full[45]                                    ≤ 2.3e-7
+obs.dq           ≤ 7.0e-8        clip_obs = 100 触发                            false
+obs.last_action   0.0            （trace 内 max |obs| = 4.40）
+```
+
+```text
+previous_action timing   2828 次连续转移均为 prev_action_t == raw_action_(t-1)，
+                         step 1 为 zeros(12)；不存在 == 当前 action 的 step
+状态覆盖                 A zero command 站立 784 帧；B non-zero command 2045 帧
+                         （vx ∈ [-2,2] / vy ∈ [0,0.9] / wz ∈ [0,3]）；
+                         C tilt > 5° 476 帧（max roll 8.35° / max pitch 13.6° /
+                         max |gyro| 11.96 rad/s）；未出现大角度持续倾倒
+```
+
+结论：**PASS**（observation / action / q_target 全部在浮点容差内一致，
+joint mapping / gravity / ang_vel frame / previous_action timing 均无 contract 冲突）。
+
 ------
 
 ## 18. Known Risks
@@ -1837,7 +1877,9 @@ metadata 导出会报已知的 `joint_pos` 查找告警（见 §18.1）。
 2. Export actor-only TorchScript from an existing MjLab checkpoint.   （完成，§19.3）
 3. Verify exported policy numerically against MjLab actor.            （完成，§17.3）
 4. Add a 45-D PPO deployment config for legacy rl_sar.                （完成，§19.6）
-5. Run legacy rl_sar sim2sim.                                         （下一单元）
+5. Run legacy rl_sar sim2sim.                                         （trace 部分完成，§17.5 /
+                                                                       §19.7；运动表现
+                                                                       rollout 待做 —— 下一单元）
 6. Add the corresponding 45-D PPO config for quadruped_control.
 7. Run quadruped_control MuJoCo sim2sim.
 8. Compare observation/action traces between training-side and deployment-side runtimes.
@@ -1887,6 +1929,29 @@ action clip                 有意不配置 clip_actions_lower/upper → Forward
 policy_switch.yaml          mjlab_ppo 未加入 policy_config_cycle，只能显式指定 config name 启动
 ```
 
+### 19.7 sim2sim observation / action contract（COMPLETE）
+
+数据链、reference 方法与逐步数值结果见 §17.5。已有的有效结论：
+
+```text
+joint order      policy = FL, FR, RL, RR（每腿 hip/thigh/calf），与 §3.1 / §5 一致
+joint mapping    MuJoCo physical (FL,FR,RL,RR) --mujoco_runner.motor_mapping--> ROS msg
+                 (FR,FL,RR,RL) --rl_sar.joint_mapping--> policy (FL,FR,RL,RR)
+                 两者是同一个数组、方向相反，且该置换是对合（P∘P = I），
+                 因此复合后 policy 顺序 == physical 顺序；名字与数值双重验证
+gravity          wxyz quaternion + quat_apply_inverse(quat, [0,0,-1])（两侧形式等价）
+ang_vel frame    body-frame（backend `<gyro site="imu">`，imu site 在 trunk 原点）
+action           q_target = default_dof_pos + 0.25 * raw_action，无额外 action clip
+previous_action  obs 使用上一 policy step 的 action a_(t-1)
+clip_obs         100，在本轮 trace 中从未触发
+```
+
+操作注意（非 contract）：`rl_sim` 的键盘 command 会被 `RunModel()` 的 joy_timeout 清零
+（无 `/joy` 时），sim2sim 需要 navigation mode + `/cmd_vel` 才能给出非零 command。
+
+MuJoCo backend 实际位置：`/home/windnotebook/PROJECT/Dog/real_robot/black/src/mujoco_runner`
+（`rl_sar/README.md` 里的 `~/PROJECT/RoboCon/Dog/black_mujoco` 已过期）。
+
 ------
 
 ## 20. Next Migration Order
@@ -1909,9 +1974,9 @@ policy_switch.yaml          mjlab_ppo 未加入 policy_config_cycle，只能显�
 7. Black deployment contract / sim2sim → Black sim2real
    （进行中：deployment contract 已冻结（§19.1）、actor-only TorchScript 导出与数值验证已完成
      （§19.3 / §17.3）、legacy `rl_sar` 的 45-D 单帧 deployment config 已完成并验证可加载
-     （§19.6 / §17.4）；下一单元为 §19.5 步骤 5 的 rl_sar sim2sim observation / action trace
-     验证；ONNX metadata 归属见 §18.1 / §19.4；真实机器人 backend / sim2real 需在 sim2sim
-     contract 验证通过后开始）
+     （§19.6 / §17.4）、sim2sim observation / action trace 已数值对齐（§19.7 / §17.5）；
+     下一单元为 §19.5 步骤 5 剩余部分的 MuJoCo locomotion rollout 验证；ONNX metadata
+     归属见 §18.1 / §19.4；真实机器人 backend / sim2real 需在 sim2sim contract 验证通过后开始）
 8. HIM observation / estimator / algorithm integration
 ```
 
