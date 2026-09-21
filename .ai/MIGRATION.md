@@ -19,7 +19,8 @@ Black deployment contract / sim2sim compatibility
 Black flat PPO baseline、Black rough PPO baseline（约 500 iteration，见 §17.2）与 rough 的
 MJWarp runtime workaround（`nconmax = 128`，见 §10）均已完成；当前处于部署契约 / sim2sim 阶段
 （§19），其中 deployment contract 已冻结（§19.1）、actor-only TorchScript 导出与数值验证已
-完成（§19.3 / §17.3）。MJWarp GPU convex CCD 的 upstream 根因尚未修复。
+完成（§19.3 / §17.3）、legacy `rl_sar` 的 45-D 单帧部署 config 已完成（§19.6 / §17.4）。
+MJWarp GPU convex CCD 的 upstream 根因尚未修复。
 
 当前尚未进入：
 
@@ -33,7 +34,7 @@ BlackW migration
 当前 task：
 
 ```text
-Black PPO 45-D deployment config for legacy rl_sar（§19.5 步骤 4）
+Black PPO sim2sim observation / action trace verification（§19.5 步骤 5）
 ```
 
 ------
@@ -1209,6 +1210,7 @@ Black rough out_of_terrain_bounds: COMPLETE（§6.4）
 Black rough PPO sanity / baseline training: COMPLETE（§17.2）
 Black rough MJWarp contact capacity workaround: COMPLETE（§10 / §17.2）
 Black actor-only TorchScript export:  COMPLETE（§19.3 / §17.3）
+Black legacy rl_sar 45-D deployment config: COMPLETE（§19.6 / §17.4）
 Black deployment / sim2sim contract:  IN PROGRESS（§19）
 ```
 
@@ -1216,15 +1218,17 @@ command 已冻结为固定范围 + native sampler，且不再有任何 curriculu
 train / play 的 command contract 完全相同。
 
 当前单元是部署契约 / sim2sim 兼容（§19）：deployment contract 已冻结（§19.1）、
-actor-only TorchScript 导出与数值对齐已完成（§19.3 / §17.3），下一步是分别接入 legacy
-`rl_sar` 与 `quadruped_control` 做 sim2sim。rough 的 sanity / baseline 训练属于
-pipeline / baseline verification，**不是** long-run convergence 结论。
+actor-only TorchScript 导出与数值对齐已完成（§19.3 / §17.3）、legacy `rl_sar` 的
+45-D 单帧部署 config 已建立并验证可加载（§19.6 / §17.4）。下一步是让该 config 在
+sim2sim 中实际跑起来并对比 observation / action trace，之后再接 `quadruped_control`。
+rough 的 sanity / baseline 训练属于 pipeline / baseline verification，**不是** long-run
+convergence 结论。
 
 下一阶段：
 
 ```text
-§19.5 的部署迁移顺序（剩余步骤 4 → 7：rl_sar 45-D config / sim2sim →
-quadruped_control sim2sim → 轨迹对比 → 最后才考虑 real robot backend / sim2real）
+§19.5 的部署迁移顺序（剩余步骤 5 → 8：rl_sar sim2sim → quadruped_control config / sim2sim →
+轨迹对比 → 最后才考虑 real robot backend / sim2real）
 ```
 
 （sim2sim contract 验证通过前不要开始 real robot backend / sim2real；本阶段不要开始 HIM
@@ -1567,6 +1571,35 @@ uv run python tests/check_black_flat.py --device cpu    PASS（含导出检查�
 uv run python tests/check_black_flat.py --device cuda   PASS（含导出检查）
 ```
 
+### 17.4 legacy rl_sar 45-D deployment config 验证记录
+
+```text
+rl_sar HEAD         cd46b93（coverMoon/rl_sar-for-super-dog，变更前 clean）
+新增（untracked）   src/rl_sar/policy/black/mjlab_ppo/{config.yaml, black_ppo_actor.pt}
+未修改              policy_switch.yaml / base.yaml / 任何 C++ 源码
+```
+
+验证按顺序执行：
+
+```text
+1. config 静态 contract    num_observations 45 / observations_history [] / 12 个 action /
+                           default pose / scale / PD / torque / joint_mapping 全部匹配
+2. TorchScript 独立加载     torch 2.14：zeros(1,45) -> (1,12) float32 finite
+                           libtorch 2.0.1+cpu（runtime 实际链接版本）：同样 PASS，
+                           zeros 输出与训练侧逐位一致
+3. build                    bash build.sh rl_sar → PASS（46.2 s，仅警告）
+4. minimal runtime load     rl_sim + black/mjlab_ppo，debug_key 注入 0 → 1：
+                           fsm_state 稳定保持在 RLFSMStateRL_Locomotion，
+                           runtime_status.model_name = black_ppo_actor.pt，
+                           InitRL() failed = 0 次，无异常 / 维度错误
+负向对照                    不存在的 config name → [ERROR] InitRL() failed: bad file，
+                           证明该路径能显式暴露加载失败
+文档启动方式                bash run_rl_sim_debug.sh black mjlab_ppo 同样 PASS
+                           （fsm_state / model_name 同上，无 InitRL failed）
+```
+
+未做：MuJoCo backend rollout、observation/action trace 数值对比、运动表现评价（下一单元）。
+
 ------
 
 ## 18. Known Risks
@@ -1677,10 +1710,17 @@ Black deployment contract / sim2sim compatibility
 
 ```text
 legacy:                 N-W-wolf/rl_sar-black-W
-                        本地：/home/windnotebook/PROJECT/Dog/real_robot
+                        本地：/home/windnotebook/PROJECT/Dog/rl_sar
+                        （remote: coverMoon/rl_sar-for-super-dog）
 主要未来运行环境:        N-W-wolf/quadruped_control
                         本地：/home/windnotebook/PROJECT/Dog/quadruped_control
 ```
+
+历史记录修正：本文件与 `AGENTS.md` §3.1 曾把 legacy 本地路径写成
+`/home/windnotebook/PROJECT/Dog/real_robot`。该路径实际是 `coverMoon/real_robot`（ROS 2
+底层通信 / real_runner / serial / robot_description），**不含** `rl_sar`、policy config
+或 TorchScript runtime；真正的 `rl_sar` checkout 在
+`/home/windnotebook/PROJECT/Dog/rl_sar`。`AGENTS.md` 的同一处错误尚未修正。
 
 `quadruped_control` 当前状态：simulation-side backend 可用；real robot backend 尚未实现。
 
@@ -1794,8 +1834,8 @@ metadata 导出会报已知的 `joint_pos` 查找告警（见 §18.1）。
 1. Freeze Black PPO deployment contract.                              （完成，§19.1）
 2. Export actor-only TorchScript from an existing MjLab checkpoint.   （完成，§19.3）
 3. Verify exported policy numerically against MjLab actor.            （完成，§17.3）
-4. Add a 45-D PPO deployment config for legacy rl_sar.                （下一单元）
-5. Run legacy rl_sar sim2sim.
+4. Add a 45-D PPO deployment config for legacy rl_sar.                （完成，§19.6）
+5. Run legacy rl_sar sim2sim.                                         （下一单元）
 6. Add the corresponding 45-D PPO config for quadruped_control.
 7. Run quadruped_control MuJoCo sim2sim.
 8. Compare observation/action traces between training-side and deployment-side runtimes.
@@ -1803,6 +1843,47 @@ metadata 导出会报已知的 `joint_pos` 查找告警（见 §18.1）。
 ```
 
 本阶段**不要**开始 HIM integration。
+
+### 19.6 legacy rl_sar Black PPO 45-D deployment config（COMPLETE）
+
+```text
+仓库              /home/windnotebook/PROJECT/Dog/rl_sar（coverMoon/rl_sar-for-super-dog）
+config 目录       src/rl_sar/policy/black/mjlab_ppo/
+顶层 key          black/mjlab_ppo
+模型文件          black_ppo_actor.pt（从 §19.3 导出产物直接复制，未重新导出）
+md5               e7318ea9019cf27f2d204565659cf0cd（与训练侧导出文件逐字节一致）
+启动方式          ./run_rl_sim_debug.sh black mjlab_ppo
+```
+
+观测是 **45 维单帧**（`observations_history: []`，不是 HIM 的 `[0..5]` / 270 维）：
+
+```text
+commands(3) + ang_vel(3, body-frame) + gravity_vec(3) + dof_pos(12) + dof_vel(12) + actions(12)
+```
+
+部署侧数值：`action_scale = 0.25`、`rl_kp = 40` / `rl_kd = 1.2`、
+`torque_limits = 33.5`、`default_dof_pos = [0.0, 0.8014, -1.527, ...]`、
+`joint_mapping = [3,4,5, 0,1,2, 9,10,11, 6,7,8]`（外部顺序 → policy 顺序，保留不变）。
+
+`policy_dof_indices = [0..11]` 是显式 identity：`ReadYamlRL()` 校验其为 12 个合法下标，
+`SelectDofColumns()` / `ComputeOutput()` 在 identity 下与“未配置”逐元素等价
+（`wheel_indices = []`，mask 分支不执行；`num_of_dofs = 12`，action_dim 不变）。
+
+已验证：`bash build.sh rl_sar` PASS（shebang 不在第 1 行，需用 `bash build.sh`）；
+`rl_sim` + `ReadYamlRL("black/mjlab_ppo")` + `torch::jit::load()` PASS——进入
+`RLFSMStateRL_Locomotion` 后持续保持（无 `InitRL() failed`），`runtime_status` 的
+`model_name` 为 `black_ppo_actor.pt`（见 §17.4）。runtime 链接的 libtorch 为 2.0.1+cpu，
+可加载 torch 2.14 导出的 TorchScript 且输出与训练侧逐位一致。
+
+已知差异（属部署侧，不在本单元解决）：
+
+```text
+clip_obs = 100              legacy runtime 强制 clamp，训练侧无此 clip（observation 未触发）
+command range               base.yaml command_limits = [3.0, 1.0, 3.0]，训练命令范围 vx/vy ∈ [-1,1]、wz ∈ [-pi,pi]
+torque limit                部署 33.5 N·m vs 训练 effort_limit 20 N·m
+action clip                 有意不配置 clip_actions_lower/upper → Forward() 直接返回 actor action
+policy_switch.yaml          mjlab_ppo 未加入 policy_config_cycle，只能显式指定 config name 启动
+```
 
 ------
 
@@ -1825,9 +1906,10 @@ metadata 导出会报已知的 `joint_pos` 查找告警（见 §18.1）。
      下一前置：无 —— 长训练 / 定量评估仍未做）
 7. Black deployment contract / sim2sim → Black sim2real
    （进行中：deployment contract 已冻结（§19.1）、actor-only TorchScript 导出与数值验证已完成
-     （§19.3 / §17.3）；下一单元为 §19.5 步骤 4 的 legacy `rl_sar` 45-D deployment config；
-     ONNX metadata 归属见 §18.1 / §19.4；真实机器人 backend / sim2real 需在 sim2sim contract
-     验证通过后开始）
+     （§19.3 / §17.3）、legacy `rl_sar` 的 45-D 单帧 deployment config 已完成并验证可加载
+     （§19.6 / §17.4）；下一单元为 §19.5 步骤 5 的 rl_sar sim2sim observation / action trace
+     验证；ONNX metadata 归属见 §18.1 / §19.4；真实机器人 backend / sim2real 需在 sim2sim
+     contract 验证通过后开始）
 8. HIM observation / estimator / algorithm integration
 ```
 
