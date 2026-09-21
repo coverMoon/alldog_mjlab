@@ -17,8 +17,9 @@ Black deployment contract / sim2sim compatibility
 ```
 
 Black flat PPO baseline、Black rough PPO baseline（约 500 iteration，见 §17.2）与 rough 的
-MJWarp runtime workaround（`nconmax = 128`，见 §10）均已完成；当前进入部署契约 / sim2sim 阶段
-（§19）。MJWarp GPU convex CCD 的 upstream 根因尚未修复。
+MJWarp runtime workaround（`nconmax = 128`，见 §10）均已完成；当前处于部署契约 / sim2sim 阶段
+（§19），其中 deployment contract 已冻结（§19.1）、actor-only TorchScript 导出与数值验证已
+完成（§19.3 / §17.3）。MJWarp GPU convex CCD 的 upstream 根因尚未修复。
 
 当前尚未进入：
 
@@ -32,7 +33,7 @@ BlackW migration
 当前 task：
 
 ```text
-black-rough deployment contract（45-D PPO actor-only TorchScript 导出 + sim2sim 验证）
+Black PPO 45-D deployment config for legacy rl_sar（§19.5 步骤 4）
 ```
 
 ------
@@ -51,6 +52,7 @@ alldog_mjlab
 src/alldog_mjlab/robots/black/
 src/alldog_mjlab/tasks/velocity/black/
 src/alldog_mjlab/algorithms/
+src/alldog_mjlab/utils/export_policy.py    actor-only TorchScript 导出 CLI（§19.3）
 ```
 
 Black 当前主要 task config：
@@ -1206,21 +1208,22 @@ Black rough base-height reward:  COMPLETE（§11.4）
 Black rough out_of_terrain_bounds: COMPLETE（§6.4）
 Black rough PPO sanity / baseline training: COMPLETE（§17.2）
 Black rough MJWarp contact capacity workaround: COMPLETE（§10 / §17.2）
+Black actor-only TorchScript export:  COMPLETE（§19.3 / §17.3）
 Black deployment / sim2sim contract:  IN PROGRESS（§19）
 ```
 
 command 已冻结为固定范围 + native sampler，且不再有任何 curriculum（§4）。
 train / play 的 command contract 完全相同。
 
-当前单元是部署契约 / sim2sim 兼容（§19）：冻结 Black PPO deployment contract、导出
-actor-only TorchScript 并与 MjLab actor 数值对齐、再分别接入 legacy `rl_sar` 与
-`quadruped_control` 做 sim2sim。rough 的 sanity / baseline 训练属于 pipeline / baseline
-verification，**不是** long-run convergence 结论。
+当前单元是部署契约 / sim2sim 兼容（§19）：deployment contract 已冻结（§19.1）、
+actor-only TorchScript 导出与数值对齐已完成（§19.3 / §17.3），下一步是分别接入 legacy
+`rl_sar` 与 `quadruped_control` 做 sim2sim。rough 的 sanity / baseline 训练属于
+pipeline / baseline verification，**不是** long-run convergence 结论。
 
 下一阶段：
 
 ```text
-§19.5 的部署迁移顺序（freeze contract → TorchScript 导出 → 数值验证 → rl_sar sim2sim →
+§19.5 的部署迁移顺序（剩余步骤 4 → 7：rl_sar 45-D config / sim2sim →
 quadruped_control sim2sim → 轨迹对比 → 最后才考虑 real robot backend / sim2real）
 ```
 
@@ -1406,6 +1409,9 @@ parameter update
 checkpoint save/reload
 
 inference
+
+actor-only TorchScript 导出（[1,45] -> [1,12]、与 actor 的 deterministic forward 数值等价、
+独立 torch.jit.load）
 ```
 
 新增 behavior unit必须增加对应 contract test，但不得弱化已有 smoke。
@@ -1533,6 +1539,33 @@ MJWarp capacity 验证（固定 bad simulator state，`tests/repro_black_rough_m
 
 诊断结论：CUDA graph 与 MULTICCD 都不是根因；无 NaN / Inf；compute-sanitizer 指向 CCD
 kernel 的 capacity-related boundary access；upstream MJWarp 根因尚未修复。
+
+### 17.3 Black PPO actor-only TorchScript 导出验证记录
+
+```text
+code state        HEAD eda3e82 + 新增 src/alldog_mjlab/utils/export_policy.py（未提交）
+task              black-rough（生产 CLI）/ black-flat（check_black_flat）
+checkpoint        logs/rsl_rl/black_velocity/2026-09-18_19-37-17/model_498.pt（iter 498）
+export command    uv run python -m alldog_mjlab.utils.export_policy \
+                      --task-id black-rough --checkpoint <model_498.pt> \
+                      --output <policy.pt> --device cpu
+exported module   actor-only TorchScript：input float32 [1,45] / output float32 [1,12]
+```
+
+数值等价（reference = 刚加载 checkpoint 的 actor deterministic forward，atol 1e-6 / rtol 1e-5）：
+
+```text
+play 环境真实一帧   max abs diff 0.0
+全零 [1,45]        max abs diff 0.0
+linspace(-1,1,45)  max abs diff 0.0
+```
+
+独立加载（不依赖 runner 对象）：`torch.jit.load()` + `eval()` 后可推理，输出 [1,12] float32 有限。
+
+```text
+uv run python tests/check_black_flat.py --device cpu    PASS（含导出检查）
+uv run python tests/check_black_flat.py --device cuda   PASS（含导出检查）
+```
 
 ------
 
@@ -1718,21 +1751,33 @@ Kp 40 / Kd 1.2
 因此当前 PPO 部署配置必须使用单帧 45 维；270 维 history contract 属于未来的 HIM 部署，
 届时单独恢复。
 
-### 19.3 Model-format gap
+### 19.3 Model-format gap → actor-only TorchScript 导出（COMPLETE）
 
 两个部署运行时当前都通过 `torch::jit::load()` 加载 **TorchScript** 模型；而 MjLab 训练
 checkpoint（如 `model_498.pt`）是 RSL-RL 训练 checkpoint，**不能**直接作为可部署 TorchScript
 模块。
 
-因此第一个实现任务是一条 **actor-only TorchScript 导出路径**：
+导出路径已实现并验证：
 
 ```text
-input:  [1, 45]
-output: [1, 12]
+实现              src/alldog_mjlab/utils/export_policy.py
+checkpoint 加载   MjLab runner 的 load(..., load_cfg={"actor": True}, strict=True)
+导出              RSL-RL 5.4.2 原生 runner.export_policy_to_jit()（actor.as_jit()）
+环境              task registry 的 play cfg（num_envs = 1），维度取自 env 而非 checkpoint
 ```
 
-验收要求：同一 observation 下，MjLab actor 输出与导出 TorchScript 输出必须在显式给定的
-tolerance 内数值一致。
+导出模块的 deployment contract（冻结）：
+
+```text
+input   float32 [1, 45]   actor 单帧 observation
+output  float32 [1, 12]   policy action
+```
+
+验收已满足：同一 observation 下与 checkpoint actor 的 deterministic forward 在
+atol 1e-6 / rtol 1e-5 内一致（实测三组 probe 的 max abs diff 均为 0.0，见 §17.3）。
+导出侧不做任何额外 normalization / scaling（actor normalization 为 disabled，§5.3）。
+
+尚未验证：sim2sim 侧的 observation 预处理与 action 后处理是否与训练侧一致（属 §19.5 步骤 4 之后）。
 
 ### 19.4 ONNX metadata（非当前部署阻塞项）
 
@@ -1746,10 +1791,10 @@ metadata 导出会报已知的 `joint_pos` 查找告警（见 §18.1）。
 ### 19.5 Intended deployment migration order
 
 ```text
-1. Freeze Black PPO deployment contract.
-2. Export actor-only TorchScript from an existing MjLab checkpoint.
-3. Verify exported policy numerically against MjLab actor.
-4. Add a 45-D PPO deployment config for legacy rl_sar.
+1. Freeze Black PPO deployment contract.                              （完成，§19.1）
+2. Export actor-only TorchScript from an existing MjLab checkpoint.   （完成，§19.3）
+3. Verify exported policy numerically against MjLab actor.            （完成，§17.3）
+4. Add a 45-D PPO deployment config for legacy rl_sar.                （下一单元）
 5. Run legacy rl_sar sim2sim.
 6. Add the corresponding 45-D PPO config for quadruped_control.
 7. Run quadruped_control MuJoCo sim2sim.
@@ -1779,8 +1824,10 @@ metadata 导出会报已知的 `joint_pos` 查找告警（见 §18.1）。
      sanity / baseline 训练（约 500 iteration）完成，见 §17.2；
      下一前置：无 —— 长训练 / 定量评估仍未做）
 7. Black deployment contract / sim2sim → Black sim2real
-   （进行中：部署迁移顺序见 §19.5；ONNX metadata 归属见 §18.1 / §19.4；
-     真实机器人 backend / sim2real 需在 sim2sim contract 验证通过后开始）
+   （进行中：deployment contract 已冻结（§19.1）、actor-only TorchScript 导出与数值验证已完成
+     （§19.3 / §17.3）；下一单元为 §19.5 步骤 4 的 legacy `rl_sar` 45-D deployment config；
+     ONNX metadata 归属见 §18.1 / §19.4；真实机器人 backend / sim2real 需在 sim2sim contract
+     验证通过后开始）
 8. HIM observation / estimator / algorithm integration
 ```
 
