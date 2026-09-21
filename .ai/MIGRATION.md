@@ -13,23 +13,17 @@
 当前阶段：
 
 ```text
-Black rough PPO baseline verification: COMPLETE
+Black deployment contract / sim2sim compatibility
 ```
 
-Black flat 的行为语义已全部冻结（reward / DR / command / final PPO verification，见 §11 / §12 / §4 / §17.1）。
-Black rough v1 的 planned behavior unit 已完成：terrain generator + terrain curriculum
-+ terrain scan / critic privileged height + terrain-relative base-height reward +
-out_of_terrain_bounds termination（§13 / §13.4 / §11.4 / §6.4）；rough 的 sanity / baseline
-训练也已完成（约 500 iteration，见 §17.2），当前 checkpoint 可做基本 locomotion。
-
-rough 侧存在一个已知 backend 问题：MJWarp GPU convex CCD 在本任务的多接触状态下会触发
-capacity-related CUDA runtime fault（见 §10 MJWarp contact capacity）。项目侧已用
-`nconmax = 128` 作为 runtime workaround（§17.2）；upstream 根因尚未修复。
+Black flat PPO baseline、Black rough PPO baseline（约 500 iteration，见 §17.2）与 rough 的
+MJWarp runtime workaround（`nconmax = 128`，见 §10）均已完成；当前进入部署契约 / sim2sim 阶段
+（§19）。MJWarp GPU convex CCD 的 upstream 根因尚未修复。
 
 当前尚未进入：
 
 ```text
-Black sim2real / deployment contract（含 §18.1 ONNX metadata）
+Black real robot backend / sim2real（§19 的 sim2sim contract 验证通过前不开始）
 HIM observation/history
 HIM algorithm integration
 BlackW migration
@@ -38,8 +32,7 @@ BlackW migration
 当前 task：
 
 ```text
-black-rough（flat contract + rough terrain + terrain scan + terrain-relative base height
-             + OOB safety truncation + nconmax workaround）
+black-rough deployment contract（45-D PPO actor-only TorchScript 导出 + sim2sim 验证）
 ```
 
 ------
@@ -1213,22 +1206,26 @@ Black rough base-height reward:  COMPLETE（§11.4）
 Black rough out_of_terrain_bounds: COMPLETE（§6.4）
 Black rough PPO sanity / baseline training: COMPLETE（§17.2）
 Black rough MJWarp contact capacity workaround: COMPLETE（§10 / §17.2）
+Black deployment / sim2sim contract:  IN PROGRESS（§19）
 ```
 
 command 已冻结为固定范围 + native sampler，且不再有任何 curriculum（§4）。
 train / play 的 command contract 完全相同。
 
-本轮为 rough 增加 MJWarp contact capacity workaround（`nconmax = 128`，§10），并验证固定
-bad state 与长 rollout 均不再触发该 backend fault。rough 的 sanity / baseline 训练已于早前
-完成（§17.2），属于 pipeline / baseline verification，**不是** long-run convergence 结论。
+当前单元是部署契约 / sim2sim 兼容（§19）：冻结 Black PPO deployment contract、导出
+actor-only TorchScript 并与 MjLab actor 数值对齐、再分别接入 legacy `rl_sar` 与
+`quadruped_control` 做 sim2sim。rough 的 sanity / baseline 训练属于 pipeline / baseline
+verification，**不是** long-run convergence 结论。
 
 下一阶段：
 
 ```text
-Black sim2real / deployment contract
+§19.5 的部署迁移顺序（freeze contract → TorchScript 导出 → 数值验证 → rl_sar sim2sim →
+quadruped_control sim2sim → 轨迹对比 → 最后才考虑 real robot backend / sim2real）
 ```
 
-（sim2real 阶段需一并处理 §18.1 的 ONNX metadata 导出问题；不要提前宣称 sim2real 已支持。）
+（sim2sim contract 验证通过前不要开始 real robot backend / sim2real；本阶段不要开始 HIM
+integration；ONNX metadata 归属见 §18.1 / §19.4。）
 
 ------
 
@@ -1293,7 +1290,8 @@ rough critic 在 flat 72 维之后追加 187 维 terrain height scan（共 259 �
 以下均未开始，不得提前宣称支持：
 
 ```text
-Black sim2real/deployment contract
+Black real robot backend / sim2real
+    （§19 的 sim2sim contract 验证通过前不开始；ONNX metadata 归属见 §18.1 / §19.4）
 
 HIM single-step/history observation contract
 
@@ -1621,10 +1619,149 @@ observation_terms_flatten_history_dim / observation_terms_history_length
   的映射（见 §3.1），因此这不是额外负担，而是部署阶段本来就需要的产物。
 - 验收条件：导出路径不再出现该 WARN，或明确采用「onnx + 独立映射表」方案并证明能完整
   还原 joint 顺序 / action_scale / default pose。
+- 部署侧现状（见 §19.4）：两个目标运行时都用 TorchScript + 显式配置，因此该 metadata 问题
+  **不是**当前部署的主要阻塞项；部署阶段同样不要为了它重命名 action term。
 
 ------
 
-## 19. Next Migration Order
+## 19. Frozen Black Deployment / Sim2Sim Contract
+
+阶段状态：
+
+```text
+Black flat PPO baseline:               COMPLETE
+Black rough PPO baseline:              COMPLETE
+Black rough MJWarp runtime workaround: COMPLETE
+```
+
+下一阶段：
+
+```text
+Black deployment contract / sim2sim compatibility
+```
+
+部署参考实现：
+
+```text
+legacy:                 N-W-wolf/rl_sar-black-W
+                        本地：/home/windnotebook/PROJECT/Dog/real_robot
+主要未来运行环境:        N-W-wolf/quadruped_control
+                        本地：/home/windnotebook/PROJECT/Dog/quadruped_control
+```
+
+`quadruped_control` 当前状态：simulation-side backend 可用；real robot backend 尚未实现。
+
+### 19.1 当前 Black PPO policy（= deployment）contract
+
+policy / deployment joint order：`FL -> FR -> RL -> RR`，每腿 `hip -> thigh -> calf`
+（冻结于 §3.1）。
+
+actor observation：**45 维单帧**（冻结于 §5）：
+
+```text
+[0:3]   command
+[3:6]   base angular velocity
+[6:9]   projected gravity
+[9:21]  joint position relative to default
+[21:33] joint velocity
+[33:45] previous action
+```
+
+observation scale：
+
+```text
+command             [2.0, 2.0, 0.25]
+angular velocity    0.25
+projected gravity   1.0
+joint position      1.0
+joint velocity      0.05
+previous action     1.0
+```
+
+actor normalization：**disabled**（§5.3）。
+
+action：12 维 position residual。
+
+```text
+target_joint_pos = default_joint_pos + 0.25 * policy_action
+```
+
+Black default pose：
+
+```text
+FL: [0.0,  0.8014, -1.527]
+FR: [0.0, -0.8014,  1.527]
+RL: [0.0,  0.8014, -1.527]
+RR: [0.0, -0.8014,  1.527]
+```
+
+RL PD：`Kp = 40` / `Kd = 1.2`（§3.2）。policy 周期：`0.02 s` = 50 Hz。
+
+注意：当前 actor 输入是 **45 维单帧**，**不是**未来 HIM 的 270 维 history 输入。
+
+### 19.2 Deployment compatibility findings
+
+legacy `rl_sar` 与 `quadruped_control` 使用同一套 Black policy 语义：
+
+```text
+FL FR RL RR policy joint order
+45 维单帧 observation 定义
+command / angular velocity / gravity / joint position / joint velocity / previous action 顺序
+一致的 observation scales
+action scale 0.25
+一致的 Black default pose
+Kp 40 / Kd 1.2
+50 Hz policy rate
+```
+
+历史 HIM 部署配置使用 `45 维 x 6 帧 history = 270 维` 输入，**这不是当前 PPO contract**。
+因此当前 PPO 部署配置必须使用单帧 45 维；270 维 history contract 属于未来的 HIM 部署，
+届时单独恢复。
+
+### 19.3 Model-format gap
+
+两个部署运行时当前都通过 `torch::jit::load()` 加载 **TorchScript** 模型；而 MjLab 训练
+checkpoint（如 `model_498.pt`）是 RSL-RL 训练 checkpoint，**不能**直接作为可部署 TorchScript
+模块。
+
+因此第一个实现任务是一条 **actor-only TorchScript 导出路径**：
+
+```text
+input:  [1, 45]
+output: [1, 12]
+```
+
+验收要求：同一 observation 下，MjLab actor 输出与导出 TorchScript 输出必须在显式给定的
+tolerance 内数值一致。
+
+### 19.4 ONNX metadata（非当前部署阻塞项）
+
+MjLab v1.6 velocity exporter 的 metadata 假设只有一个 action term `joint_pos`，而 Black 使用
+四个显式 term（`joint_pos_fl` / `joint_pos_fr` / `joint_pos_rl` / `joint_pos_rr`），因此
+metadata 导出会报已知的 `joint_pos` 查找告警（见 §18.1）。
+
+两个目标部署运行时都用 **TorchScript + 显式配置**，所以 ONNX metadata **不是**当前部署的
+主要阻塞项。**不要**为了迁就 stock exporter 而重命名 Black action term（会触碰 §3.3 冻结契约）。
+
+### 19.5 Intended deployment migration order
+
+```text
+1. Freeze Black PPO deployment contract.
+2. Export actor-only TorchScript from an existing MjLab checkpoint.
+3. Verify exported policy numerically against MjLab actor.
+4. Add a 45-D PPO deployment config for legacy rl_sar.
+5. Run legacy rl_sar sim2sim.
+6. Add the corresponding 45-D PPO config for quadruped_control.
+7. Run quadruped_control MuJoCo sim2sim.
+8. Compare observation/action traces between training-side and deployment-side runtimes.
+9. Only after sim2sim contract is verified, proceed to real robot backend / sim2real.
+```
+
+本阶段**不要**开始 HIM integration。
+
+------
+
+## 20. Next Migration Order
 
 长期方向是「flat 先做完，再 rough，最后 sim2real / HIM」，因此：
 
@@ -1641,7 +1778,9 @@ observation_terms_flatten_history_dim / observation_terms_history_length
      out_of_terrain_bounds safety truncation，见 §6.4；
      sanity / baseline 训练（约 500 iteration）完成，见 §17.2；
      下一前置：无 —— 长训练 / 定量评估仍未做）
-7. Black sim2real/deployment contract     （须一并处理 §18.1 的 ONNX metadata 导出）
+7. Black deployment contract / sim2sim → Black sim2real
+   （进行中：部署迁移顺序见 §19.5；ONNX metadata 归属见 §18.1 / §19.4；
+     真实机器人 backend / sim2real 需在 sim2sim contract 验证通过后开始）
 8. HIM observation / estimator / algorithm integration
 ```
 
@@ -1657,7 +1796,7 @@ configuration readability / tuning refactor v1   （完成，behavior-neutral）
 
 ------
 
-## 20. Update Rule
+## 21. Update Rule
 
 每完成一个 behavior unit：
 
