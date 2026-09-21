@@ -233,12 +233,48 @@ observation/action/reward design
 
 ## 3. Deployment Sources
 
-### 3.1 Legacy deployment
+### 3.1 Legacy RL deployment runtime
 
 逻辑仓库：
 
 ```text
-N-W-wolf/rl_sar-black-W
+coverMoon/rl_sar-for-super-dog
+```
+
+本地：
+
+```text
+/home/windnotebook/PROJECT/Dog/rl_sar
+```
+
+用途：
+
+```text
+历史 Black / BlackW policy runtime
+policy observation / action contract
+joint mapping
+default pose
+PD
+control frequency
+TorchScript loading
+sim2sim
+historical sim2real behavior
+```
+
+这是当前 Black PPO legacy compatibility 的主要参考。
+
+不要自动继承所有历史参数。
+
+如果旧 deployment 与当前 `alldog_mjlab` contract 冲突，必须显式比较后决定。
+
+---
+
+### 3.2 Legacy real-robot communication / hardware layer
+
+逻辑仓库：
+
+```text
+coverMoon/real_robot
 ```
 
 本地：
@@ -250,22 +286,17 @@ N-W-wolf/rl_sar-black-W
 用途：
 
 ```text
-历史 Black / BlackW 实机部署行为
-policy I/O compatibility
-joint mapping
-default pose
-PD
-control frequency
-已验证实机经验
+ROS2 hardware communication
+real_runner
+serial / motor communication
+historical hardware integration
 ```
 
-不要自动继承所有历史参数。
-
-如果旧 deployment 与当前 `alldog_mjlab` contract 冲突，必须显式比较后决定。
+它不是当前 `rl_sar` policy runtime，不要把其内部软件结构反向耦合到 `alldog_mjlab`。
 
 ---
 
-### 3.2 Main future deployment runtime
+### 3.3 Main future deployment runtime
 
 逻辑仓库：
 

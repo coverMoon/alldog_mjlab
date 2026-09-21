@@ -1720,7 +1720,9 @@ legacy:                 N-W-wolf/rl_sar-black-W
 `/home/windnotebook/PROJECT/Dog/real_robot`。该路径实际是 `coverMoon/real_robot`（ROS 2
 底层通信 / real_runner / serial / robot_description），**不含** `rl_sar`、policy config
 或 TorchScript runtime；真正的 `rl_sar` checkout 在
-`/home/windnotebook/PROJECT/Dog/rl_sar`。`AGENTS.md` 的同一处错误尚未修正。
+`/home/windnotebook/PROJECT/Dog/rl_sar`。`AGENTS.md` 的同一处错误已修正：
+§3.1 为 legacy RL deployment runtime（`rl_sar`），§3.2 为 legacy real-robot
+通信 / 硬件层（`real_robot`），原 §3.2 顺延为 §3.3。
 
 `quadruped_control` 当前状态：simulation-side backend 可用；real robot backend 尚未实现。
 
