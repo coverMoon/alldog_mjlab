@@ -35,7 +35,7 @@ BlackW migration
 当前 task：
 
 ```text
-quadruped_control Black PPO observation/action trace verification（§19.9 / §19.5 步骤 8）
+quadruped_control Black PPO MuJoCo locomotion rollout verification（§19.5 步骤 7）
 ```
 
 ------
@@ -1215,6 +1215,7 @@ Black legacy rl_sar 45-D deployment config: COMPLETE（§19.6 / §17.4）
 Black sim2sim observation / action trace: COMPLETE（§19.7 / §17.5）
 Black rl_sar MuJoCo locomotion rollout: COMPLETE（§19.8 / §17.6）
 Black quadruped_control 45-D deployment config: COMPLETE（§19.9 / §17.7）
+Black quadruped_control observation/action/torque trace: COMPLETE（§19.10 / §17.8）
 Black deployment / sim2sim contract:  IN PROGRESS（§19）
 ```
 
@@ -1224,16 +1225,18 @@ train / play 的 command contract 完全相同。
 当前单元是部署契约 / sim2sim 兼容（§19）：deployment contract 已冻结（§19.1）、
 actor-only TorchScript 导出与数值对齐已完成（§19.3 / §17.3）、legacy `rl_sar` 的
 45-D 单帧部署 config 已建立并验证可加载（§19.6 / §17.4）、sim2sim 数据链已数值对齐
-（§19.7 / §17.5）、rl_sar MuJoCo locomotion rollout 已验证（§19.8 / §17.6）。下一步是接入
-`quadruped_control`（先 config，再 trace，最后才考虑实机）。
+（§19.7 / §17.5）、rl_sar MuJoCo locomotion rollout 已验证（§19.8 / §17.6）、
+`quadruped_control` 的 45-D config 与 observation / action / target / torque trace 均已验证
+（§19.9 / §19.10 / §17.7 / §17.8）。下一步是本 runtime 的 locomotion rollout，
+之后才是跨 runtime 轨迹对比。
 rough 的 sanity / baseline 训练属于 pipeline / baseline verification，**不是** long-run
 convergence 结论。
 
 下一阶段：
 
 ```text
-§19.5 的部署迁移顺序（剩余步骤 6 → 8：quadruped_control config → sim2sim → 轨迹对比 →
-最后才考虑 real robot backend / sim2real）
+§19.5 的部署迁移顺序（剩余步骤 7 → 8：quadruped_control locomotion rollout → 跨 runtime
+轨迹对比 → 最后才考虑 real robot backend / sim2real）
 ```
 
 （sim2sim contract 验证通过前不要开始 real robot backend / sim2real；本阶段不要开始 HIM
@@ -1720,6 +1723,41 @@ symlink switch 配置，仓库内 policy_switch.yaml 未改）：进程正常运
 即已覆盖 config parse → TorchPolicy::create（warmup forward）→ attach_policy →
 RlController::create。策略实际 step 需要交互式终端输入，留给下一单元。
 
+### 17.8 quadruped_control observation/action/target/torque trace 验证记录
+
+```text
+quadruped_control HEAD   a0970dd（变更前 clean，本单元零改动）
+方式                     /tmp/trace_quadruped_mjlab_ppo.cpp：用公开接口自己驱动仿真
+                         2 ms 物理 / 5 ms 控制（与 tests/mujoco 同构）
+                         包装 RobotIO 记录 MotionRuntime 真正 submit 的 CommandFrame
+                         包装 Policy 记录每次推理的 45-D 输入 / 12-D 输出
+                         io.raw_data()（公开）读 data.ctrl / actuator_force / qfrc_actuator
+trace                    3206 个控制周期 / 751 个 policy step（≈16 s）；rl_locomotion Running
+```
+
+```text
+obs.full[45] 与独立 numpy 参考      max_abs_diff 3.2e-8（各 block ≤ 2.4e-8）
+history [0] 单帧                    input_dim 恒为 45，非 270
+previous_action                     750 次连续转移均 == a_(t-1)，step 1 为 zeros
+raw_action（C++ libtorch vs Python） max_abs_diff 4.8e-7
+q_target = clamp(default+0.25*a)    max_abs_diff 5.0e-9
+                                    （position limit 命中 3 帧 / 1 个关节 FL_calf；jump limit 0）
+torque 链                           tau_raw 重算 7.3e-7；
+                                    tau_cmd == clamp(tau_raw, ±max_effort) 7.3e-7；
+                                    MuJoCo actuator_force == tau_cmd 0.0；
+                                    MuJoCo qfrc_actuator == tau_cmd 0.0（无第二级 clamp）
+```
+
+```text
+torque（|tau_raw|，N·m）  RL 各阶段 max ≤ 16.6，>20 = 0.00%，被 max_effort 截断 = 0.00%
+                          仅 startup（GetUp/Stand，固定 80/3 控制器）达 34.31、>20 占 2.43% 周期
+                          逐关节：thigh max 23.69（贴 23.7 但未超）、calf max 34.31（均发生在 startup）
+关节范围                training MJCF == RobotModel == quadruped_control MuJoCo（逐项相同）
+```
+
+结论：**PASS**（policy I/O 与 torque 链全部对齐；torque 上限差异不影响本轮 policy 轨迹，
+因为 RL 阶段从未超过 20 N·m）。
+
 ------
 
 ## 18. Known Risks
@@ -1960,7 +1998,7 @@ metadata 导出会报已知的 `joint_pos` 查找告警（见 §18.1）。
 5. Run legacy rl_sar sim2sim.                                         （完成，§17.5 / §17.6 /
                                                                        §19.7 / §19.8）
 6. Add the corresponding 45-D PPO config for quadruped_control.       （完成，§19.9 / §17.7）
-7. Run quadruped_control MuJoCo sim2sim.
+7. Run quadruped_control MuJoCo sim2sim.                             （待做 —— 下一单元）
 8. Compare observation/action traces between training-side and deployment-side runtimes.
 9. Only after sim2sim contract is verified, proceed to real robot backend / sim2real.
 ```
@@ -2095,6 +2133,35 @@ RlConfig 没有 torque_limits 字段；策略侧扭矩上限只能由 RobotModel
   本单元未扩展架构、未添加会被静默忽略的 torque_limits 字段。
 ```
 
+### 19.10 quadruped_control observation / action / target / torque contract（COMPLETE）
+
+trace 方法与逐步数值见 §17.8。当前有效结论：
+
+```text
+observation       45 维单帧，与独立参考 max 3.2e-8；history [0] 确实只取当前帧
+joint order       RobotModel FL/FR/RL/RR hip-thigh-calf；MuJoCo 模型原生顺序是
+                  FL,FR,RR,RL，backend 按名字映射，policy 侧无感知
+ang_vel frame     body frame（StateFrame.imu.angular_velocity 直接进 obs×0.25）
+gravity           wxyz 四元数 + 与训练侧等价的投影重力公式（实测 3.0e-8）
+previous_action   a_(t-1)（750 次连续转移无偏差）
+action            q_target = clamp(default + 0.25 * action, 关节位置限)，
+                  无额外 action clip（clip=100 不触发）；max_position_jump=1.0 未触发
+torque            tau_raw = kp*(q_target-q) + kd*(dq_target-dq) + ff
+                  → clamp 到 [max(ctrl_min,-max_effort), min(ctrl_max,max_effort)]
+                  → MuJoCo 无额外 clamp（actuator_force == qfrc_actuator == data.ctrl）
+                  实测 RL 阶段 |tau_raw| ≤ 16.6 N·m，从未触到 23.7/59.25/33.5/20
+关节范围          training / RobotModel / MuJoCo 三者一致（hip ±0.5、thigh [-1.2,1.6] 或
+                  [-1.6,1.2]、calf [-2.5,-0.85] 或 [0.85,2.5]）
+```
+
+当前 torque 语义与另外两个 runtime 的差异（仅记录，未决定）：
+
+```text
+training            20 N·m 全场统一（mjlab effort_limit）
+rl_sar              33.5 N·m policy 限幅，再被 MuJoCo 模型交到 ±20
+quadruped_control   policy 级无上限；实际 23.7（hip/thigh）/ 59.25（calf），backend 与 MuJoCo 一致
+```
+
 ------
 
 ## 20. Next Migration Order
@@ -2119,9 +2186,10 @@ RlConfig 没有 torque_limits 字段；策略侧扭矩上限只能由 RobotModel
      （§19.3 / §17.3）、legacy `rl_sar` 的 45-D 单帧 deployment config 已完成并验证可加载
      （§19.6 / §17.4）、sim2sim observation / action trace 已数值对齐（§19.7 / §17.5）、
      rl_sar MuJoCo locomotion rollout 已完成（§19.8 / §17.6）、`quadruped_control` 的
-     45-D 单帧 deployment config 已完成并验证可加载（§19.9 / §17.7）；下一单元为 §19.5
-     步骤 8 的 quadruped_control observation / action trace 验证；ONNX metadata 归属见
-     §18.1 / §19.4；真实机器人 backend / sim2real 需在 sim2sim contract 验证通过后开始）
+     45-D 单帧 deployment config 与 observation / action / torque trace 均已验证
+     （§19.9 / §19.10 / §17.7 / §17.8）；下一单元为 §19.5 步骤 7 的 quadruped_control
+     locomotion rollout；ONNX metadata 归属见 §18.1 / §19.4；真实机器人 backend /
+     sim2real 需在 sim2sim contract 验证通过后开始）
 8. HIM observation / estimator / algorithm integration
 ```
 
