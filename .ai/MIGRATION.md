@@ -35,7 +35,7 @@ BlackW migration
 当前 task：
 
 ```text
-quadruped_control Black PPO 45-D deployment config（§19.5 步骤 6）
+quadruped_control Black PPO observation/action trace verification（§19.9 / §19.5 步骤 8）
 ```
 
 ------
@@ -1214,6 +1214,7 @@ Black actor-only TorchScript export:  COMPLETE（§19.3 / §17.3）
 Black legacy rl_sar 45-D deployment config: COMPLETE（§19.6 / §17.4）
 Black sim2sim observation / action trace: COMPLETE（§19.7 / §17.5）
 Black rl_sar MuJoCo locomotion rollout: COMPLETE（§19.8 / §17.6）
+Black quadruped_control 45-D deployment config: COMPLETE（§19.9 / §17.7）
 Black deployment / sim2sim contract:  IN PROGRESS（§19）
 ```
 
@@ -1684,6 +1685,41 @@ locomotion：  2.4%（集中于 FL_calf / FR_calf，max 25.62 / 27.79）
 （L1）低速/静止下存在 standing fixed point（详见 §19.8）；
 （L2）关节范围 asset 差异（部署 ±10 rad vs 训练软限，实测 calf 超出 0.09~0.13 rad）。
 
+### 17.7 quadruped_control 45-D deployment config 验证记录
+
+```text
+quadruped_control HEAD  7a36118（变更前 clean）
+新增                    configs/policies/black/mjlab_ppo.yaml
+                        assets/policies/black/mjlab_ppo/black_ppo_actor.pt
+                        （md5 e7318ea9019cf27f2d204565659cf0cd，与 alldog_mjlab 导出产物逐字节一致）
+修改                    assets/policies/black/SOURCE.md（补 mjlab_ppo 来源与 md5）
+未修改                  policy_switch.yaml / 任何 runtime 代码 / flat.yaml / obstacle.yaml
+build                   ./scripts/build.sh --target motion → PASS，ctest 8/8 passed
+```
+
+严格走正式运行时链路（`/tmp/verify_mjlab_ppo_quadruped.cpp`，链接 .build/rl 的
+quadruped::config / motion / torch_policy）：
+
+```text
+load_robot_model         12 关节，顺序 FL/FR/RL/RR ⟨hip/thigh/calf⟩，与 policy 顺序一致
+load_rl_config           observation 45 / history_frames [0] / input 45 / action 12
+                         policy_dof_indices 恒等 / default pose / kp 40 / kd 1.2 / action_scale 0.25
+负例                     history_frames=[0,1] + input=45 → validate_rl_config 拒绝
+RlController::create     PASS
+build_observation        45 维；与独立 Python 参考实现 max_abs_diff 2.4e-8
+insert + inference_input dimension 45（不是 270），且与当前观测逐元素相同；45 维之后无残留
+TorchPolicy::create      PASS（含 3 次 warmup forward）
+forward                  output 12 维 finite；与 Python torch 2.14 torch.jit.load max_abs_diff 1.8e-7
+                         零输入输出与训练侧记录逐位一致（0.134997 / -0.423780 / ...）
+convert_actions          q_target = default + 0.25 * action（max_abs_diff 5e-9）、kp/kd 40/1.2
+                         未触发 position limit / max_position_jump；|raw action|max = 1.87 ≪ action_clip 100
+```
+
+app 级启动 smoke（`quadruped_mujoco_sim --policy-switch-config` 指向 /tmp 下的
+symlink switch 配置，仓库内 policy_switch.yaml 未改）：进程正常运行，无配置/加载/维度错误，
+即已覆盖 config parse → TorchPolicy::create（warmup forward）→ attach_policy →
+RlController::create。策略实际 step 需要交互式终端输入，留给下一单元。
+
 ------
 
 ## 18. Known Risks
@@ -1923,7 +1959,7 @@ metadata 导出会报已知的 `joint_pos` 查找告警（见 §18.1）。
 4. Add a 45-D PPO deployment config for legacy rl_sar.                （完成，§19.6）
 5. Run legacy rl_sar sim2sim.                                         （完成，§17.5 / §17.6 /
                                                                        §19.7 / §19.8）
-6. Add the corresponding 45-D PPO config for quadruped_control.
+6. Add the corresponding 45-D PPO config for quadruped_control.       （完成，§19.9 / §17.7）
 7. Run quadruped_control MuJoCo sim2sim.
 8. Compare observation/action traces between training-side and deployment-side runtimes.
 9. Only after sim2sim contract is verified, proceed to real robot backend / sim2real.
@@ -2030,6 +2066,35 @@ odom twist     backend 的 /odom twist 用 mj_objectVelocity(flg_local=1)，实�
               frame（body_iquat）而非 base frame；本轮线速度改用 pose 差分，未依赖该字段
 ```
 
+### 19.9 quadruped_control Black PPO 45-D config（COMPLETE）
+
+```text
+config            configs/policies/black/mjlab_ppo.yaml（新增，不覆盖 HIM-era flat.yaml）
+模型              assets/policies/black/mjlab_ppo/black_ppo_actor.pt
+                  md5 e7318ea9019cf27f2d204565659cf0cd（来自 §19.3 导出产物，未重新导出）
+observation       45 维单帧：history_frames [0] ⇒ inference_input_dimension 45（不是 270）
+observation_order commands / angular_velocity / projected_gravity /
+                  joint_position_error / joint_velocity / previous_action（loader 硬校验）
+关节              RobotModel 顺序 FL/FR/RL/RR hip-thigh-calf，policy_dof_indices 恒等
+scales            command [2,2,0.25] / ang_vel 0.25 / q_rel 1.0 / dq 0.05 / gravity & last_action 1.0
+default pose      [0.0, 0.8014, -1.527, -0.0, -0.8014, 1.527, ...]（不是 controller stand pose）
+action            q_target = default + 0.25 * action；action_clip 100 为 schema 必填项，
+                  实测 |a|max ≈ 1.9~3.2，属不会触发的 legacy safety guard
+PD                policy kp 40 / kd 1.2；controller/FSM stand 仍为 80 / 3（职责分离，未混用）
+启动              默认 policy_switch.yaml 未加入 mjlab_ppo，仍为 flat/obstacle；
+                  需要显式加载时用 --policy-switch-config 指向包含 mjlab_ppo 的 switch 配置
+```
+
+torque limit（本单元按指示只报告，未改架构）：
+
+```text
+RlConfig 没有 torque_limits 字段；策略侧扭矩上限只能由 RobotModel.joints[].limits.max_effort 表达，
+当前为 hip/thigh 23.7 N·m、calf 59.25 N·m（近期提交 6bb7f1d 同步自 blackW 电机规格），
+再由 backends/mujoco 的 joint_control 与 MuJoCo actuator ctrlrange 取交集。
+⇒ 部署侧 policy torque limit 33.5 N·m 在当前 schema 下**无法按 policy 表达**，
+  本单元未扩展架构、未添加会被静默忽略的 torque_limits 字段。
+```
+
 ------
 
 ## 20. Next Migration Order
@@ -2053,10 +2118,10 @@ odom twist     backend 的 /odom twist 用 mj_objectVelocity(flg_local=1)，实�
    （进行中：deployment contract 已冻结（§19.1）、actor-only TorchScript 导出与数值验证已完成
      （§19.3 / §17.3）、legacy `rl_sar` 的 45-D 单帧 deployment config 已完成并验证可加载
      （§19.6 / §17.4）、sim2sim observation / action trace 已数值对齐（§19.7 / §17.5）、
-     rl_sar MuJoCo locomotion rollout 已完成（§19.8 / §17.6）；下一单元为 §19.5 步骤 6 的
-     `quadruped_control` Black PPO 45-D deployment config（其后才是该 runtime 的 trace 与
-     sim2sim）；ONNX metadata 归属见 §18.1 / §19.4；真实机器人 backend / sim2real 需在
-     sim2sim contract 验证通过后开始）
+     rl_sar MuJoCo locomotion rollout 已完成（§19.8 / §17.6）、`quadruped_control` 的
+     45-D 单帧 deployment config 已完成并验证可加载（§19.9 / §17.7）；下一单元为 §19.5
+     步骤 8 的 quadruped_control observation / action trace 验证；ONNX metadata 归属见
+     §18.1 / §19.4；真实机器人 backend / sim2real 需在 sim2sim contract 验证通过后开始）
 8. HIM observation / estimator / algorithm integration
 ```
 
