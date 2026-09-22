@@ -20,8 +20,8 @@ Black flat PPO baseline、Black rough PPO baseline（约 500 iteration，见 §1
 MJWarp runtime workaround（`nconmax = 128`，见 §10）均已完成；当前处于部署契约 / sim2sim 阶段
 （§19），其中 deployment contract 已冻结（§19.1）、actor-only TorchScript 导出与数值验证已
 完成（§19.3 / §17.3）、legacy `rl_sar` 的 45-D 单帧部署 config 已完成（§19.6 / §17.4）、
-sim2sim observation / action trace 已数值对齐（§19.7 / §17.5）。
-MJWarp GPU convex CCD 的 upstream 根因尚未修复。
+sim2sim observation / action trace 已数值对齐（§19.7 / §17.5）、rl_sar MuJoCo locomotion
+rollout 已完成（§19.8 / §17.6）。MJWarp GPU convex CCD 的 upstream 根因尚未修复。
 
 当前尚未进入：
 
@@ -35,7 +35,7 @@ BlackW migration
 当前 task：
 
 ```text
-Black PPO MuJoCo locomotion rollout verification（§19.5 步骤 5 的剩余部分）
+quadruped_control Black PPO 45-D deployment config（§19.5 步骤 6）
 ```
 
 ------
@@ -1213,6 +1213,7 @@ Black rough MJWarp contact capacity workaround: COMPLETE（§10 / §17.2）
 Black actor-only TorchScript export:  COMPLETE（§19.3 / §17.3）
 Black legacy rl_sar 45-D deployment config: COMPLETE（§19.6 / §17.4）
 Black sim2sim observation / action trace: COMPLETE（§19.7 / §17.5）
+Black rl_sar MuJoCo locomotion rollout: COMPLETE（§19.8 / §17.6）
 Black deployment / sim2sim contract:  IN PROGRESS（§19）
 ```
 
@@ -1222,16 +1223,16 @@ train / play 的 command contract 完全相同。
 当前单元是部署契约 / sim2sim 兼容（§19）：deployment contract 已冻结（§19.1）、
 actor-only TorchScript 导出与数值对齐已完成（§19.3 / §17.3）、legacy `rl_sar` 的
 45-D 单帧部署 config 已建立并验证可加载（§19.6 / §17.4）、sim2sim 数据链已数值对齐
-（§19.7 / §17.5）。下一步是在同一 sim2sim 中验证 locomotion rollout 行为，之后再接
-`quadruped_control`。
+（§19.7 / §17.5）、rl_sar MuJoCo locomotion rollout 已验证（§19.8 / §17.6）。下一步是接入
+`quadruped_control`（先 config，再 trace，最后才考虑实机）。
 rough 的 sanity / baseline 训练属于 pipeline / baseline verification，**不是** long-run
 convergence 结论。
 
 下一阶段：
 
 ```text
-§19.5 的部署迁移顺序（剩余步骤 5 → 8：rl_sar sim2sim → quadruped_control config / sim2sim →
-轨迹对比 → 最后才考虑 real robot backend / sim2real）
+§19.5 的部署迁移顺序（剩余步骤 6 → 8：quadruped_control config → sim2sim → 轨迹对比 →
+最后才考虑 real robot backend / sim2real）
 ```
 
 （sim2sim contract 验证通过前不要开始 real robot backend / sim2real；本阶段不要开始 HIM
@@ -1640,6 +1641,49 @@ previous_action timing   2828 次连续转移均为 prev_action_t == raw_action_
 结论：**PASS**（observation / action / q_target 全部在浮点容差内一致，
 joint mapping / gravity / ang_vel frame / previous_action timing 均无 contract 冲突）。
 
+### 17.6 Black PPO rl_sar MuJoCo locomotion rollout 验证记录
+
+```text
+backend      real_robot/black mujoco_runner（scene=flat, real_time, publish_odom=true）
+policy       black/mjlab_ppo（TorchScript，50 Hz）；low-level / sim dt = 0.005 s（200 Hz）
+command      navigation mode + /cmd_vel（键盘 command 会被 joy_timeout 清零）
+方法         4 个 session / 22 个 command 段；每段 3 s 过渡 + 9 s 测量窗口
+             线速度用 odom pose 中心差分（world→body），角速度用 IMU gyro（body frame）
+             扭矩用 rl_sar 计算值（临时 env-gated trace，验证后已回退并重新 build）
+```
+
+```text
+command              cmd             measured          判定
+zero（×4 session）    0,0,0          0.000             PASS 稳定站立（roll≤3.6° pitch≤3.5° z 0.478）
+vx +0.2              0.2            0.000            standing fixed point
+vx +0.3              0.3            0.175 / 0.182    欠跟踪
+vx +0.6              0.6            0.548            PASS
+vx +1.0              1.0            0.800            PASS（38% 帧 tau>20）
+vx -0.2 / -0.3       -0.2 / -0.3    0.000 / -0.033   standing fixed point
+vx -0.6              -0.6           -0.548           PASS
+vy +0.3 / -0.3       0.3 / -0.3     0.144 / -0.176   部分（48% / 59%）
+vy +0.6 / -0.6       0.6 / -0.6     0.505 / -0.554   PASS（84% / 92%）
+wz ±0.5 / ±1.0（纯）  0.5/1.0        0.003~0.006       FAIL（站立时不旋转）
+wz 0.5 + vx 0.2/0.3  0.5            0.133 / 0.197    yaw 被解锁，仍欠跟踪
+wz 0.5 + vy 0.2      0.5            0.202            yaw 被解锁
+(0.5,0.2,0.5)        三者           0.400/0.179/0.334 PASS（66~80%）
+(0.5,-0.2,-0.5)      三者           0.508/-0.150/-0.289 PASS
+```
+
+全程无 NaN / Inf、无摔倒、roll ≤ 6.4°、pitch ≤ 5.6°、base z ∈ [0.441, 0.485]。
+
+```text
+torque saturation（rl_sar 计算值，policy 限幅 33.5）
+全部帧 9858： |tau|>20 任一关节 2.2% / 关节样本 0.2% / 从未达 33.5（max 27.79 N·m）
+zero command： 0%
+locomotion：  2.4%（集中于 FL_calf / FR_calf，max 25.62 / 27.79）
+最高：vx=+1.0 段 38.2% 帧存在 >20
+```
+
+结论：**PASS（基本 locomotion 能力成立）**，但记录两项 limitation：
+（L1）低速/静止下存在 standing fixed point（详见 §19.8）；
+（L2）关节范围 asset 差异（部署 ±10 rad vs 训练软限，实测 calf 超出 0.09~0.13 rad）。
+
 ------
 
 ## 18. Known Risks
@@ -1877,9 +1921,8 @@ metadata 导出会报已知的 `joint_pos` 查找告警（见 §18.1）。
 2. Export actor-only TorchScript from an existing MjLab checkpoint.   （完成，§19.3）
 3. Verify exported policy numerically against MjLab actor.            （完成，§17.3）
 4. Add a 45-D PPO deployment config for legacy rl_sar.                （完成，§19.6）
-5. Run legacy rl_sar sim2sim.                                         （trace 部分完成，§17.5 /
-                                                                       §19.7；运动表现
-                                                                       rollout 待做 —— 下一单元）
+5. Run legacy rl_sar sim2sim.                                         （完成，§17.5 / §17.6 /
+                                                                       §19.7 / §19.8）
 6. Add the corresponding 45-D PPO config for quadruped_control.
 7. Run quadruped_control MuJoCo sim2sim.
 8. Compare observation/action traces between training-side and deployment-side runtimes.
@@ -1952,6 +1995,41 @@ clip_obs         100，在本轮 trace 中从未触发
 MuJoCo backend 实际位置：`/home/windnotebook/PROJECT/Dog/real_robot/black/src/mujoco_runner`
 （`rl_sar/README.md` 里的 `~/PROJECT/RoboCon/Dog/black_mujoco` 已过期）。
 
+### 19.8 rl_sar MuJoCo locomotion rollout 行为（COMPLETE）
+
+已验证的 command 表与扭矩统计见 §17.6。当前有效结论：
+
+```text
+站立          zero command 稳定（4 个 session、每个 19 s，无漂移、无振荡、无饱和）
+前进 / 后退   |v| >= 0.6 可跟踪（0.548 / -0.548）；|v| <= 0.3 基本不产生运动
+横向          ±0.3 部分（48~59%）、±0.6 可跟踪（84~92%），横向与 yaw 存在耦合
+组合          (0.5, ±0.2, ±0.5) 均可跟踪（线速度 66~101%，yaw 66~80%）
+yaw           纯 yaw（零线速度）不产生旋转；叠加任一非零线速度后 yaw 恢复（0.13~0.20 rad/s）
+稳定性        无摔倒 / 无 NaN / 无控制发散；roll ≤ 6.4°、pitch ≤ 5.6°、z ∈ [0.441, 0.485]
+```
+
+（L1）standing fixed point：低速或零线速度下策略会落入一个静止平衡点（action std < 0.03、
+q std < 0.002 rad、|tau| < 6），此时即使 cmd 非零也不产生运动。已确认这不是 runtime /
+contract 失败（数据链 §19.7 已 PASS、FSM 仍在 Locomotion、无 torque saturation），
+而是策略在部署 sim 中的行为：推测其步态需要非零线速度激发（训练采样器含 10% standing）。
+因此本轮把「纯 yaw 不旋转」归类为 policy behavior limitation，**不是** contract failure。
+
+当前已知 framework difference（本轮实测，未修正）：
+
+```text
+关节范围      训练 MJCF：hip ±0.5 / thigh [-1.2,1.6] / calf [-2.5,-0.85] 或 [0.85,2.5]（hard limit）
+              部署 MJCF：全部 ±10 rad ⇒ 更宽松；实测 calf 实际角度超出训练范围 0.09~0.13 rad
+torque        训练 effort_limit 20 / rl_sar policy 限幅 33.5 / 部署 MuJoCo actuatorfrcrange ±20
+              实测 rl_sar 计算值最大 27.79（从未达 33.5），>20 占 2.2% 帧 ⇒ 非持续性瓶颈
+质量 / 惯量    总质量 13.0025 kg（部署）vs 13.2472 kg（训练），trunk 惯量差 3~6%
+足底摩擦       两侧一致（sliding 1.0）；训练侧仅在 DR 中随机化
+PD / dt        一致（Kp 40 / Kd 1.2、policy 50 Hz、low-level & sim 200 Hz）
+执行链         部署侧多出 3 ms motor delay 与 encoder delay buffer（backend 行为）
+command 通道   rl_sar 键盘 command 会被 joy_timeout 清零，sim2sim 需 navigation mode + /cmd_vel
+odom twist     backend 的 /odom twist 用 mj_objectVelocity(flg_local=1)，实测是 body **inertial**
+              frame（body_iquat）而非 base frame；本轮线速度改用 pose 差分，未依赖该字段
+```
+
 ------
 
 ## 20. Next Migration Order
@@ -1974,9 +2052,11 @@ MuJoCo backend 实际位置：`/home/windnotebook/PROJECT/Dog/real_robot/black/s
 7. Black deployment contract / sim2sim → Black sim2real
    （进行中：deployment contract 已冻结（§19.1）、actor-only TorchScript 导出与数值验证已完成
      （§19.3 / §17.3）、legacy `rl_sar` 的 45-D 单帧 deployment config 已完成并验证可加载
-     （§19.6 / §17.4）、sim2sim observation / action trace 已数值对齐（§19.7 / §17.5）；
-     下一单元为 §19.5 步骤 5 剩余部分的 MuJoCo locomotion rollout 验证；ONNX metadata
-     归属见 §18.1 / §19.4；真实机器人 backend / sim2real 需在 sim2sim contract 验证通过后开始）
+     （§19.6 / §17.4）、sim2sim observation / action trace 已数值对齐（§19.7 / §17.5）、
+     rl_sar MuJoCo locomotion rollout 已完成（§19.8 / §17.6）；下一单元为 §19.5 步骤 6 的
+     `quadruped_control` Black PPO 45-D deployment config（其后才是该 runtime 的 trace 与
+     sim2sim）；ONNX metadata 归属见 §18.1 / §19.4；真实机器人 backend / sim2real 需在
+     sim2sim contract 验证通过后开始）
 8. HIM observation / estimator / algorithm integration
 ```
 
