@@ -21,7 +21,9 @@ MJWarp runtime workaround（`nconmax = 128`，见 §10）均已完成；当前�
 （§19），其中 deployment contract 已冻结（§19.1）、actor-only TorchScript 导出与数值验证已
 完成（§19.3 / §17.3）、legacy `rl_sar` 的 45-D 单帧部署 config 已完成（§19.6 / §17.4）、
 sim2sim observation / action trace 已数值对齐（§19.7 / §17.5）、rl_sar MuJoCo locomotion
-rollout 已完成（§19.8 / §17.6）。MJWarp GPU convex CCD 的 upstream 根因尚未修复。
+rollout 已完成（§19.8 / §17.6）、`quadruped_control` 的 45-D config、
+observation / action / torque trace 与 locomotion rollout 均已完成
+（§19.9 / §19.10 / §19.11）。MJWarp GPU convex CCD 的 upstream 根因尚未修复。
 
 当前尚未进入：
 
@@ -35,7 +37,8 @@ BlackW migration
 当前 task：
 
 ```text
-quadruped_control Black PPO MuJoCo locomotion rollout verification（§19.5 步骤 7）
+Black PPO 训练侧（MjLab）与部署侧（rl_sar / quadruped_control）observation / action
+轨迹对比（§19.5 步骤 8）
 ```
 
 ------
@@ -1216,6 +1219,7 @@ Black sim2sim observation / action trace: COMPLETE（§19.7 / §17.5）
 Black rl_sar MuJoCo locomotion rollout: COMPLETE（§19.8 / §17.6）
 Black quadruped_control 45-D deployment config: COMPLETE（§19.9 / §17.7）
 Black quadruped_control observation/action/torque trace: COMPLETE（§19.10 / §17.8）
+Black quadruped_control MuJoCo locomotion rollout: COMPLETE（§19.11 / §17.9）
 Black deployment / sim2sim contract:  IN PROGRESS（§19）
 ```
 
@@ -1227,8 +1231,9 @@ actor-only TorchScript 导出与数值对齐已完成（§19.3 / §17.3）、leg
 45-D 单帧部署 config 已建立并验证可加载（§19.6 / §17.4）、sim2sim 数据链已数值对齐
 （§19.7 / §17.5）、rl_sar MuJoCo locomotion rollout 已验证（§19.8 / §17.6）、
 `quadruped_control` 的 45-D config 与 observation / action / target / torque trace 均已验证
-（§19.9 / §19.10 / §17.7 / §17.8）。下一步是本 runtime 的 locomotion rollout，
-之后才是跨 runtime 轨迹对比。
+（§19.9 / §19.10 / §17.7 / §17.8），`quadruped_control` 的 locomotion rollout 也已完成
+（§19.11 / §17.9）。下一步是训练侧与部署侧的跨 runtime observation / action 轨迹对比
+（§19.5 步骤 8）。
 rough 的 sanity / baseline 训练属于 pipeline / baseline verification，**不是** long-run
 convergence 结论。
 
@@ -1760,6 +1765,47 @@ torque（|tau_raw|，N·m）  RL 各阶段 max ≤ 16.6，>20 = 0.00%，被 max_
 
 ------
 
+### 17.9 quadruped_control Black PPO MuJoCo locomotion rollout 验证记录
+
+```text
+quadruped_control HEAD     a0970dd（本单元 production 零改动；插桩临时 env-gated，已完全回退）
+方式                       quadruped_mujoco_sim 正式 app（MotionRuntime + MuJoCo backend +
+                           TorchPolicy + TerminalInput 键盘命令通道），pseudo-TTY 自动化
+场景                       flat：assets/robots/black/mujoco/scene.xml
+                           ⚠ app 默认场景是 scene_terrain.xml（rough 地形），必须显式 --scene
+会话                       6 个短会话（每会话 2-4 个命令段，RL ≤ ~30 s）
+trace                      167422 个物理步（2 ms）/ 109458 个 RL cycle / 10949 次策略推理
+                           全程 rl_locomotion Running，无 fall / 无 NaN / 无 error_message
+```
+
+```text
+检验项                            结果
+previous_action                  10943/10943 连续转移 == a_(t-1)，step 1 为 zeros
+推理耗时（仅真实推理帧）          mean 1.91 ms，p50 0.43 ms，p99 4.83 ms，max 12.85 ms
+                                  > 20 ms 占 0.000%（10949 次）
+base 高度                         mean 0.425 ~ 0.470 m，全局 min 0.422 m
+roll / pitch                      |roll| ≤ 5.3 deg，|pitch| ≤ 5.7 deg
+力矩 |tau_raw|                     全局 max 20.93 N·m（B3_fwd_1p0 的 calf）
+                                  > 20 N·m 占样本 0.059%；> 23.7 / 33.5 / 59.25 均 0.000%
+                                  被 max_effort 截断 0.00%（全部帧未触到力矩上限）
+关节位置限                        基本未触发：|q_target - (default+0.25a)| > 0.5 rad 的样本 0 个；
+                                  > 0.05 rad 仅 B3 段 83 个样本（max 0.131 rad）；jump 限位 0 次
+关节范围违反（相对训练限）        仅 B3 段 max 0.024 rad / 164 个样本（MuJoCo 软约束穿透），其余 0
+```
+
+运行时约束发现（环境时序问题，不是策略 / 契约问题）：
+
+```text
+motion_runtime.cpp:821    单次推理 > 20 ms 即 fail → 行为从 rl_locomotion 掉回 Passive
+默认多线程                偶发 22 ms 卡顿，命中一次即整段作废（6 个会话中曾 4 次失败）
+OMP_NUM_THREADS=1         长尾消失（见上表），本单元全部有效数据均在此设置下采集
+```
+
+结论：**PASS**（工程级：站立稳定、方向正确、无跌倒 / NaN / 持续饱和、契约无冲突），
+两条已知限制见 §19.11。
+
+------
+
 ## 18. Known Risks
 
 当前需要持续注意：
@@ -1998,8 +2044,9 @@ metadata 导出会报已知的 `joint_pos` 查找告警（见 §18.1）。
 5. Run legacy rl_sar sim2sim.                                         （完成，§17.5 / §17.6 /
                                                                        §19.7 / §19.8）
 6. Add the corresponding 45-D PPO config for quadruped_control.       （完成，§19.9 / §17.7）
-7. Run quadruped_control MuJoCo sim2sim.                             （待做 —— 下一单元）
+7. Run quadruped_control MuJoCo sim2sim.                             （完成，§19.11 / §17.9）
 8. Compare observation/action traces between training-side and deployment-side runtimes.
+                                                                      （下一单元）
 9. Only after sim2sim contract is verified, proceed to real robot backend / sim2real.
 ```
 
@@ -2164,6 +2211,53 @@ quadruped_control   policy 级无上限；实际 23.7（hip/thigh）/ 59.25（ca
 
 ------
 
+### 19.11 quadruped_control MuJoCo locomotion rollout 行为（COMPLETE）
+
+trace 方法与数值见 §17.9。flat 场景、body 系命令、稳态窗口（每段末 8 s）实测：
+
+```text
+命令                    实测 (vx, vy, wz)             误差
+(0.0, 0.0, 0.0)         (0.000, 0.000, 0.002)         ~0              稳定站立
+(+0.2, 0, 0)            (+0.054, +0.006, -0.005)      +0.146
+(+0.3, 0, 0)            (+0.187, +0.012, +0.019)      +0.113
+(+0.6, 0, 0)            (+0.530, +0.028, +0.063)      +0.070
+(+1.0, 0, 0)            (+0.775, +0.027, +0.108)      +0.225
+(-0.2, 0, 0)            (+0.000, -0.000, -0.000)      -0.200          静止（固定点）
+(-0.3, 0, 0)            (+0.000, -0.000, +0.001)      -0.300          静止（固定点）
+(-0.6, 0, 0)            (-0.468, +0.029, -0.132)      -0.132
+(0, +0.3, 0)            (+0.018, +0.174, +0.145)      +0.126
+(0, -0.3, 0)            (+0.004, -0.143, +0.016)      -0.157
+(0, +0.6, 0)            (+0.010, +0.547, +0.351)      +0.053
+(0, -0.6, 0)            (+0.020, -0.509, -0.053)      -0.091
+(0, 0, ±0.5 / ±1.0)     实测 yaw rate ≤ 0.03 rad/s     ±0.48 / ±0.99   不旋转（固定点）
+(+0.5, +0.2, +0.5)      (+0.423, +0.203, +0.414)      (+0.077, -0.003, +0.086)
+(+0.5, -0.2, -0.5)      (+0.507, -0.139, -0.317)      (-0.007, -0.061, -0.183)
+```
+
+```text
+L1 低速 / 静止固定点（policy 行为，与 rl_sar 结论一致）
+   |v| ≤ 0.3 m/s 的后退命令完全不产生位移；纯 yaw 命令（±0.5 / ±1.0 rad/s）不旋转。
+   只要存在非零线速度分量，yaw 即正常（F1 / F2 实测 wz 0.414 / -0.317）。
+   该状态下 raw action std 0.011~0.029、q std ≈ 0.004 rad、|tau| ≤ 5.94 N·m，
+   是稳定静止点而非发散。判定：训练侧策略固有行为，不是 deployment contract 冲突。
+
+L2 跟踪精度（工程级可接受）
+   前进低速段欠速（+0.2 → 0.054、+0.3 → 0.187），+1.0 实测 0.775；
+   横向 ±0.3 欠速约 50%，±0.6 基本跟得上；后退 -0.6 实测 -0.468。
+   方向（符号 / 轴）从未出错，未出现 rl_sar 那次明显的侧向漂移放大。
+```
+
+```text
+torque 语义（本 runtime）   policy 级无上限；实际上限 23.7（hip/thigh）/ 59.25（calf）；
+                            本轮 RL 阶段 max 20.93 N·m，0.00% 触发截断
+关节位置限                  与训练 MJCF 完全一致，因此 deployment clamp 实质不生效
+                            （0 个样本偏离 > 0.5 rad），不构成 training / deployment 差异
+```
+
+结论：**PASS**（engineering-level）。L1 属策略行为、L2 属跟踪精度，均不构成本阶段阻塞。
+
+------
+
 ## 20. Next Migration Order
 
 长期方向是「flat 先做完，再 rough，最后 sim2real / HIM」，因此：
@@ -2186,9 +2280,11 @@ quadruped_control   policy 级无上限；实际 23.7（hip/thigh）/ 59.25（ca
      （§19.3 / §17.3）、legacy `rl_sar` 的 45-D 单帧 deployment config 已完成并验证可加载
      （§19.6 / §17.4）、sim2sim observation / action trace 已数值对齐（§19.7 / §17.5）、
      rl_sar MuJoCo locomotion rollout 已完成（§19.8 / §17.6）、`quadruped_control` 的
-     45-D 单帧 deployment config 与 observation / action / torque trace 均已验证
-     （§19.9 / §19.10 / §17.7 / §17.8）；下一单元为 §19.5 步骤 7 的 quadruped_control
-     locomotion rollout；ONNX metadata 归属见 §18.1 / §19.4；真实机器人 backend /
+     45-D 单帧 deployment config、observation / action / torque trace 与 locomotion rollout
+     均已验证
+     （§19.9 / §19.10 / §19.11 / §17.7 / §17.8 / §17.9）；下一单元为 §19.5 步骤 8 的
+     训练侧 / 部署侧跨 runtime observation / action 轨迹对比；ONNX metadata 归属见
+     §18.1 / §19.4；真实机器人 backend /
      sim2real 需在 sim2sim contract 验证通过后开始）
 8. HIM observation / estimator / algorithm integration
 ```
