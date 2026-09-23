@@ -13,32 +13,29 @@
 当前阶段：
 
 ```text
-Black deployment contract / sim2sim compatibility
+Black PPO deployment contract / sim2sim compatibility: COMPLETE
 ```
 
 Black flat PPO baseline、Black rough PPO baseline（约 500 iteration，见 §17.2）与 rough 的
-MJWarp runtime workaround（`nconmax = 128`，见 §10）均已完成；当前处于部署契约 / sim2sim 阶段
-（§19），其中 deployment contract 已冻结（§19.1）、actor-only TorchScript 导出与数值验证已
-完成（§19.3 / §17.3）、legacy `rl_sar` 的 45-D 单帧部署 config 已完成（§19.6 / §17.4）、
-sim2sim observation / action trace 已数值对齐（§19.7 / §17.5）、rl_sar MuJoCo locomotion
-rollout 已完成（§19.8 / §17.6）、`quadruped_control` 的 45-D config、
-observation / action / torque trace 与 locomotion rollout 均已完成
-（§19.9 / §19.10 / §19.11）。MJWarp GPU convex CCD 的 upstream 根因尚未修复。
+MJWarp runtime workaround（`nconmax = 128`，见 §10）均已完成。Black PPO 部署契约、
+`rl_sar` 与 `quadruped_control` 的 config / trace / rollout，以及训练侧跨 runtime
+observation、actor、pre-safety `q_policy` 比较均已通过（§17.10 / §19.12）。
+`quadruped_control` 的硬件位置裁剪属于已确认的 deployment safety layer；最终
+`q_command` 有意不同。MJWarp GPU convex CCD 的 upstream 根因尚未修复。
 
 当前尚未进入：
 
 ```text
-Black real robot backend / sim2real（§19 的 sim2sim contract 验证通过前不开始）
+Black real robot backend / sim2real（尚未开始，等待下一步决策）
 HIM observation/history
 HIM algorithm integration
 BlackW migration
 ```
 
-当前 task：
+next decision：
 
 ```text
-Black PPO 训练侧（MjLab）与部署侧（rl_sar / quadruped_control）observation / action
-轨迹对比（§19.5 步骤 8）
+Black real robot backend / sim2real contract（等待用户决定，不自动开始实现）
 ```
 
 ------
@@ -1220,32 +1217,30 @@ Black rl_sar MuJoCo locomotion rollout: COMPLETE（§19.8 / §17.6）
 Black quadruped_control 45-D deployment config: COMPLETE（§19.9 / §17.7）
 Black quadruped_control observation/action/torque trace: COMPLETE（§19.10 / §17.8）
 Black quadruped_control MuJoCo locomotion rollout: COMPLETE（§19.11 / §17.9）
-Black deployment / sim2sim contract:  IN PROGRESS（§19）
+Black cross-runtime policy/safety contract: COMPLETE（§19.12 / §17.10）
+Black PPO deployment / sim2sim compatibility: COMPLETE（§19）
 ```
 
 command 已冻结为固定范围 + native sampler，且不再有任何 curriculum（§4）。
 train / play 的 command contract 完全相同。
 
-当前单元是部署契约 / sim2sim 兼容（§19）：deployment contract 已冻结（§19.1）、
-actor-only TorchScript 导出与数值对齐已完成（§19.3 / §17.3）、legacy `rl_sar` 的
-45-D 单帧部署 config 已建立并验证可加载（§19.6 / §17.4）、sim2sim 数据链已数值对齐
-（§19.7 / §17.5）、rl_sar MuJoCo locomotion rollout 已验证（§19.8 / §17.6）、
-`quadruped_control` 的 45-D config 与 observation / action / target / torque trace 均已验证
-（§19.9 / §19.10 / §17.7 / §17.8），`quadruped_control` 的 locomotion rollout 也已完成
-（§19.11 / §17.9）。下一步是训练侧与部署侧的跨 runtime observation / action 轨迹对比
-（§19.5 步骤 8）。
+部署契约 / sim2sim 兼容（§19）已完成：`rl_sar` 的 config、observation/action trace、
+locomotion rollout 均 PASS（§19.6~§19.8）；`quadruped_control` 的 config、
+observation/action/torque trace、locomotion rollout 均 PASS（§19.9~§19.11）；
+跨 runtime 的 observation、actor、pre-safety `q_policy` 均 PASS（§19.12）。
+`quadruped_control` 的硬件位置裁剪在正常 rollout 中低频触发，属于有意的
+deployment safety layer，不能描述为 inactive guard，也不要求最终 `q_command` 三边相同。
 rough 的 sanity / baseline 训练属于 pipeline / baseline verification，**不是** long-run
 convergence 结论。
 
-下一阶段：
+next decision：
 
 ```text
-§19.5 的部署迁移顺序（剩余步骤 7 → 8：quadruped_control locomotion rollout → 跨 runtime
-轨迹对比 → 最后才考虑 real robot backend / sim2real）
+Black real robot backend / sim2real contract（等待用户决定，不自动开始实现）
 ```
 
-（sim2sim contract 验证通过前不要开始 real robot backend / sim2real；本阶段不要开始 HIM
-integration；ONNX metadata 归属见 §18.1 / §19.4。）
+进入实机前仍须单独决定 inference deadline / 线程配置与 torque 语义（§19.12）；
+本阶段不要开始 HIM integration。ONNX metadata 归属见 §18.1 / §19.4。
 
 ------
 
@@ -1611,7 +1606,8 @@ rl_sar HEAD         cd46b93（coverMoon/rl_sar-for-super-dog，变更前 clean�
                            （fsm_state / model_name 同上，无 InitRL failed）
 ```
 
-未做：MuJoCo backend rollout、observation/action trace 数值对比、运动表现评价（下一单元）。
+该次尚未做 MuJoCo backend rollout、observation/action trace 数值对比或运动表现评价；
+后续结果见 §17.5 / §17.6 / §17.10。
 
 ### 17.5 Black PPO sim2sim observation/action trace 验证记录
 
@@ -1726,7 +1722,7 @@ convert_actions          q_target = default + 0.25 * action（max_abs_diff 5e-9�
 app 级启动 smoke（`quadruped_mujoco_sim --policy-switch-config` 指向 /tmp 下的
 symlink switch 配置，仓库内 policy_switch.yaml 未改）：进程正常运行，无配置/加载/维度错误，
 即已覆盖 config parse → TorchPolicy::create（warmup forward）→ attach_policy →
-RlController::create。策略实际 step 需要交互式终端输入，留给下一单元。
+RlController::create。后续正式 app rollout 结果见 §17.9。
 
 ### 17.8 quadruped_control observation/action/target/torque trace 验证记录
 
@@ -1788,7 +1784,7 @@ roll / pitch                      |roll| ≤ 5.3 deg，|pitch| ≤ 5.7 deg
 力矩 |tau_raw|                     全局 max 20.93 N·m（B3_fwd_1p0 的 calf）
                                   > 20 N·m 占样本 0.059%；> 23.7 / 33.5 / 59.25 均 0.000%
                                   被 max_effort 截断 0.00%（全部帧未触到力矩上限）
-关节位置限                        基本未触发：|q_target - (default+0.25a)| > 0.5 rad 的样本 0 个；
+硬件关节位置裁剪                  已触发：|q_command - q_policy| > 0.5 rad 的样本 0 个；
                                   > 0.05 rad 仅 B3 段 83 个样本（max 0.131 rad）；jump 限位 0 次
 关节范围违反（相对训练限）        仅 B3 段 max 0.024 rad / 164 个样本（MuJoCo 软约束穿透），其余 0
 ```
@@ -1803,6 +1799,43 @@ OMP_NUM_THREADS=1         长尾消失（见上表），本单元全部有效数
 
 结论：**PASS**（工程级：站立稳定、方向正确、无跌倒 / NaN / 持续饱和、契约无冲突），
 两条已知限制见 §19.11。
+
+------
+
+### 17.10 Black PPO 训练 / 部署跨 runtime contract 验证记录（COMPLETE）
+
+上一单元采集、此次仅重新分类，未重跑：MjLab flat deterministic play 1000 帧，
+从真实 rollout 选 30 个带来源标记的 canonical raw-state fixture（站立、前进、组合动态、
+低速后退、纯 yaw）。独立 reference 从 command / wxyz quaternion / body angular velocity /
+policy 顺序 q、dq / previous action 构造 45-D；各 simulator 的 live trajectory **未**按时间逐帧相减。
+
+```text
+MjLab live observation vs independent reference    max_abs_diff 5.96e-8（1000 帧）
+MjLab previous_action                             995 次连续转移均为 a_(t-1)
+同一 45-D 输入：MjLab actor vs Python TS             max_abs_diff 4.77e-7
+同一 45-D 输入：MjLab actor vs rl_sar LibTorch       max_abs_diff 4.77e-7
+同一 45-D 输入：MjLab actor vs quadruped TorchPolicy max_abs_diff 4.77e-7
+同一 45-D 输入：rl_sar vs quadruped_control          max_abs_diff 0
+policy joint order                                 FL/FR/RL/RR，hip/thigh/calf
+policy period                                      三边 0.02 s / 50 Hz
+同一 raw action 的 pre-safety q_policy              default + 0.25 * action，三边一致
+```
+
+最初按“三边最终 `q_target` 必须相同”的 strict criterion 判 FAIL：MjLab 正常前进
+rollout 的 1000 个 policy frame 中，25 帧的 `FL_calf_joint` 的 `q_policy` 超出位置限，
+`quadruped_control` 最大一次将 `-0.81150 rad` 裁为 `-0.85000 rad`，差 `0.03850 rad`
+（约 `2.2°`）。用户随后确认该位置限经过真实硬件验证；正确的比较边界是安全处理前的
+`q_policy = q_default + 0.25 * raw_action`。该值三边一致；裁剪后的 `q_command`
+有意不同。MjLab 实际 target 对独立 `q_policy` 参考最大差为 0；`rl_sar` 的
+`ComputeOutput()` 与 `quadruped_control` 裁剪前计算均使用同一公式。30 个代表性
+fixture 未触发裁剪，但完整 1000 帧证明位置安全层在正常
+policy 分布中**低频生效**。`max_position_jump = 1.0 rad` 独立于位置限；相邻 target
+变化最大约 `0.208 rad`，本轮未触发 jump limiter。
+
+重新分类：observation PASS；actor PASS；policy action / pre-safety `q_policy` PASS；
+`quadruped_control` 硬件位置安全层 PASS；final commanded target INTENTIONALLY DIFFERENT；
+Black PPO sim2sim compatibility **PASS**。低速后退静止与纯 yaw 不旋转在 MjLab play
+也复现，是三边共享的 policy 行为。原始量测保留，未将 25 帧描述为 inactive guard。
 
 ------
 
@@ -1902,12 +1935,8 @@ observation_terms_flatten_history_dim / observation_terms_history_length
 Black flat PPO baseline:               COMPLETE
 Black rough PPO baseline:              COMPLETE
 Black rough MJWarp runtime workaround: COMPLETE
-```
-
-下一阶段：
-
-```text
-Black deployment contract / sim2sim compatibility
+Black PPO deployment contract / sim2sim compatibility: COMPLETE
+next decision: Black real robot backend / sim2real contract
 ```
 
 部署参考实现：
@@ -1930,7 +1959,7 @@ legacy:                 N-W-wolf/rl_sar-black-W
 
 `quadruped_control` 当前状态：simulation-side backend 可用；real robot backend 尚未实现。
 
-### 19.1 当前 Black PPO policy（= deployment）contract
+### 19.1 当前 Black PPO policy / deployment safety contract
 
 policy / deployment joint order：`FL -> FR -> RL -> RR`，每腿 `hip -> thigh -> calf`
 （冻结于 §3.1）。
@@ -1959,11 +1988,31 @@ previous action     1.0
 
 actor normalization：**disabled**（§5.3）。
 
-action：12 维 position residual。
+Policy action：12 维 position residual。训练与部署必须在 safety processing **之前**
+得到相同的 `q_policy`：
 
 ```text
-target_joint_pos = default_joint_pos + 0.25 * policy_action
+raw_action[12]
+q_policy = q_default + 0.25 * raw_action
 ```
+
+Deployment safety 是随后独立的一层，不属于 exported policy semantics，也不要求
+MjLab action manager 复刻。用户已确认下表位置限经过真实硬件验证，因此
+`quadruped_control` 在发送底层命令前有意执行：
+
+```text
+q_command = clamp(q_policy, q_hw_min, q_hw_max)
+
+             hip          thigh          calf
+FL / RL      [-0.5, 0.5]  [-1.2, 1.6]   [-2.5, -0.85]
+FR / RR      [-0.5, 0.5]  [-1.6, 1.2]   [ 0.85, 2.5]
+```
+
+该硬件位置裁剪属于 deployment runtime responsibility。`rl_sar` 当前没有等价的
+显式 policy-stage hardware position clamp；旧实机链路是否在 motor driver / hardware
+SDK / real_runner 更底层提供位置保护，留待未来实机阶段检查，本单元未调查或修改。
+跨 runtime 要求 `q_policy` 一致，并验证 safety transform 明确且正确；
+**不要求最终 `q_command` 三边相同**（§19.12）。
 
 Black default pose：
 
@@ -2023,7 +2072,8 @@ output  float32 [1, 12]   policy action
 atol 1e-6 / rtol 1e-5 内一致（实测三组 probe 的 max abs diff 均为 0.0，见 §17.3）。
 导出侧不做任何额外 normalization / scaling（actor normalization 为 disabled，§5.3）。
 
-尚未验证：sim2sim 侧的 observation 预处理与 action 后处理是否与训练侧一致（属 §19.5 步骤 4 之后）。
+sim2sim 侧 observation、actor 与 pre-safety `q_policy` 已验证（§17.10 / §19.12）；
+部署位置安全层单独判定，不并入训练 action transform。
 
 ### 19.4 ONNX metadata（非当前部署阻塞项）
 
@@ -2045,9 +2095,9 @@ metadata 导出会报已知的 `joint_pos` 查找告警（见 §18.1）。
                                                                        §19.7 / §19.8）
 6. Add the corresponding 45-D PPO config for quadruped_control.       （完成，§19.9 / §17.7）
 7. Run quadruped_control MuJoCo sim2sim.                             （完成，§19.11 / §17.9）
-8. Compare observation/action traces between training-side and deployment-side runtimes.
-                                                                      （下一单元）
-9. Only after sim2sim contract is verified, proceed to real robot backend / sim2real.
+8. Compare training/deployment observation, actor, pre-safety q_policy, and safety.
+                                                                      （完成，§17.10 / §19.12）
+9. Decide the real robot backend / sim2real contract.                 （next decision，未开始）
 ```
 
 本阶段**不要**开始 HIM integration。
@@ -2191,9 +2241,10 @@ joint order       RobotModel FL/FR/RL/RR hip-thigh-calf；MuJoCo 模型原生顺
 ang_vel frame     body frame（StateFrame.imu.angular_velocity 直接进 obs×0.25）
 gravity           wxyz 四元数 + 与训练侧等价的投影重力公式（实测 3.0e-8）
 previous_action   a_(t-1)（750 次连续转移无偏差）
-action            q_target = clamp(default + 0.25 * action, 关节位置限)，
+action            q_policy = default + 0.25 * action；
+                  q_command = clamp(q_policy, 经真实硬件验证的关节位置限)
                   无额外 action clip（clip=100 不触发）；max_position_jump=1.0 未触发
-torque            tau_raw = kp*(q_target-q) + kd*(dq_target-dq) + ff
+torque            tau_raw = kp*(q_command-q) + kd*(dq_target-dq) + ff
                   → clamp 到 [max(ctrl_min,-max_effort), min(ctrl_max,max_effort)]
                   → MuJoCo 无额外 clamp（actuator_force == qfrc_actuator == data.ctrl）
                   实测 RL 阶段 |tau_raw| ≤ 16.6 N·m，从未触到 23.7/59.25/33.5/20
@@ -2250,11 +2301,57 @@ L2 跟踪精度（工程级可接受）
 ```text
 torque 语义（本 runtime）   policy 级无上限；实际上限 23.7（hip/thigh）/ 59.25（calf）；
                             本轮 RL 阶段 max 20.93 N·m，0.00% 触发截断
-关节位置限                  与训练 MJCF 完全一致，因此 deployment clamp 实质不生效
-                            （0 个样本偏离 > 0.5 rad），不构成 training / deployment 差异
+硬件关节位置裁剪            与训练 MJCF 数值一致，但这是独立的 deployment safety layer；
+                            正常 rollout 中已低频触发（> 0.5 rad 的样本为 0，并不代表未触发），
+                            完整跨 runtime 统计见 §17.10 / §19.12
 ```
 
 结论：**PASS**（engineering-level）。L1 属策略行为、L2 属跟踪精度，均不构成本阶段阻塞。
+
+------
+
+### 19.12 跨 runtime policy / deployment safety contract（COMPLETE）
+
+验收分层（数值见 §17.10）：
+
+```text
+Layer 1  policy I/O
+         raw state → observation[45] → deterministic actor[12]
+         → q_policy = q_default + 0.25 * raw_action
+         三边同一输入下必须一致；不修改训练 action、default pose 或 joint order。
+
+Layer 2  deployment safety
+         quadruped_control: q_command = clamp(q_policy, hardware-validated joint limits)
+         rl_sar:            q_command = q_policy（当前无等价的显式 policy-stage 位置裁剪）
+         MjLab:             不定义部署侧最终 q_command；action manager 无需复刻硬件裁剪。
+```
+
+Cross-runtime acceptance：observation 一致、actor 输出一致、pre-safety `q_policy`
+一致、部署安全变换明确且计算正确，并且不静默改变 policy observation / action 定义。
+`quadruped_control` 的硬件位置限见 §19.1。正常 policy 分布的 1000 帧中，25 帧
+（全部 `FL_calf_joint`）触发位置裁剪，最大 `0.03850 rad`；这是**active but
+low-frequency deployment safety layer**。`max_position_jump = 1.0 rad` 在同批
+rollout 中未触发。最终低层 `q_command` 三边有意不同，不能声称全部低层命令相同。
+
+```text
+Observation contract:                    PASS
+Actor inference:                        PASS
+Policy action / pre-safety q_policy:     PASS
+quadruped_control hardware position safety: PASS
+Final commanded target across runtimes: INTENTIONALLY DIFFERENT
+Overall Black PPO sim2sim compatibility: PASS
+```
+
+部署里程碑：`rl_sar` config / trace / locomotion rollout PASS；
+`quadruped_control` config / observation-action-torque trace / locomotion rollout PASS；
+cross-runtime observation / actor / pre-safety `q_policy` PASS。实机阶段仍须单独检查
+旧 `rl_sar` 实机链路更底层是否提供位置安全，并决定 torque 语义差异
+（training `20 N·m`；`rl_sar` policy `33.5 N·m` 后遇旧 MuJoCo `±20 N·m`；
+`quadruped_control` hip/thigh `23.7 N·m`、calf `59.25 N·m`）。
+`quadruped_control` 单次推理超过 20 ms 会触发 watchdog；目前
+`OMP_NUM_THREADS=1` 避免了已观察到的长尾失败，但不是最终实时方案。
+
+next decision：Black real robot backend / sim2real contract；等待用户决定，不自动实现。
 
 ------
 
@@ -2275,17 +2372,13 @@ torque 语义（本 runtime）   policy 级无上限；实际上限 23.7（hip/t
      out_of_terrain_bounds safety truncation，见 §6.4；
      sanity / baseline 训练（约 500 iteration）完成，见 §17.2；
      下一前置：无 —— 长训练 / 定量评估仍未做）
-7. Black deployment contract / sim2sim → Black sim2real
-   （进行中：deployment contract 已冻结（§19.1）、actor-only TorchScript 导出与数值验证已完成
-     （§19.3 / §17.3）、legacy `rl_sar` 的 45-D 单帧 deployment config 已完成并验证可加载
-     （§19.6 / §17.4）、sim2sim observation / action trace 已数值对齐（§19.7 / §17.5）、
-     rl_sar MuJoCo locomotion rollout 已完成（§19.8 / §17.6）、`quadruped_control` 的
-     45-D 单帧 deployment config、observation / action / torque trace 与 locomotion rollout
-     均已验证
-     （§19.9 / §19.10 / §19.11 / §17.7 / §17.8 / §17.9）；下一单元为 §19.5 步骤 8 的
-     训练侧 / 部署侧跨 runtime observation / action 轨迹对比；ONNX metadata 归属见
-     §18.1 / §19.4；真实机器人 backend /
-     sim2real 需在 sim2sim contract 验证通过后开始）
+7. Black PPO deployment contract / sim2sim compatibility
+   （COMPLETE：`rl_sar` 与 `quadruped_control` 的 config / trace / rollout、
+     跨 runtime observation / actor / pre-safety `q_policy` 均 PASS；
+     经真实硬件验证的位置限属于 deployment safety layer，最终 `q_command` 有意不同，
+     见 §17.10 / §19.12。ONNX metadata 归属见 §18.1 / §19.4。）
+   next decision：Black real robot backend / sim2real contract（等待用户决定，未开始实现；
+     进入实机前须单独决定位置安全链、torque 语义、推理 watchdog / 线程实时性）。
 8. HIM observation / estimator / algorithm integration
 ```
 
