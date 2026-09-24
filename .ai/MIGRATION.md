@@ -26,7 +26,7 @@ observation、actor、pre-safety `q_policy` 比较均已通过（§17.10 / §19.
 当前尚未进入：
 
 ```text
-Black real robot backend / sim2real（尚未开始，等待下一步决策）
+Black real robot backend（尚未实现；sim2real preflight 见 §19.13）
 HIM observation/history
 HIM algorithm integration
 BlackW migration
@@ -35,7 +35,7 @@ BlackW migration
 next decision：
 
 ```text
-Black real robot backend / sim2real contract（等待用户决定，不自动开始实现）
+Black real backend v1 的硬件映射、执行器与失效保护决策（§19.13；等待用户决定）
 ```
 
 ------
@@ -2009,8 +2009,8 @@ FR / RR      [-0.5, 0.5]  [-1.6, 1.2]   [ 0.85, 2.5]
 ```
 
 该硬件位置裁剪属于 deployment runtime responsibility。`rl_sar` 当前没有等价的
-显式 policy-stage hardware position clamp；旧实机链路是否在 motor driver / hardware
-SDK / real_runner 更底层提供位置保护，留待未来实机阶段检查，本单元未调查或修改。
+显式 policy-stage hardware position clamp；旧 `real_runner` 也未找到等价的显式
+hardware joint-position clamp（实机链路分析见 §19.13，固件保护仍待确认）。
 跨 runtime 要求 `q_policy` 一致，并验证 safety transform 明确且正确；
 **不要求最终 `q_command` 三边相同**（§19.12）。
 
@@ -2344,14 +2344,58 @@ Overall Black PPO sim2sim compatibility: PASS
 
 部署里程碑：`rl_sar` config / trace / locomotion rollout PASS；
 `quadruped_control` config / observation-action-torque trace / locomotion rollout PASS；
-cross-runtime observation / actor / pre-safety `q_policy` PASS。实机阶段仍须单独检查
-旧 `rl_sar` 实机链路更底层是否提供位置安全，并决定 torque 语义差异
+cross-runtime observation / actor / pre-safety `q_policy` PASS。实机链路静态检查见
+§19.13；仍须决定位置安全归属与 torque 语义差异
 （training `20 N·m`；`rl_sar` policy `33.5 N·m` 后遇旧 MuJoCo `±20 N·m`；
 `quadruped_control` hip/thigh `23.7 N·m`、calf `59.25 N·m`）。
 `quadruped_control` 单次推理超过 20 ms 会触发 watchdog；目前
 `OMP_NUM_THREADS=1` 避免了已观察到的长尾失败，但不是最终实时方案。
 
 next decision：Black real robot backend / sim2real contract；等待用户决定，不自动实现。
+
+### 19.13 Black sim2real / real-backend preflight（分析完成，backend 未实现）
+
+四源静态核对：`alldog_mjlab` 定义 45-D 单帧 observation、12-D FL→FR→RL→RR action、
+`q_policy = q_default + 0.25 * raw_action`、50 Hz policy、Kp 40/Kd 1.2 与训练侧
+20 N·m effort limit。`rl_sar` 的实机 ROS 命令把 policy index 映射到 message index
+`[3,4,5,0,1,2,9,10,11,6,7,8]`；`real_robot` 按 message index `3*leg+j`
+送至 `/dev/leg_{leg}` 的 motor ID `3*leg+j`。物理端口到实际腿的接线未由源码证明，
+接线及逐关节方向必须在接实机前确认。`quadruped_control` RobotModel 顺序与 policy
+相同；其 real RobotIO 尚未实现。
+
+旧实机反馈/命令换算使用 hip/thigh 6.33、calf 15.825 传动比；calf 反号。
+以 motor index `i`、`s=+1`（hip/thigh）或 `-1`（calf）、`G` 为传动比、
+`O_i=off_set_i-straight_i+calf_correction_i`（`off_set_i=-round((raw_start_i-creep_i)/2π)*2π`，
+calf correction 在 index 2/8 为 `-46.66°*15.825`、5/11 为 `+46.66°*15.825`）记：
+`q_joint=s*(motor.Pos+O_i)/G`；反向 `motor.Pos=s*G*q_command-O_i`；
+`motor.W=s*G*dq`、`motor.T=s*tau_ff/G`、`motor.Kp=joint.Kp/G²`、
+`motor.Kd=joint.Kd/G²`。标定文件缺失时旧代码会使用零数组继续初始化，不能视为
+已验证的安全行为。旧 Black RL FSM 实际发送 position/dq/Kp/Kd 与 **tau=0**，
+而 `rl_sar` `ComputeOutput` 算出的 ±33.5 N·m torque 只入诊断队列；
+它不是已证明的实机输出限幅。电机 mode=1 FOC 闭环，最终 joint effort 由电机侧
+PD/固件决定；旧实机 hip/thigh/calf 实际最大输出值和固件保护范围未查明。
+
+旧 `real_runner` 没有找到显式 hardware joint-position clamp 或收到命令后的过期处理；
+其 30° 倾角、0.5 s IMU 超时及 8π motor-position jump 的安全 latch 在当前代码中因
+`ENABLE_LATCHED_SAFETY_PROTECTION=false` 不生效（8π 检查仍会退出本次命令更新），
+serial 失败后的 latch 也被注释。
+这不改变用户确认的硬件位置限：`quadruped_control` 的 position clamp 是必须保留的
+deployment safety layer。旧 IMU 是 AB5465，按 `(x,-y,-z)` 转换 gyro/accel，
+默认用 VQF 6D quaternion（wxyz）供 policy；原始安装姿态到机体 frame 的物理
+对应尚未验证。`rl_sar` joystick 0.3 s 超时归零，navigation `/cmd_vel` 路径未见等价
+超时。新框架命令有 10 ms 有效期，控制周期 5 ms、policy 每四周期一次；
+单次推理 >20 ms 会失败并转 Passive（Disabled）。`OMP_NUM_THREADS=1` 在前次
+rollout 消除了观察到的 >20 ms 长尾，但并非实机实时性证明。
+
+**接 real backend 前的 blocking decisions：**物理 bus/motor/zero/sign 实测和标定
+失败策略；real RobotIO 的 position/effort safety ownership 与电机 PD/firmware
+实际 torque 上限（不能把 20、33.5、23.7/59.25 直接等同）；IMU frame 与状态新鲜度；
+50 Hz policy/低层控制/通信 deadline；推理超时后 Passive=Disabled 在硬件上的
+实际安全行为和外部急停。旧 ROS topic/SerialPack 线程结构、MuJoCo 2 ms 与训练
+5 ms physics dt、policy default 与 stand pose 的小差异，不要求复制为新架构。
+
+next decision：确认 Black real backend v1 的硬件映射、PD/torque 与失效保护契约；
+本节仅完成分析，未实现或验证实机 backend，也未启动 HIM/BlackW。
 
 ------
 
