@@ -1683,7 +1683,7 @@ wz 0.5 + vy 0.2      0.5            0.202            yaw 被解锁
 全程无 NaN / Inf、无摔倒、roll ≤ 6.4°、pitch ≤ 5.6°、base z ∈ [0.441, 0.485]。
 
 ```text
-torque saturation（rl_sar 计算值，policy 限幅 33.5）
+torque saturation（rl_sar ComputeOutput 计算值，33.5 N·m 诊断张量裁剪；非实机命令限幅）
 全部帧 9858： |tau|>20 任一关节 2.2% / 关节样本 0.2% / 从未达 33.5（max 27.79 N·m）
 zero command： 0%
 locomotion：  2.4%（集中于 FL_calf / FR_calf，max 25.62 / 27.79）
@@ -1761,7 +1761,7 @@ torque（|tau_raw|，N·m）  RL 各阶段 max ≤ 16.6，>20 = 0.00%，被 max_
 关节范围                training MJCF == RobotModel == quadruped_control MuJoCo（逐项相同）
 ```
 
-结论：**PASS**（policy I/O 与 torque 链全部对齐；torque 上限差异不影响本轮 policy 轨迹，
+结论：**PASS**（policy I/O 与 torque 链全部对齐；各仿真执行器配置上界的差异不影响本轮 policy 轨迹，
 因为 RL 阶段从未超过 20 N·m）。
 
 ------
@@ -1841,6 +1841,27 @@ policy 分布中**低频生效**。`max_position_jump = 1.0 rad` 独立于位置
 `quadruped_control` 硬件位置安全层 PASS；final commanded target INTENTIONALLY DIFFERENT；
 Black PPO sim2sim compatibility **PASS**。低速后退静止与纯 yaw 不旋转在 MjLab play
 也复现，是三边共享的 policy 行为。原始量测保留，未将 25 帧描述为 inactive guard。
+
+### 17.11 dcb21311 trunk-root MJCF structural regression（PASS）
+
+`dcb21311` 删除无功能的 dummy `base`，将 `trunk` 提升为 floating root；
+此前的 500-iteration 训练、部署 rollout 和跨 runtime fixture 均采自旧 asset。
+以 `a214092` 和 `dcb21311` 两版 XML 分别经 MjLab v1.6.0 Entity/MuJoCo 编译比较：
+`nq/nv/nu=19/18/12`、12 个 joint 顺序/轴/范围/地址、12 个 actuator 绑定及
+`±20 N·m` 范围、default keyframe（root `[0,0,0.45]`，含全部 joint q/ctrl）
+完全一致；仅 `nbody 21→20`、`ngeom 50→49`。`trunk` 自身质量 `5.7042 kg`
+及惯量不变，整机质量 `13.247181→13.247180 kg`（仅去除 dummy 的 `1e-6 kg`），
+default-pose COM 最大差 `7.71e-9 m`、对齐广义坐标后的质量矩阵最大差 `1e-6`。
+trunk、IMU 和四足 world pose 差为零；传感器绑定不变，静态值差 ≤`7.1e-16`，
+相同非零 qvel 下 gyro 差 0、accelerometer 差 `4.8e-8`。
+当前 flat/rough 环境中的 trunk/thigh contact、四足碰撞、terrain-scan、viewer、
+payload/COM selectors 均能解析。`tests/check_black_flat.py --device cpu` 与
+`tests/check_black_rough.py --device cpu` 均 PASS。冻结的 rough `model_498.pt`
+因 critic 输入 259-D 不能整包加载到 flat 72-D critic；使用 MjLab/RSL-RL 原生
+actor-only checkpoint load，在 black-flat play 环境以 zero 与 `vx=0.6` 各走
+100 policy step：actor 45→12、无 NaN/重置/立即摔倒，root 最低约 0.440/0.449 m。
+**Classification：behavior-neutral structural asset fix，regression PASS。**
+本次没有重跑历史 500-iteration 训练或跨 runtime 全量 trace。
 
 ------
 
@@ -2143,7 +2164,7 @@ commands(3) + ang_vel(3, body-frame) + gravity_vec(3) + dof_pos(12) + dof_vel(12
 ```text
 clip_obs = 100              legacy runtime 强制 clamp，训练侧无此 clip（observation 未触发）
 command range               base.yaml command_limits = [3.0, 1.0, 3.0]，训练命令范围 vx/vy ∈ [-1,1]、wz ∈ [-pi,pi]
-torque limit                部署 33.5 N·m vs 训练 effort_limit 20 N·m
+torque semantics            rl_sar ComputeOutput 计算张量裁剪 33.5 N·m vs 训练 actuator effort_limit 20 N·m
 action clip                 有意不配置 clip_actions_lower/upper → Forward() 直接返回 actor action
 policy_switch.yaml          mjlab_ppo 未加入 policy_config_cycle，只能显式指定 config name 启动
 ```
@@ -2195,7 +2216,7 @@ contract 失败（数据链 §19.7 已 PASS、FSM 仍在 Locomotion、无 torque
 ```text
 关节范围      训练 MJCF：hip ±0.5 / thigh [-1.2,1.6] / calf [-2.5,-0.85] 或 [0.85,2.5]（hard limit）
               部署 MJCF：全部 ±10 rad ⇒ 更宽松；实测 calf 实际角度超出训练范围 0.09~0.13 rad
-torque        训练 effort_limit 20 / rl_sar policy 限幅 33.5 / 部署 MuJoCo actuatorfrcrange ±20
+torque        训练 actuator effort_limit 20 / rl_sar ComputeOutput 计算张量裁剪 33.5 / 旧部署 MuJoCo actuatorfrcrange ±20
               实测 rl_sar 计算值最大 27.79（从未达 33.5），>20 占 2.2% 帧 ⇒ 非持续性瓶颈
 质量 / 惯量    总质量 13.0025 kg（部署）vs 13.2472 kg（训练），trunk 惯量差 3~6%
 足底摩擦       两侧一致（sliding 1.0）；训练侧仅在 DR 中随机化
@@ -2225,13 +2246,14 @@ PD                policy kp 40 / kd 1.2；controller/FSM stand 仍为 80 / 3（�
                   需要显式加载时用 --policy-switch-config 指向包含 mjlab_ppo 的 switch 配置
 ```
 
-torque limit（本单元按指示只报告，未改架构）：
+torque/effort 配置差异（本单元按指示只报告，未改架构；实机语义见 §19.15）：
 
 ```text
-RlConfig 没有 torque_limits 字段；策略侧扭矩上限只能由 RobotModel.joints[].limits.max_effort 表达，
-当前为 hip/thigh 23.7 N·m、calf 59.25 N·m（近期提交 6bb7f1d 同步自 blackW 电机规格），
-再由 backends/mujoco 的 joint_control 与 MuJoCo actuator ctrlrange 取交集。
-⇒ 部署侧 policy torque limit 33.5 N·m 在当前 schema 下**无法按 policy 表达**，
+RlConfig 没有 torque_limits 字段；当前 MuJoCo backend 使用 RobotModel.joints[].limits.max_effort：
+hip/thigh 23.7 N·m、calf 59.25 N·m（近期提交 6bb7f1d 同步自 blackW 配置），
+与 MuJoCo actuator ctrlrange 取交集。这是配置的 joint-side 仿真输出上界，
+不是已验证的真实硬件力矩上限，也不等同 rl_sar 的 ComputeOutput 张量裁剪。
+⇒ rl_sar 的 33.5 N·m 计算张量裁剪在当前 schema 下**无法按 policy 表达**，
   本单元未扩展架构、未添加会被静默忽略的 torque_limits 字段。
 ```
 
@@ -2261,8 +2283,9 @@ torque            tau_raw = kp*(q_command-q) + kd*(dq_target-dq) + ff
 
 ```text
 training            20 N·m 全场统一（mjlab effort_limit）
-rl_sar              33.5 N·m policy 限幅，再被 MuJoCo 模型交到 ±20
-quadruped_control   policy 级无上限；实际 23.7（hip/thigh）/ 59.25（calf），backend 与 MuJoCo 一致
+rl_sar              ComputeOutput 张量裁剪 33.5 N·m；旧 MuJoCo actuator 另限 ±20
+quadruped_control   无 per-policy torque clamp；MuJoCo backend 按 RobotModel 配置的 joint-side max_effort
+                    23.7（hip/thigh）/ 59.25（calf）与 actuator ctrlrange 取交集
 ```
 
 ------
@@ -2304,7 +2327,7 @@ L2 跟踪精度（工程级可接受）
 ```
 
 ```text
-torque 语义（本 runtime）   policy 级无上限；实际上限 23.7（hip/thigh）/ 59.25（calf）；
+torque 语义（本 runtime）   无 per-policy torque clamp；MuJoCo 配置上界 23.7（hip/thigh）/ 59.25（calf）；
                             本轮 RL 阶段 max 20.93 N·m，0.00% 触发截断
 硬件关节位置裁剪            与训练 MJCF 数值一致，但这是独立的 deployment safety layer；
                             正常 rollout 中已低频触发（> 0.5 rad 的样本为 0，并不代表未触发），
@@ -2350,9 +2373,11 @@ Overall Black PPO sim2sim compatibility: PASS
 部署里程碑：`rl_sar` config / trace / locomotion rollout PASS；
 `quadruped_control` config / observation-action-torque trace / locomotion rollout PASS；
 cross-runtime observation / actor / pre-safety `q_policy` PASS。实机链路静态检查见
-§19.13；仍须决定位置安全归属与 torque 语义差异
-（training `20 N·m`；`rl_sar` policy `33.5 N·m` 后遇旧 MuJoCo `±20 N·m`；
-`quadruped_control` hip/thigh `23.7 N·m`、calf `59.25 N·m`）。
+§19.13；位置安全已归属 deployment layer，effort/torque 语义见 §19.15：
+training actuator `20 N·m`；`rl_sar` ComputeOutput 张量裁剪 `33.5 N·m`，
+旧 MuJoCo actuator `±20 N·m`；`quadruped_control` MuJoCo 的 RobotModel
+joint-side max_effort 为 hip/thigh `23.7 N·m`、calf `59.25 N·m`。
+真实硬件最终 effort/current ceiling 仍未确认。
 `quadruped_control` 单次推理超过 20 ms 会触发 watchdog；目前
 `OMP_NUM_THREADS=1` 避免了已观察到的长尾失败，但不是最终实时方案。
 
