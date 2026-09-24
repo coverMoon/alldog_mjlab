@@ -16,6 +16,8 @@
 Black PPO deployment contract / sim2sim compatibility: COMPLETE
 Black sim2real / real-backend preflight: COMPLETE（§19.13）
 Black real backend v1 motor mapping / calibration contract: COMPLETE（静态；§19.14）
+Black real backend v1 actuator / PD contract: COMPLETE（静态；§19.15）
+Hardware effort/current ceiling: UNCONFIRMED（实机前确认）
 ```
 
 Black flat PPO baseline、Black rough PPO baseline（约 500 iteration，见 §17.2）与 rough 的
@@ -37,7 +39,8 @@ BlackW migration
 next decision：
 
 ```text
-Black physical wiring / robot-specific calibration confirmation（§19.14；等待用户决定）
+Black physical wiring / calibration and hardware effort/current ceiling confirmation
+（§19.14–§19.15；等待用户决定）
 ```
 
 ------
@@ -2458,6 +2461,77 @@ q 正方向、该实体机器人的标定值与校准身份。源码只能证明
 不能证明物理接线。本节未实现 real backend；torque limit、IMU、通信时序、watchdog
 和 E-stop 留在后续单元。
 
+### 19.15 Black real backend v1 actuator / PD / effort contract（静态冻结）
+
+**训练物理假设，不属于 exported policy I/O：**Black 的 12 个 `IdealPdActuatorCfg`
+均为 joint-space `Kp=40`、`Kd=1.2`、`effort_limit=20 N·m`。
+项目锁定的 MjLab v1.6.0 `JointPositionAction` 只写 position target；未设置
+velocity/effort action target（清状态时为零）。`pd_actuator.py` 计算
+`tau_raw=40*(q_target-q)+1.2*(0-dq)+tau_ff`，再逐关节裁剪到 `[-20,20]`；
+`utils/spec.py:create_motor_actuator` 同时把 MuJoCo motor 的 control/force range
+设为 `[-20,20]`。20 是训练 actuator 的计算输出/仿真执行器上限，
+不是导出 actor 的 action 维度、比例或真实电机的已验证限流值。
+
+**旧部署：**`rl_sar` Black PPO 配置的 33.5 N·m 只裁剪 `ComputeOutput` 的
+`rl_kp*(q_target-q)-rl_kd*dq` 计算张量。该张量进入诊断队列/可选 CSV；Black
+`fsm.hpp` 的 RL 状态从 position/velocity 队列发送 joint-space `q_target`、
+`dq_target=0`、`Kp=40`、`Kd=1.2`、`tau=0`，没有把该 33.5 裁剪值送到
+`motor_command.tau`。`TorqueProtect` 调用被注释。因此 **33.5 不是已验证的
+真实硬件力矩限幅**；旧 MuJoCo 仿真另有 ±20 N·m actuator 限制。
+
+**旧实机命令：**`real_robot` 的 `SerialPack` 将上述 joint-space 命令转为
+`mode=1`（FOC 闭环）的 `motor.Pos/W/K_P/K_W/T`，按 §19.14 的 `G/s/O_i`：
+
+```text
+motor.Pos = s*G*q_command-O_i       motor.W = s*G*dq_command
+motor.K_P = Kp_joint/G²             motor.K_W = Kd_joint/G²
+motor.T   = s*tau_ff_joint/G
+```
+
+Black RL 中 `dq_command=0`、`tau_ff_joint=0`，仍有 position/velocity error
+引起的电机侧阻抗力矩；`motor.T=0` **不代表实际输出力矩为零**。理想无损传动下，
+电机侧 PD 输出乘 `s*G` 正好还原
+`Kp_joint*(q_command-q)+Kd_joint*(dq_command-dq)+tau_ff_joint`。
+独立 `/tmp/black_pd_coordinate_check.py` 对 `G=6.33,s=+1` 与
+`G=15.825,s=-1` 各 1000 组随机目标、状态、偏移、前馈检验，最大误差
+`8.53e-14 N·m`。这是坐标公式检验，不证明固件 PD 实现或电机效率。
+
+**当前新框架：**`CommandFrame::JointCommand` 的 position [rad]、velocity
+[rad/s]、Kp [N·m/rad]、Kd [N·m·s/rad]、feedforward_effort [joint N·m]
+均为 joint-space；`MotionRuntime` 对 RL 命令设 `JointImpedance`、
+`feedforward_effort=0`，并在提交前对 position 作硬件范围裁剪。
+MuJoCo backend 以这些 joint-space 字段计算 PD+前馈，再裁剪到
+`RobotModel.max_effort` 与 MuJoCo actuator control range 的交集。
+`RobotModel.max_effort` 同时用于 `CommandFrame` 前馈字段校验；**这种
+MuJoCo 软件裁剪尚未在 real RobotIO 中实现**。当前 black 配置中的
+hip/thigh `23.7 N·m`、calf `59.25 N·m` 是 joint-side 配置上界，
+与 blackW 配置及仿真 actuator range 一致；源码不能证明 Black/BlackW 实物
+电机完全相同，或这些值是连续、峰值、固件保护阈值。
+
+**RealRobotIO v1 已冻结的命令语义：**接收 canonical RobotModel 顺序的
+joint-space `q_command`（正常 Black PPO 路径为
+`clamp(q_default+0.25*raw_action, hardware position limits)`；现有
+`max_position_jump` guard 若触发还会进一步限制相邻目标变化）、
+`dq_command=0`、`Kp=40`、`Kd=1.2`、`tau_ff=0`，再由 backend 按 §19.14
+进行标定、sign/gear 和 SDK 字段转换。接口保留 joint-space `tau_ff` 语义，
+Black PPO v1 使用零值。policy 不输出 torque action，也不承担硬件力矩保护；
+位置安全先于电机阻抗命令。`RobotModel.max_effort` 当前是配置的 joint-space
+上界，不能仅凭此声称真实固件会把**隐式 PD 输出**限到该值；
+RealRobotIO/电机固件必须承担 SDK 字段校验、故障处理及经硬件确认的
+effort/current 安全机制。是否可在 SDK/固件中限制总 PD effort，或需另设
+软件保护及其数值，**NEEDS HARDWARE DECISION**，不能靠裁剪 `tau_ff=0`
+实现。SDK 头文件标注的 `motor.T ±127.99 N·m` 是转子侧命令字段范围，
+`K_P/K_W 0–25.599` 是增益字段范围，均不是已证实的物理输出上限。
+源码可识别 `GO_M8010_6` 型号、故障标志（过热/过流等）和预编译 SDK，
+但不能证明旧 Black 实际 joint effort/current ceiling：**SOURCE INSUFFICIENT**。
+
+已有 sim2sim 证据只显示：旧 `rl_sar` 计算值最大约 27.79 N·m；新框架
+平地 rollout 的 `tau_raw` 最大约 20.93 N·m，未命中 23.7/59.25 裁剪。
+这不构成实机安全证明。实机前仍需核对实体电机型号/固件、运行电流/力矩
+阈值、阻抗控制内部限幅与故障行为，并决定 real backend effort safety 数值及
+执行位置；本节未修改 RobotModel 或实现 backend。IMU、时序与 watchdog
+仍是独立后续单元。
+
 ------
 
 ## 20. Next Migration Order
@@ -2482,9 +2556,10 @@ q 正方向、该实体机器人的标定值与校准身份。源码只能证明
      跨 runtime observation / actor / pre-safety `q_policy` 均 PASS；
      经真实硬件验证的位置限属于 deployment safety layer，最终 `q_command` 有意不同，
      见 §17.10 / §19.12。ONNX metadata 归属见 §18.1 / §19.4。）
-   motor mapping / calibration 静态契约 COMPLETE（§19.14）；
-   next decision：Black physical wiring / robot-specific calibration confirmation
-   （等待用户决定，real backend 未实现；torque、IMU、时序与 watchdog 另行决定）。
+   motor mapping / calibration 与 actuator / PD 静态契约 COMPLETE（§19.14–§19.15）；
+   next decision：Black physical wiring / robot-specific calibration、实体电机
+   effort/current ceiling 与保护机制确认（等待用户决定；real backend 未实现；
+   IMU、时序与 watchdog 另行决定）。
 8. HIM observation / estimator / algorithm integration
 ```
 
