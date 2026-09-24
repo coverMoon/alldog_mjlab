@@ -14,6 +14,8 @@
 
 ```text
 Black PPO deployment contract / sim2sim compatibility: COMPLETE
+Black sim2real / real-backend preflight: COMPLETE（§19.13）
+Black real backend v1 motor mapping / calibration contract: COMPLETE（静态；§19.14）
 ```
 
 Black flat PPO baseline、Black rough PPO baseline（约 500 iteration，见 §17.2）与 rough 的
@@ -35,7 +37,7 @@ BlackW migration
 next decision：
 
 ```text
-Black real backend v1 的硬件映射、执行器与失效保护决策（§19.13；等待用户决定）
+Black physical wiring / robot-specific calibration confirmation（§19.14；等待用户决定）
 ```
 
 ------
@@ -2351,7 +2353,7 @@ cross-runtime observation / actor / pre-safety `q_policy` PASS。实机链路静
 `quadruped_control` 单次推理超过 20 ms 会触发 watchdog；目前
 `OMP_NUM_THREADS=1` 避免了已观察到的长尾失败，但不是最终实时方案。
 
-next decision：Black real robot backend / sim2real contract；等待用户决定，不自动实现。
+motor mapping / calibration 静态契约见 §19.14；当前下一决策见 §1。
 
 ### 19.13 Black sim2real / real-backend preflight（分析完成，backend 未实现）
 
@@ -2364,9 +2366,11 @@ next decision：Black real robot backend / sim2real contract；等待用户决�
 相同；其 real RobotIO 尚未实现。
 
 旧实机反馈/命令换算使用 hip/thigh 6.33、calf 15.825 传动比；calf 反号。
-以 motor index `i`、`s=+1`（hip/thigh）或 `-1`（calf）、`G` 为传动比、
+以 `real_robot_motor_index i`、`s=+1`（hip/thigh）或 `-1`（calf）、`G` 为传动比、
 `O_i=off_set_i-straight_i+calf_correction_i`（`off_set_i=-round((raw_start_i-creep_i)/2π)*2π`，
-calf correction 在 index 2/8 为 `-46.66°*15.825`、5/11 为 `+46.66°*15.825`）记：
+calf correction 在 `real_robot_motor_index` 2/8（软件映射 FR/RR calf）为
+`-46.66°*15.825`、`real_robot_motor_index` 5/11（FL/RL calf）为
+`+46.66°*15.825`）记：
 `q_joint=s*(motor.Pos+O_i)/G`；反向 `motor.Pos=s*G*q_command-O_i`；
 `motor.W=s*G*dq`、`motor.T=s*tau_ff/G`、`motor.Kp=joint.Kp/G²`、
 `motor.Kd=joint.Kd/G²`。标定文件缺失时旧代码会使用零数组继续初始化，不能视为
@@ -2394,8 +2398,65 @@ rollout 消除了观察到的 >20 ms 长尾，但并非实机实时性证明。
 实际安全行为和外部急停。旧 ROS topic/SerialPack 线程结构、MuJoCo 2 ms 与训练
 5 ms physics dt、policy default 与 stand pose 的小差异，不要求复制为新架构。
 
-next decision：确认 Black real backend v1 的硬件映射、PD/torque 与失效保护契约；
+后续 motor mapping / calibration 静态契约已在 §19.14 冻结；实体接线仍待确认。
 本节仅完成分析，未实现或验证实机 backend，也未启动 HIM/BlackW。
+
+### 19.14 Black real backend v1 motor mapping / calibration contract（静态冻结）
+
+canonical `policy_index = RobotModel_joint_index`：FL→FR→RL→RR，每腿 hip→thigh→calf。
+旧实机软件链（依 policy index 0–11 排列）：
+
+```text
+rl_sar_message_index = real_robot_motor_index:
+    [3,4,5, 0,1,2, 9,10,11, 6,7,8]
+real_robot_leg_index = real_robot_motor_index // 3
+leg_local_joint_index = real_robot_motor_index % 3
+device = /dev/leg_{real_robot_leg_index}
+SDK request motor ID = real_robot_motor_index（实际接线/电机身份未由源码证明）
+```
+
+`real_robot` hip/thigh `G=6.33, s=+1`，四个 calf `G=15.825, s=-1`；
+feedback 和 command 两个方向均已由 `serial_packages.hpp` 核对。
+旧标定文件 `./src/real_robot/real_runner/motor_calibration.conf`（相对运行目录）按
+`real_robot_motor_index` 保存两行、各 12 个 rotor-side rad：第一行 `straight_position_`，
+第二行 `creep_position_`；读取时只顺序提取 24 个数，不检查行边界。
+首次成功读取电机反馈后，以该电机上电转子位置
+`raw_start_i` 计算 `off_set_i=-std::round((raw_start_i-creep_i)/(2π))*2π`。
+令 `O_i=off_set_i-straight_i+calf_correction_i`，`calf_correction_i` 为 motor-side rad：
+FL/RL calf `+46.66°*15.825`（对应 `real_robot_motor_index` 5/11），
+FR/RR calf `-46.66°*15.825`（对应 `real_robot_motor_index` 2/8）；其机械原因未由源码证明。
+hip/thigh correction 为零。新 backend 的 calibration 必须按显式 joint name 绑定；
+旧数组文件只能经核对 `real_robot_motor_index`→joint name 后导入。
+
+```text
+feedback: q_joint=s*(motor.Pos+O_i)/G; dq_joint=s*motor.W/G
+command:  motor.Pos=s*G*q_command-O_i; motor.W=s*G*dq_command
+          motor.K_P=Kp_joint/G²; motor.K_W=Kd_joint/G²
+          motor.T=s*tau_ff_joint/G
+```
+
+`motor.Pos` / `motor.W` 为 rotor-side rad / rad/s，canonical joint q/dq 为 rad / rad/s。
+增益和前馈公式对应理想、无损传动下的 joint-space MIT impedance；只冻结坐标换算，
+**不**据此冻结固件内部控制或最终 torque limit。对 12 关节的限位端点及随机合法状态，
+独立 `/tmp/black_motor_mapping_contract.py` 以多组整数圈数验证了 q/dq 数学 round trip：
+最大误差 `6.66e-16 / 8.88e-16`；模拟 float32 电机字段后约 `3e-7`。
+SDK 二进制打包/固件及实体电机精度未验证。硬件位置限沿用 RobotModel 的已验证值；
+各 motor 端点须用**当次有效** `O_i` 计算 `s*G*q_min-O_i`、`s*G*q_max-O_i`，
+calf 的 motor 顺序可能与 joint q 顺序相反，不可把 q_min 端点当作 motor_min。
+
+旧 `motor_zero` 构造时忽略 `load_calibration_file()` 返回值：缺文件继续使用零数组，
+字段不足可能留下部分已读值；文件无版本/关节名，未验证 finite，也不拒绝多余字段。
+**v1 决策：**缺失、无效、关节数量错误、非有限值、版本不支持或身份不匹配时
+calibration **FAIL CLOSED**：RobotIO/hardware enable 失败，RL 不得进入；禁止零偏移
+回退。RealRobotIO 对 MotionRuntime 只暴露 canonical RobotModel 顺序、校准后的 q/dq，
+并接收同序 joint-space CommandFrame；gear、sign、offset、bus、motor ID 和 SDK
+packet 转换均由 backend 负责，不进入 policy/RL 层。
+
+**HARDWARE CONFIRMATION TODO：**逐一确认 `/dev/leg_0`～`/dev/leg_3` 的实体腿，
+每端口三个实际 motor ID 与 hip/thigh/calf 的对应、每个电机正转对应的 canonical
+q 正方向、该实体机器人的标定值与校准身份。源码只能证明软件请求的 index/ID，
+不能证明物理接线。本节未实现 real backend；torque limit、IMU、通信时序、watchdog
+和 E-stop 留在后续单元。
 
 ------
 
@@ -2421,8 +2482,9 @@ next decision：确认 Black real backend v1 的硬件映射、PD/torque 与失�
      跨 runtime observation / actor / pre-safety `q_policy` 均 PASS；
      经真实硬件验证的位置限属于 deployment safety layer，最终 `q_command` 有意不同，
      见 §17.10 / §19.12。ONNX metadata 归属见 §18.1 / §19.4。）
-   next decision：Black real robot backend / sim2real contract（等待用户决定，未开始实现；
-     进入实机前须单独决定位置安全链、torque 语义、推理 watchdog / 线程实时性）。
+   motor mapping / calibration 静态契约 COMPLETE（§19.14）；
+   next decision：Black physical wiring / robot-specific calibration confirmation
+   （等待用户决定，real backend 未实现；torque、IMU、时序与 watchdog 另行决定）。
 8. HIM observation / estimator / algorithm integration
 ```
 
