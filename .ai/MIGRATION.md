@@ -17,6 +17,7 @@ Black PPO deployment contract / sim2sim compatibility: COMPLETE
 Black sim2real / real-backend preflight: COMPLETE（§19.13）
 Black real backend v1 motor mapping / calibration contract: COMPLETE（静态；§19.14）
 Black real backend v1 actuator / PD contract: COMPLETE（静态；§19.15）
+Black real backend v1 IMU / orientation contract: COMPLETE（静态；§19.16）
 Hardware effort/current ceiling: UNCONFIRMED（实机前确认）
 ```
 
@@ -39,8 +40,8 @@ BlackW migration
 next decision：
 
 ```text
-Black physical wiring / calibration and hardware effort/current ceiling confirmation
-（§19.14–§19.15；等待用户决定）
+Black real backend v1 timing / freshness / watchdog / failure contract
+（下一候选单元；尚未开始，等待用户决定）
 ```
 
 ------
@@ -2413,8 +2414,9 @@ PD/固件决定；旧实机 hip/thigh/calf 实际最大输出值和固件保护�
 serial 失败后的 latch 也被注释。
 这不改变用户确认的硬件位置限：`quadruped_control` 的 position clamp 是必须保留的
 deployment safety layer。旧 IMU 是 AB5465，按 `(x,-y,-z)` 转换 gyro/accel，
-默认用 VQF 6D quaternion（wxyz）供 policy；原始安装姿态到机体 frame 的物理
-对应尚未验证。`rl_sar` joystick 0.3 s 超时归零，navigation `/cmd_vel` 路径未见等价
+默认用 VQF 6D 的软件变换后 sensor→重力对齐 frame 姿态 quaternion（wxyz）供 policy；
+该 frame 是否等于 trunk/body frame 尚需实机确认，见 §19.16。`rl_sar` joystick 0.3 s
+超时归零，navigation `/cmd_vel` 路径未见等价
 超时。新框架命令有 10 ms 有效期，控制周期 5 ms、policy 每四周期一次；
 单次推理 >20 ms 会失败并转 Passive（Disabled）。`OMP_NUM_THREADS=1` 在前次
 rollout 消除了观察到的 >20 ms 长尾，但并非实机实时性证明。
@@ -2554,8 +2556,65 @@ effort/current 安全机制。是否可在 SDK/固件中限制总 PD effort，�
 平地 rollout 的 `tau_raw` 最大约 20.93 N·m，未命中 23.7/59.25 裁剪。
 这不构成实机安全证明。实机前仍需核对实体电机型号/固件、运行电流/力矩
 阈值、阻抗控制内部限幅与故障行为，并决定 real backend effort safety 数值及
-执行位置；本节未修改 RobotModel 或实现 backend。IMU、时序与 watchdog
-仍是独立后续单元。
+执行位置；本节未修改 RobotModel 或实现 backend。IMU 静态契约见 §19.16；
+时序与 watchdog 仍是独立后续单元。
+
+### 19.16 Black real backend v1 IMU / orientation contract（静态冻结）
+
+**Policy 与训练侧：**Black PPO 45-D actor 只取 `0.25 * ω_B` 和
+`g_B=R_WB^T[0,0,-1]`；`B` 是 canonical trunk/root-link body frame，
+`R_WB` 将 body 向量旋至 world，姿态 quaternion 为 `wxyz`。MjLab v1.6.0
+`base_ang_vel` 取 `root_link_ang_vel_b`，`projected_gravity` 取
+`quat_apply_inverse(root_link_quat_w, gravity_vec_w)`，其中
+`gravity_vec_w=[0,0,-1]`。actor 不使用 raw accelerometer、base linear velocity、
+absolute yaw、magnetometer 或 world position。当前 MJCF 的 trunk IMU site
+相对 trunk 为 identity；训练 observation 取 root-link 状态，并非直接读取
+gyro/accelerometer sensor。
+
+**旧实机软件链：**AB5465 的 CRC 有效包按小端 float 读取 Euler角、gyro、accel。
+`real_runner` 对 gyro 施加 `diag(1,-1,-1)` 且按 raw 为 deg/s 的假定转为 rad/s，
+对 accel 施加相同轴旋转但不作单位缩放；该矩阵是右手系绕 X 轴 180° 的
+proper rotation。驱动假定 accel 数值可按 m/s² 送入 VQF，原始设备单位及
+是否为 specific force **SOURCE INSUFFICIENT**。默认 VQF 用固定 2 ms
+采样周期输入 gyro/accel，不使用 magnetometer，输出 6D `wxyz` quaternion：
+软件变换后 sensor frame → 重力对齐、yaw 原点任意的惯性 frame；内部启用
+gyro bias 估计。VQF 输入无效时旧代码退回由 raw Euler
+`(roll,-pitch,-yaw)` 生成的姿态，仍会发布该帧；发布 ROS `Imu` 时
+`frame_id=imu_link`、时间戳为主机 `now()`，没有原始 sensor timestamp。
+这只能证明**软件轴变换**，不能证明实体 AB5465 安装后的轴与 trunk 重合。
+
+`rl_sar` 从 `/_lowState/imu` 直接复制 ROS orientation（xyzw 字段重排为
+内部 wxyz）及 angular velocity，不再作轴变换或归一化；
+obs[3:6] 为 `0.25 * incoming_gyro`，obs[6:9] 为
+`QuatRotateInverse(incoming_quat,[0,0,-1])`。旧链默认信任驱动已给出
+body-frame gyro 与 body→重力对齐 world 的 orientation；实体 frame 一致性
+仍需验证。VQF 6D 的 absolute yaw 不可观测；只要 roll/pitch 与 frame
+一致，yaw 原点/漂移本身不直接进入重力投影，但不能据此忽略 estimator
+或 frame 错误。既有 sim2sim 数值 trace 已验证 policy 侧投影公式
+（§17.10），不证明硬件安装。
+
+**新框架边界：**`StateFrame::ImuState` 已定义 body→world `wxyz`、
+body-frame angular velocity [rad/s]、body-frame acceleration 字段 [m/s²]、
+`age_ns` 与 `valid`；MuJoCo backend 从 trunk identity IMU site 的
+framequat/gyro/accelerometer 填充。`RlController` 使用 orientation 计算
+projected gravity，使用 angular velocity 构造 actor observation；
+RealRobotIO 不输出 policy 专用 gravity 或 45-D observation，也不施加 0.25
+观测缩放。若传感器 frame `S` 与机体 `B` 有固定安装旋转 `R_BS`（S→B），
+backend 应给出 `ω_B=R_BS ω_S`、`a_B=R_BS a_S`、
+`R_WB=R_WS R_BS^T`；旧 `diag(1,-1,-1)` 不能未经实测就视为完整安装标定。
+
+**有效性与待确认项：**RealRobotIO v1 必须只发布有限、已初始化、
+近单位且对应同一坐标系的姿态/角速度/加速度，必要时处理小幅数值漂移，
+不得把无效 quaternion 静默替换为 identity；过期/无效数据标为 invalid，
+RL 不得消费。当前 `RlController` 检查 `imu.valid` 和 quaternion
+`|norm²-1|≤1e-4`，`StateFrame` 通用校验检查有限数值与非负 `age_ns`，
+但没有 IMU age 上限。旧驱动没有可靠的 orientation-ready 闸门；
+具体收敛判据、stale 阈值及故障转移留给下一 timing/failure 单元。
+该 acceleration 字段在真实驱动与 MuJoCo accelerometer 间是否都表示
+specific force 尚未由当前源码统一证明；Black PPO 不消费该字段。
+实体 AB5465 印刷轴、安装方向、当前 Black 的固件/数据单位、时间戳质量、
+振动与 bias 表现均为 **HARDWARE CONFIRMATION TODO**。本节只冻结接口语义，
+未实现 real backend 或作实机验证。
 
 ------
 
@@ -2581,10 +2640,11 @@ effort/current 安全机制。是否可在 SDK/固件中限制总 PD effort，�
      跨 runtime observation / actor / pre-safety `q_policy` 均 PASS；
      经真实硬件验证的位置限属于 deployment safety layer，最终 `q_command` 有意不同，
      见 §17.10 / §19.12。ONNX metadata 归属见 §18.1 / §19.4。）
-   motor mapping / calibration 与 actuator / PD 静态契约 COMPLETE（§19.14–§19.15）；
-   next decision：Black physical wiring / robot-specific calibration、实体电机
-   effort/current ceiling 与保护机制确认（等待用户决定；real backend 未实现；
-   IMU、时序与 watchdog 另行决定）。
+   motor mapping / calibration、actuator / PD、IMU / orientation 静态契约
+   COMPLETE（§19.14–§19.16）；实体接线、安装 frame、标定及电机
+   effort/current ceiling 仍待硬件确认；real backend 未实现。
+   下一候选：Black real backend v1 timing / freshness / watchdog / failure
+   contract（等待用户决定，尚未开始）。
 8. HIM observation / estimator / algorithm integration
 ```
 
