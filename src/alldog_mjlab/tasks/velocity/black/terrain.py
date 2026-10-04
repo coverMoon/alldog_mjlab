@@ -2,7 +2,7 @@
 
 文件角色划分：
 
-    params.py     terrain 数值（patch 尺寸、难度、各 terrain 比例、noise 幅值）
+    black_config.py terrain 数值（patch 尺寸、难度、各 terrain 比例、noise 幅值）
     env_cfgs.py   terrain 装配（terrain_type / max_init_terrain_level / curriculum term）
     本文件        terrain 数学（task-local rough slope primitive + generator 组装）
 
@@ -26,7 +26,7 @@ terrain 都是「算一个 int16 高度场数组 → 建 hfield + geom」。因�
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import mujoco
 import numpy as np
@@ -42,7 +42,7 @@ from mjlab.terrains import (
 from mjlab.terrains.heightfield_terrains import color_by_height
 from mjlab.terrains.terrain_generator import TerrainGeometry, TerrainOutput
 
-from alldog_mjlab.tasks.velocity.black import params
+from alldog_mjlab.tasks.velocity.black.black_config import BLACK_CONFIG
 
 
 @dataclass(kw_only=True)
@@ -69,31 +69,31 @@ class BlackRoughSlopeTerrainCfg(SubTerrainCfg):
     ±1 m 区域的最大 raw height。
     """
 
-    slope_range: tuple[float, float] = (0.0, 0.7)
+    slope_range: tuple[float, float] = field()
     """Slope 梯度范围（rise / run），按 difficulty 插值。"""
 
-    noise_base: float = 0.015
+    noise_base: float = field()
     """difficulty = 0 时的噪声幅值 [m]。"""
 
-    noise_gain: float = 0.1
+    noise_gain: float = field()
     """噪声幅值随 difficulty 的增量 [m]。"""
 
-    noise_step: float = 0.005
+    noise_step: float = field()
     """噪声高度量化步长 [m]。"""
 
-    noise_downsample: float = 0.2
+    noise_downsample: float = field()
     """噪声采样点间距 [m]（采样后双线性插值到高度场分辨率）。"""
 
-    platform_width: float = 3.0
+    platform_width: float = field()
     """中心 flat platform 边长 [m]。"""
 
-    horizontal_scale: float = 0.1
+    horizontal_scale: float = field()
     """高度场水平分辨率 [m/cell]。"""
 
-    vertical_scale: float = 0.005
+    vertical_scale: float = field()
     """高度场高度量化 [m/unit]。"""
 
-    base_thickness_ratio: float = 1.0
+    base_thickness_ratio: float = field()
     """高度场 base 厚度与最大表面高度之比。"""
 
     def function(
@@ -234,7 +234,9 @@ def black_rough_terrain_generator_cfg() -> TerrainGeneratorCfg:
     5 类 sub-terrain（curriculum 模式下每类一列）、10 行难度；`proportion` 在
     curriculum 模式下是 **env 分配权重**，不是列数。
     """
-    terrain_params = params.terrain
+    terrain_params = BLACK_CONFIG.terrain
+    terrain_params.validate()
+    proportions = terrain_params.proportions
     return TerrainGeneratorCfg(
         curriculum=True,
         size=terrain_params.size,
@@ -243,9 +245,9 @@ def black_rough_terrain_generator_cfg() -> TerrainGeneratorCfg:
         difficulty_range=terrain_params.difficulty_range,
         add_lights=True,
         sub_terrains={
-            "flat": BoxFlatTerrainCfg(proportion=terrain_params.flat_proportion),
+            "flat": BoxFlatTerrainCfg(proportion=proportions["flat"]),
             "smooth_slope_up": HfPyramidSlopedTerrainCfg(
-                proportion=terrain_params.smooth_slope_up_proportion,
+                proportion=proportions["smooth_slope_up"],
                 slope_range=terrain_params.slope_range,
                 platform_width=terrain_params.platform_width,
                 horizontal_scale=terrain_params.horizontal_scale,
@@ -253,7 +255,7 @@ def black_rough_terrain_generator_cfg() -> TerrainGeneratorCfg:
                 inverted=False,
             ),
             "smooth_slope_down": HfPyramidSlopedTerrainCfg(
-                proportion=terrain_params.smooth_slope_down_proportion,
+                proportion=proportions["smooth_slope_down"],
                 slope_range=terrain_params.slope_range,
                 platform_width=terrain_params.platform_width,
                 horizontal_scale=terrain_params.horizontal_scale,
@@ -261,18 +263,19 @@ def black_rough_terrain_generator_cfg() -> TerrainGeneratorCfg:
                 inverted=True,
             ),
             "rough_slope": BlackRoughSlopeTerrainCfg(
-                proportion=terrain_params.rough_slope_proportion,
+                proportion=proportions["rough_slope"],
                 slope_range=terrain_params.slope_range,
                 noise_base=terrain_params.rough_noise_base,
                 noise_gain=terrain_params.rough_noise_gain,
                 noise_step=terrain_params.rough_noise_step,
                 noise_downsample=terrain_params.rough_noise_downsample,
+                base_thickness_ratio=terrain_params.rough_base_thickness_ratio,
                 platform_width=terrain_params.platform_width,
                 horizontal_scale=terrain_params.horizontal_scale,
                 vertical_scale=terrain_params.vertical_scale,
             ),
             "discrete_obstacles": HfDiscreteObstaclesTerrainCfg(
-                proportion=terrain_params.obstacles_proportion,
+                proportion=proportions["discrete_obstacles"],
                 obstacle_height_mode="choice",
                 obstacle_width_range=terrain_params.obstacle_width_range,
                 obstacle_height_range=terrain_params.obstacle_height_range,

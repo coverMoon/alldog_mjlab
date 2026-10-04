@@ -15,9 +15,8 @@ register_mjlab_task(
     runner_cls=VelocityOnPolicyRunner,
 )
 
-# black-rough 当前只覆盖 terrain generator + terrain curriculum：
-# action / observation / reward / reset / termination / DR / command 与 flat 相同，
-# 尚未做过 rough PPO 训练（见 .ai/MIGRATION.md）。
+# black-rough 已完成功能迁移和约 500 iteration 的 PPO baseline；
+# 长训练收敛与定量评估仍待后续进行（见 .ai/MIGRATION.md §17.2）。
 register_mjlab_task(
     task_id="black-rough",
     env_cfg=black_rough_env_cfg(),

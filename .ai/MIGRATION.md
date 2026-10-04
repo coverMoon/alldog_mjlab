@@ -20,6 +20,7 @@ Black real backend v1 actuator / PD contract: COMPLETE（静态；§19.15）
 Black real backend v1 IMU / orientation contract: COMPLETE（静态；§19.16）
 Black real backend v1 timing / freshness / failure contract: COMPLETE（静态；§19.17）
 Black RealRobotIO v1 architecture / implementation plan: COMPLETE（静态；§19.18）
+Black training configuration consolidation v2: COMPLETE（behavior-neutral）
 Hardware effort/current ceiling: UNCONFIRMED（实机前确认）
 ```
 
@@ -33,17 +34,19 @@ observation、actor、pre-safety `q_policy` 比较均已通过（§17.10 / §19.
 当前尚未进入：
 
 ```text
-Black real robot backend（尚未实现；sim2real preflight 见 §19.13）
+Black real robot backend（尚未实现；quadruped_control 项目接手）
 HIM observation/history
 HIM algorithm integration
 BlackW migration
 ```
 
-next decision：
+项目边界与下一候选：
 
 ```text
-Unit 0 — CommandFrame semantic target timing metadata
-（下一 implementation unit；尚未开始，先于 real hardware config）
+Black sim2real training/deployment contract: COMPLETE
+quadruped_control RealRobotIO/runtime implementation: HANDOFF TO quadruped_control PROJECT
+alldog_mjlab next: Black training/tuning workflow after configuration consolidation,
+                   or user decision; HIM is not in progress
 ```
 
 ------
@@ -68,7 +71,7 @@ src/alldog_mjlab/utils/export_policy.py    actor-only TorchScript 导出 CLI（�
 Black 当前主要 task config：
 
 ```text
-src/alldog_mjlab/tasks/velocity/black/params.py
+src/alldog_mjlab/tasks/velocity/black/black_config.py
 src/alldog_mjlab/tasks/velocity/black/env_cfgs.py
 src/alldog_mjlab/tasks/velocity/black/rewards.py
 src/alldog_mjlab/tasks/velocity/black/terminations.py
@@ -79,20 +82,17 @@ src/alldog_mjlab/tasks/velocity/black/rl_cfg.py
 ### Configuration layout
 
 ```text
-params.py
-    人工调参入口：若干 frozen typed parameter group，只放训练者预期会查看 /
-    调整的 numeric / range 参数。访问形式 category first：
-        params.command.*
-        params.observation_noise.*
-        params.reset.*
-        params.termination.*
-        params.reward.*
-        params.domain_randomization.*
-    最多两层，不引入总容器 / Hydra / OmegaConf / 第二套 Config framework。
+black_config.py
+    Black flat/rough 单一人工训练参数入口：BLACK_CONFIG，typed sections 覆盖
+    env/control/command/observation/noise/reset/termination/reward/domain_rand/
+    terrain/simulation/policy/algorithm/runner。physics dt=0.005、decimation=4，
+    policy dt 由二者相乘；MjLab factory 的默认 num_envs=1，既有 4096-env
+    训练命令通过 CLI 覆盖。observation scales 和 control dt 为部署敏感字段。
 
 env_cfgs.py
     MjLab task assembly + policy / task interface contract
-    （term 顺序、selector、observation scale、sensor 身份、与 native 的差异）
+    （term 顺序、selector、sensor 身份、与 native 的差异）；从 BLACK_CONFIG
+    读取数值并装配 ManagerBasedRlEnvCfg
 
 rewards.py
     Black 专用 reward math
@@ -101,14 +101,15 @@ terminations.py
     Black 专用 stateful termination math
 ```
 
-`params.py` **不是**第二套 runtime config：MjLab `ManagerBasedRlEnvCfg` 仍是唯一
-runtime config，环境完全由 `env_cfgs.py` 组装，`params.py` 只是它的数值来源。
-interface contract 不得放进 `params.py`，否则会被误读成普通训练超参数。
+`black_config.py` 只是人工数值来源，MjLab `ManagerBasedRlEnvCfg` 仍是唯一 runtime
+environment config；`rl_cfg.py` 把 policy/algorithm/runner sections 转成 RSL-RL cfg。
+policy joint/action/observation term order 仍由 `robots/black` 和 `env_cfgs.py` 明确绑定。
 
 本地 migration verification：
 
 ```text
 tests/check_black_flat.py
+tests/check_black_rough.py
 ```
 
 `tests/` 当前仅作为本地验证工具，不提交 Git。
@@ -255,7 +256,7 @@ curriculum:
     disabled（terrain curriculum 与 command curriculum 均已移除）
 ```
 
-因此 `params.command.*` 是**最终训练 contract**，不是「curriculum 前的初始范围」；
+因此 `BLACK_CONFIG.command.*` 是**最终训练 contract**，不是「curriculum 前的初始范围」；
 `cfg.curriculum == {}`。
 
 ### 4.1 What was intentionally not migrated
@@ -1037,7 +1038,7 @@ restitution              （保持无 restitution DR）
 ```
 
 initial joint-state variation 不再叠加官方 HIMLoco 的 `initial_joint_pos_range`：
-已由 reset contract（`params.reset.joint_position`）覆盖。
+已由 reset contract（`BLACK_CONFIG.reset.joint_position`）覆盖。
 
 motor strength / action delay 分别在 sim2real contract 阶段处理。
 
@@ -1049,7 +1050,7 @@ Black rough v1 的 terrain 由 MjLab v1.6.0 native terrain generator 生成
 （`TerrainEntity` + `TerrainGeneratorCfg` curriculum 模式），只新增一个 task-local
 sub-terrain primitive（rough slope），不引入第二套 terrain framework。
 
-数值在 `params.terrain.*`，terrain 数学在 `tasks/velocity/black/terrain.py`，装配在
+数值在 `BLACK_CONFIG.terrain.*`，terrain 数学在 `tasks/velocity/black/terrain.py`，装配在
 `env_cfgs.black_rough_env_cfg()`（= `black_flat_env_cfg()` + rough terrain 覆盖，
 不复制 flat 配置）。
 
@@ -2865,15 +2866,15 @@ previous_action、policy switch、MuJoCo/replay 不得回退。**首个实机端
 → motiond/gateway，且 freshness、fault、calibration validity 可见，不是 RL 行走。
 joint/IMU stale 数值、sample skew、transaction timeout、safe Kd、SDK Disabled
 编码、固件/外部 E-stop 行为、effort/current ceiling、物理接线和实时抖动均需
-实机 bring-up；本节未实现或验证硬件。现有部署仓库 real migration reference
-推荐 hardware config 先行并沿用现有 CommandFrame，缺 semantic target 年龄与
-独立 supervisor；本冻结计划以 Unit 0 先行，旧参考待对应实施阶段再更新。
+实机 bring-up；本节未实现或验证硬件。具体后续实施已移交到
+`quadruped_control` 项目，本仓库继续仅维护训练侧与显式 policy deployment contract。
 
 ------
 
 ## 20. Next Migration Order
 
-长期方向是「flat 先做完，再 rough，最后 sim2real / HIM」，因此：
+Black flat/rough 与训练侧 sim2real contract 已完成；部署代码由独立项目接手。
+下表保留完成状态与本仓库当前下一候选：
 
 ```text
 1. stuck termination                     （完成）
@@ -2898,14 +2899,18 @@ joint/IMU stale 数值、sample skew、transaction timeout、safe Kd、SDK Disab
    用户已确认 IMU 安装与 legacy 配置一致。实体电机接线、标定、
    effort/current ceiling、固件安全动作及数值门槛仍待 bring-up；real backend 未实现。
    RealRobotIO v1 架构与 Unit 0–7 实施顺序已静态冻结（§19.18）；
-   下一单元仅做 Unit 0 — CommandFrame semantic target timing metadata。
-8. HIM observation / estimator / algorithm integration
+   quadruped_control production 实施已移交到其独立项目，非本项目当前任务。
+8. Black training configuration consolidation v2
+   （完成：black_config.py 是单一人工入口；flat/rough 默认配置逐字段等价，
+     CPU local migration verification 通过；CUDA 本轮设备不可用。）
+9. Black training/tuning workflow 或用户决定下一单元；HIM 暂不启动。
 ```
 
 已插入完成的非 behavior 任务：
 
 ```text
 configuration readability / tuning refactor v1   （完成，behavior-neutral）
+Black training configuration consolidation v2    （完成，behavior-neutral）
 ```
 
 进入每一步前重新检查实际代码和本文件。

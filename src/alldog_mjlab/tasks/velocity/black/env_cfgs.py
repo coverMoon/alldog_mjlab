@@ -2,7 +2,7 @@
 
 本文件回答的是「task 是怎么组装的」：term 顺序 contract、selector 绑定、
 sensor 装配、与 MjLab native 配置的差异。
-训练者要调的具体数值在 params.py，reward 数学在 rewards.py，
+训练者要调的具体数值在 black_config.py，reward 数学在 rewards.py，
 stateful termination 实现在 terminations.py。
 """
 
@@ -39,7 +39,7 @@ from alldog_mjlab.robots.black.black_constants import (
     BLACK_FOOT_NAMES,
     BLACK_JOINT_NAMES,
 )
-from alldog_mjlab.tasks.velocity.black import params
+from alldog_mjlab.tasks.velocity.black.black_config import BLACK_CONFIG
 from alldog_mjlab.tasks.velocity.black.rewards import (
     angular_velocity_xy_l2,
     base_height_l2_flat,
@@ -79,15 +79,14 @@ BLACK_ACTOR_OBS_TERM_ORDER = (
     "actions",
 )
 
-# Black actor observation 数值 contract：command 三分量缩放分别为
-# vx 2.0 / vy 2.0 / wz 0.25，其余为各分量的固定 scale。
+# Black actor observation 数值来自唯一人工参数入口；term 顺序仍由上方 contract 决定。
 BLACK_ACTOR_OBS_SCALE: dict[str, float | tuple[float, ...]] = {
-    "command": (2.0, 2.0, 0.25),
-    "base_ang_vel": 0.25,
-    "projected_gravity": 1.0,
-    "joint_pos": 1.0,
-    "joint_vel": 0.05,
-    "actions": 1.0,
+    "command": BLACK_CONFIG.observation.command_scale,
+    "base_ang_vel": BLACK_CONFIG.observation.base_ang_vel_scale,
+    "projected_gravity": BLACK_CONFIG.observation.projected_gravity_scale,
+    "joint_pos": BLACK_CONFIG.observation.joint_pos_scale,
+    "joint_vel": BLACK_CONFIG.observation.joint_vel_scale,
+    "actions": BLACK_CONFIG.observation.last_action_scale,
 }
 
 # 摔倒终止 sensor 身份与 body selector：trunk + 四 thigh 对 terrain。
@@ -130,20 +129,19 @@ BLACK_TERRAIN_SCAN_BODY = "trunk"
 BLACK_TERRAIN_SCAN_MAX_DISTANCE = 5.0
 
 # Black rough 的 MJWarp contact capacity。这是 backend / runtime workaround，不是
-# legacy Black behavior contract，也不是训练者调参项。
+# legacy Black behavior contract；数值见 black_config.py。
 # MjLab v1.6 velocity baseline 的 `SimulationCfg.nconmax = 35`
 # （mjlab/tasks/velocity/velocity_env_cfg.py）；Black rough 沿用该值时，多接触状态会在
 # MJWarp GPU convex narrowphase CCD 中触发 capacity-related CUDA runtime fault：
 # 固定 bad simulator state 下 nconmax=35 可确定性复现，>=48 不再触发。
 # 本项目取 128 留出余量（这是 project-side workaround：upstream MJWarp 根因尚未修复，
 # 也不声称 128 是理论最小值）。flat 保持 baseline 35 不变。
-BLACK_ROUGH_NCONMAX = 128
 
 
 def _configure_command(cfg: ManagerBasedRlEnvCfg) -> None:
     """Black flat v1 command contract：固定范围 + MjLab native sampler。
 
-    - 范围与重采样间隔来自 params.command，训练全程固定（不迁移任何 command
+    - 范围与重采样间隔来自 BLACK_CONFIG.command，训练全程固定（不迁移任何 command
       curriculum，`command_vel` 在本函数里移除）；
     - heading command 关闭（v1.6.0 要求 heading_command=False 时 ranges.heading 必须
       为 None，否则构建环境时报错）；`rel_heading_envs` 在 heading 关闭时不生效，
@@ -152,17 +150,17 @@ def _configure_command(cfg: ManagerBasedRlEnvCfg) -> None:
     """
     twist_command = cfg.commands[BLACK_COMMAND_NAME]
     assert isinstance(twist_command, UniformVelocityCommandCfg)
-    twist_command.resampling_time_range = params.command.resampling_time
-    twist_command.ranges.lin_vel_x = params.command.lin_vel_x
-    twist_command.ranges.lin_vel_y = params.command.lin_vel_y
-    twist_command.ranges.ang_vel_z = params.command.ang_vel_z
+    twist_command.resampling_time_range = BLACK_CONFIG.command.resampling_time
+    twist_command.ranges.lin_vel_x = BLACK_CONFIG.command.lin_vel_x
+    twist_command.ranges.lin_vel_y = BLACK_CONFIG.command.lin_vel_y
+    twist_command.ranges.ang_vel_z = BLACK_CONFIG.command.ang_vel_z
     twist_command.heading_command = False
     twist_command.rel_heading_envs = 0.0
     twist_command.ranges.heading = None
-    twist_command.rel_standing_envs = params.command.standing_fraction
-    twist_command.rel_forward_envs = params.command.forward_fraction
-    twist_command.rel_world_envs = params.command.world_fraction
-    twist_command.init_velocity_prob = params.command.init_velocity_prob
+    twist_command.rel_standing_envs = BLACK_CONFIG.command.standing_fraction
+    twist_command.rel_forward_envs = BLACK_CONFIG.command.forward_fraction
+    twist_command.rel_world_envs = BLACK_CONFIG.command.world_fraction
+    twist_command.init_velocity_prob = BLACK_CONFIG.command.init_velocity_prob
     # MjLab velocity baseline 自带 staged velocity curriculum；Black flat v1 不迁移
     # 任何 command curriculum，范围从训练开始到结束保持不变。
     cfg.curriculum.pop("command_vel", None)
@@ -225,7 +223,7 @@ def _configure_scene_and_sensors(cfg: ManagerBasedRlEnvCfg) -> None:
         fields=("found", "force"),
         reduce="none",
         num_slots=1,
-        history_length=params.termination.illegal_contact_history,
+        history_length=BLACK_CONFIG.termination.illegal_contact_history,
     )
     cfg.scene.sensors = (cfg.scene.sensors or ()) + (illegal_ground_contact,)
 
@@ -265,9 +263,9 @@ def _configure_events(cfg: ManagerBasedRlEnvCfg) -> None:
         reset_base / reset_hip_joints / reset_thigh_joints / reset_calf_joints
         foot_friction / payload_mass / base_com / pd_gains / encoder_bias / push_robot
 
-    数值全部来自 params（`_configure_play()` 会移除整组 DR）。
+    数值和启用开关全部来自 black_config.py（`_configure_play()` 会移除整组 DR）。
     """
-    dr_params = params.domain_randomization
+    dr_params = BLACK_CONFIG.domain_rand
     base_events = dict(cfg.events)
     trunk_cfg = SceneEntityCfg("robot", body_names=("trunk",))
 
@@ -277,8 +275,8 @@ def _configure_events(cfg: ManagerBasedRlEnvCfg) -> None:
     reset_base = replace(
         base_events["reset_base"],
         params={
-            "pose_range": dict(params.reset.root_pose),
-            "velocity_range": dict(params.reset.root_velocity),
+            "pose_range": dict(BLACK_CONFIG.reset.root_pose),
+            "velocity_range": dict(BLACK_CONFIG.reset.root_velocity),
         },
     )
     # 把单一的全机器人 joint reset 拆为 hip / thigh / calf 三个选择器互不重叠的
@@ -290,7 +288,7 @@ def _configure_events(cfg: ManagerBasedRlEnvCfg) -> None:
             base_joint_reset,
             params={
                 "position_range": position_range,
-                "velocity_range": params.reset.joint_velocity,
+                "velocity_range": BLACK_CONFIG.reset.joint_velocity,
                 "asset_cfg": SceneEntityCfg(
                     "robot",
                     joint_names=tuple(
@@ -299,7 +297,7 @@ def _configure_events(cfg: ManagerBasedRlEnvCfg) -> None:
                 ),
             },
         )
-        for joint_group, position_range in params.reset.joint_position.items()
+        for joint_group, position_range in BLACK_CONFIG.reset.joint_position.items()
     }
 
     cfg.events = {
@@ -368,6 +366,18 @@ def _configure_events(cfg: ManagerBasedRlEnvCfg) -> None:
             params={"velocity_range": dict(dr_params.push_velocity)},
         ),
     }
+    enabled = {
+        "foot_friction": dr_params.friction_enabled,
+        "payload_mass": dr_params.payload_enabled,
+        "base_com": dr_params.com_enabled,
+        "pd_gains": dr_params.pd_gain_enabled,
+        "encoder_bias": dr_params.encoder_bias_enabled,
+        "push_robot": dr_params.push_enabled,
+    }
+    cfg.events = {
+        name: term for name, term in cfg.events.items()
+        if name not in enabled or enabled[name]
+    }
 
 
 def _configure_rewards(cfg: ManagerBasedRlEnvCfg) -> None:
@@ -390,58 +400,58 @@ def _configure_rewards(cfg: ManagerBasedRlEnvCfg) -> None:
         # Command tracking（HIMLoco：exp(-error / sigma)）。
         "track_linear_velocity": RewardTermCfg(
             func=track_linear_velocity_xy,
-            weight=params.reward.tracking_linear,
+            weight=BLACK_CONFIG.reward.scales.tracking_linear,
             params={
                 "command_name": BLACK_COMMAND_NAME,
-                "sigma": params.reward.tracking_sigma,
+                "sigma": BLACK_CONFIG.reward.tracking_sigma,
             },
         ),
         "track_angular_velocity": RewardTermCfg(
             func=track_angular_velocity_z,
-            weight=params.reward.tracking_angular,
+            weight=BLACK_CONFIG.reward.scales.tracking_angular,
             params={
                 "command_name": BLACK_COMMAND_NAME,
-                "sigma": params.reward.tracking_sigma,
+                "sigma": BLACK_CONFIG.reward.tracking_sigma,
             },
         ),
         # Base stability。
         "lin_vel_z": RewardTermCfg(
             func=vertical_linear_velocity_l2,
-            weight=params.reward.lin_vel_z,
+            weight=BLACK_CONFIG.reward.scales.lin_vel_z,
         ),
         "body_ang_vel": RewardTermCfg(
             func=angular_velocity_xy_l2,
-            weight=params.reward.ang_vel_xy,
+            weight=BLACK_CONFIG.reward.scales.ang_vel_xy,
         ),
         # 与 HIMLoco `_reward_orientation` 严格一致，故直接用 native。
         "upright": RewardTermCfg(
             func=mdp.flat_orientation_l2,
-            weight=params.reward.orientation,
+            weight=BLACK_CONFIG.reward.scales.orientation,
         ),
         "base_height": RewardTermCfg(
             func=base_height_l2_flat,
-            weight=params.reward.base_height,
+            weight=BLACK_CONFIG.reward.scales.base_height,
             params={
-                "target_height": params.reward.base_height_target,
+                "target_height": BLACK_CONFIG.reward.base_height_target,
             },
         ),
         # Regularization。
         "dof_acc": RewardTermCfg(
             func=dof_acc_l2,
-            weight=params.reward.dof_acc,
+            weight=BLACK_CONFIG.reward.scales.dof_acc,
         ),
         "joint_power": RewardTermCfg(
             func=joint_power_l1,
-            weight=params.reward.joint_power,
+            weight=BLACK_CONFIG.reward.scales.joint_power,
         ),
         "action_rate_l2": RewardTermCfg(
             func=mdp.action_rate_l2,
-            weight=params.reward.action_rate,
+            weight=BLACK_CONFIG.reward.scales.action_rate,
         ),
         # HIMLoco `smoothness` 的二阶动作差分与 native action_acc_l2 严格一致。
         "smoothness": RewardTermCfg(
             func=mdp.action_acc_l2,
-            weight=params.reward.smoothness,
+            weight=BLACK_CONFIG.reward.scales.smoothness,
         ),
     }
 
@@ -450,7 +460,7 @@ def _configure_rough_rewards(cfg: ManagerBasedRlEnvCfg) -> None:
     """rough 只把 ``base_height`` 换成 local terrain-relative 语义。
 
     只替换 func / params：reward key 仍为 ``base_height``、weight 仍为
-    ``params.reward.base_height``、顺序仍为第 6 项，因此 rough 与 flat 的 reward 表
+    ``BLACK_CONFIG.reward.scales.base_height``、顺序仍为第 6 项，因此 rough 与 flat 的 reward 表
     除该项测量方式（world z vs local terrain clearance）外完全一致。
     其余 9 项 func / weight / params 均不变。
     """
@@ -460,7 +470,7 @@ def _configure_rough_rewards(cfg: ManagerBasedRlEnvCfg) -> None:
         term,
         func=base_height_l2_terrain,
         params={
-            "target_height": params.reward.base_height_target,
+            "target_height": BLACK_CONFIG.reward.base_height_target,
             "sensor_name": BLACK_TERRAIN_SCAN_SENSOR,
         },
     )
@@ -477,7 +487,7 @@ def _configure_rough_sim(cfg: ManagerBasedRlEnvCfg) -> None:
     upstream MJWarp 根因已修复。只改 ``nconmax``；``njmax`` 等其余 sim capacity 保持
     baseline 不变。
     """
-    cfg.sim.nconmax = BLACK_ROUGH_NCONMAX
+    cfg.sim.nconmax = BLACK_CONFIG.simulation.rough_nconmax
 
 
 def _configure_flat_terrain(cfg: ManagerBasedRlEnvCfg) -> None:
@@ -512,7 +522,7 @@ def _configure_rough_terrain(cfg: ManagerBasedRlEnvCfg) -> None:
     assert cfg.scene.terrain is not None
     cfg.scene.terrain.terrain_type = "generator"
     cfg.scene.terrain.terrain_generator = black_rough_terrain_generator_cfg()
-    cfg.scene.terrain.max_init_terrain_level = params.terrain.max_init_terrain_level
+    cfg.scene.terrain.max_init_terrain_level = BLACK_CONFIG.terrain.max_init_terrain_level
 
     terrain_scans = [
         sensor
@@ -590,10 +600,10 @@ def _configure_observations(cfg: ManagerBasedRlEnvCfg) -> None:
     # 同样用 replace 生成独立 term cfg，避免通过共享对象改动 critic term。
     # term → noise 的映射属于 observation wiring，因此留在这里而不是参数对象内部。
     actor_noise = {
-        "base_ang_vel": params.observation_noise.base_ang_vel,
-        "projected_gravity": params.observation_noise.projected_gravity,
-        "joint_pos": params.observation_noise.joint_pos,
-        "joint_vel": params.observation_noise.joint_vel,
+        "base_ang_vel": BLACK_CONFIG.noise.base_ang_vel,
+        "projected_gravity": BLACK_CONFIG.noise.projected_gravity,
+        "joint_pos": BLACK_CONFIG.noise.joint_pos,
+        "joint_vel": BLACK_CONFIG.noise.joint_vel,
     }
     for term_name in BLACK_ACTOR_OBS_TERM_ORDER:
         noise_range = actor_noise.get(term_name)
@@ -606,6 +616,9 @@ def _configure_observations(cfg: ManagerBasedRlEnvCfg) -> None:
                 else None
             ),
         )
+    cfg.observations["actor"].enable_corruption = (
+        BLACK_CONFIG.observation.actor_corruption_enabled and BLACK_CONFIG.noise.enabled
+    )
     # critic（privileged）observation：flat v1 不含 height_scan，且 term 顺序由常量
     # 显式重建，不依赖 native `critic_terms = {**actor_terms, ...}` 的 dict 顺序。
     # rough 的 height_scan 由 `_configure_rough_privileged_observation()` 追加。
@@ -628,7 +641,7 @@ def _configure_terminations(cfg: ManagerBasedRlEnvCfg) -> None:
         func=mdp.illegal_contact,
         params={
             "sensor_name": BLACK_ILLEGAL_CONTACT_SENSOR,
-            "force_threshold": params.termination.illegal_contact_force,
+            "force_threshold": BLACK_CONFIG.termination.illegal_contact_force,
         },
     )
     # Stuck termination：沿 planar command 方向无 progress 的连续时长超过阈值。
@@ -638,10 +651,10 @@ def _configure_terminations(cfg: ManagerBasedRlEnvCfg) -> None:
         params={
             "command_name": BLACK_COMMAND_NAME,
             "asset_cfg": SceneEntityCfg("robot"),
-            "command_threshold": params.termination.stuck_command_threshold,
-            "velocity_threshold": params.termination.stuck_velocity_threshold,
-            "grace_s": params.termination.stuck_grace,
-            "timeout_s": params.termination.stuck_timeout,
+            "command_threshold": BLACK_CONFIG.termination.stuck_command_threshold,
+            "velocity_threshold": BLACK_CONFIG.termination.stuck_velocity_threshold,
+            "grace_s": BLACK_CONFIG.termination.stuck_grace,
+            "timeout_s": BLACK_CONFIG.termination.stuck_timeout,
         },
     )
     cfg.terminations.pop("out_of_terrain_bounds", None)
@@ -665,6 +678,10 @@ def _configure_rough_terminations(cfg: ManagerBasedRlEnvCfg) -> None:
 
 def _configure_common_runtime(cfg: ManagerBasedRlEnvCfg) -> None:
     """不属于上面各分组的少量 task 级字段。"""
+    cfg.scene.num_envs = BLACK_CONFIG.env.num_envs
+    cfg.episode_length_s = BLACK_CONFIG.env.episode_length_s
+    cfg.decimation = BLACK_CONFIG.control.decimation
+    cfg.sim.mujoco.timestep = BLACK_CONFIG.control.physics_dt
     cfg.viewer.body_name = "trunk"
     cfg.viewer.distance = 1.5
     cfg.viewer.elevation = -10.0
