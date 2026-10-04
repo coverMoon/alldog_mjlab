@@ -358,10 +358,23 @@ class AlgorithmParams:
 
 
 @dataclass(frozen=True)
+class StageRunnerParams:
+    run_name: str
+    load_run: str
+
+
+@dataclass(frozen=True)
 class RunnerParams:
     # MjLab v1.6 runner 默认 seed=42；由官方 CLI 覆盖时以 CLI 为准。
     seed: int = 42
     experiment_name: str = "black_velocity"
+    # 同一 checkpoint-compatible policy family；stage 仅决定 run 名称与默认来源。
+    flat: StageRunnerParams = field(
+        default_factory=lambda: StageRunnerParams(run_name="flat", load_run=r".*_flat$")
+    )
+    rough: StageRunnerParams = field(
+        default_factory=lambda: StageRunnerParams(run_name="rough", load_run=r".*_rough$")
+    )
     save_interval: int = 50
     num_steps_per_env: int = 24
     max_iterations: int = 10_000

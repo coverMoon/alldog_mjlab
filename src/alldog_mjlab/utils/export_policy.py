@@ -26,8 +26,9 @@ uv run export --task-id black-rough --load-run 2026-09-18_19-37-17 \
 ```
 
 默认用 MjLab v1.6 ``get_checkpoint_path()`` 从
-``logs/rsl_rl/<experiment_name>`` 选择最新匹配 run / checkpoint，输出到
-``<run>/exported/policy.pt``。
+``logs/rsl_rl/<experiment_name>`` 按 task runner 的 ``load_run`` 选择最新同 stage
+run（Black flat / rough 分别匹配 ``.*_flat$`` / ``.*_rough$``），再选择最新匹配
+checkpoint，输出到 ``<run>/exported/policy.pt``。显式 ``--load-run`` 可访问 legacy run。
 """
 
 import argparse
@@ -57,18 +58,21 @@ PROBE_SEED = 42
 
 def resolve_export_paths(
     task_id: str,
-    load_run: str = ".*",
+    load_run: str | None = None,
     checkpoint_pattern: str = "model_.*.pt",
     output_dir: Path | None = None,
 ) -> tuple[str, Path, Path]:
     """按 MjLab v1.6 规则选择 checkpoint，并确定固定文件名的输出路径。"""
     try:
-        experiment_name = load_rl_cfg(task_id).experiment_name
+        agent_cfg = load_rl_cfg(task_id)
     except KeyError as exc:
         raise ValueError(f"unknown task id: {task_id}") from exc
+    experiment_name = agent_cfg.experiment_name
     log_root = Path("logs/rsl_rl") / experiment_name
     checkpoint = get_checkpoint_path(
-        log_root, run_dir=load_run, checkpoint=checkpoint_pattern
+        log_root,
+        run_dir=agent_cfg.load_run if load_run is None else load_run,
+        checkpoint=checkpoint_pattern,
     )
     export_dir = (
         checkpoint.parent / "exported" if output_dir is None else output_dir.expanduser()
@@ -240,7 +244,7 @@ def run_export(task_id: str, checkpoint: Path, output: Path, device: str) -> dic
 def main() -> None:
     parser = argparse.ArgumentParser(description="导出并验证 MjLab checkpoint 中的 Black PPO actor")
     parser.add_argument("--task-id", required=True, help="已注册的 MjLab task ID")
-    parser.add_argument("--load-run", default=".*", help="run 目录名或正则；默认匹配全部")
+    parser.add_argument("--load-run", help="run 目录名或正则；默认使用 task 的 stage 匹配规则")
     parser.add_argument(
         "--checkpoint",
         default="model_.*.pt",

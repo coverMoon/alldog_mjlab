@@ -1,5 +1,7 @@
 """RL configuration for Black velocity tasks."""
 
+from typing import Literal
+
 from mjlab.rl import (
     RslRlModelCfg,
     RslRlOnPolicyRunnerCfg,
@@ -9,10 +11,13 @@ from mjlab.rl import (
 from .black_config import BLACK_CONFIG
 
 
-def black_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
+def black_ppo_runner_cfg(stage: Literal["flat", "rough"]) -> RslRlOnPolicyRunnerCfg:
     policy = BLACK_CONFIG.policy
     algorithm = BLACK_CONFIG.algorithm
     runner = BLACK_CONFIG.runner
+    if stage not in ("flat", "rough"):
+        raise ValueError(f"unknown Black training stage: {stage}")
+    stage_runner = getattr(runner, stage)
     return RslRlOnPolicyRunnerCfg(
         actor=RslRlModelCfg(
             hidden_dims=policy.actor_hidden_dims,
@@ -47,6 +52,8 @@ def black_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
         ),
         seed=runner.seed,
         experiment_name=runner.experiment_name,
+        run_name=stage_runner.run_name,
+        load_run=stage_runner.load_run,
         save_interval=runner.save_interval,
         num_steps_per_env=runner.num_steps_per_env,
         max_iterations=runner.max_iterations,

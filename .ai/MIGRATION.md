@@ -23,6 +23,7 @@ Black RealRobotIO v1 architecture / implementation plan: COMPLETE（静态；§1
 Black training configuration consolidation v2: COMPLETE（behavior-neutral）
 Black flat/rough shared critic height scan: COMPLETE（flat critic 72→259；§13.4）
 Black actor export short CLI: COMPLETE（§19.3）
+Black stage-aware run / resume / export: COMPLETE（§2 / §19.3）
 Hardware effort/current ceiling: UNCONFIRMED（实机前确认）
 ```
 
@@ -112,6 +113,39 @@ terminations.py
 `black_config.py` 只是人工数值来源，MjLab `ManagerBasedRlEnvCfg` 仍是唯一 runtime
 environment config；`rl_cfg.py` 把 policy/algorithm/runner sections 转成 RSL-RL cfg。
 policy joint/action/observation term order 仍由 `robots/black` 和 `env_cfgs.py` 明确绑定。
+
+### Black stage-aware run / resume
+
+`experiment_name = black_velocity` 继续表示共同 checkpoint-compatible policy family。
+stage 默认值由 `BLACK_CONFIG.runner.flat` / `.rough` 集中管理：
+
+```text
+black-flat   run_name=flat    load_run=.*_flat$
+black-rough  run_name=rough   load_run=.*_rough$
+```
+
+MjLab v1.6 原生 train 创建 `<timestamp>_<run_name>`，不新增 train/resume 入口。
+同 stage 的 `--agent.resume True` 默认从该 stage 最新匹配 run/checkpoint 完整续训；
+跨 stage 命令为 `uv run train black-rough --agent.resume True --agent.load-run '.*_flat$'`，
+来源为 flat，目标环境与新 run 为 rough。名称/正则解析均使用 native `get_checkpoint_path()`。
+
+Full resume 保持 MjLab / RSL-RL 默认语义：actor、critic、normalizer、optimizer、
+checkpoint learning rate、iteration 完整恢复；MjLab 额外仅恢复
+`env_state.common_step_counter`。rough 环境重新构造，flat simulator、terrain levels
+和其他 runtime state 不复制。native rough curriculum 仅在 counter=0 的首次 reset
+跳过升级/降级；wrapper 在 load 前完成首次 reset，load 后 counter 原样恢复，后续
+curriculum 仍按 target rough env 的行走距离与 command 计算，不重置 counter。
+`max_iterations` 是 additional iterations，不是最终 iteration 上限。
+
+当前两项 task 的 runtime actor 均为 MLPModel 45→512→256→128→12（无 normalization），
+critic 均为 MLPModel 259→512→256→128→1（有 normalization），GaussianDistribution
+与 PPO 配置一致；仅 runner `run_name/load_run` 不同。CPU config/path/native CLI
+命名检查 PASS；新 flat 2-iteration checkpoint → rough 的严格完整加载 PASS。
+历史 `2026-09-18_19-37-17/model_498.pt` 经实查 critic 为 259-D，当前严格完整加载
+PASS：iter=498、counter=12000、学习率≈1.7086e-4，模型/normalizer/optimizer 逐值恢复。
+该历史 run 保持原身份与路径，不强行归类、不参与默认 stage 匹配；显式 load-run
+仍可访问。旧 72-D flat checkpoint 不满足当前 full-resume 结构要求，actor-only
+export 可独立使用。CUDA 不可用，SKIPPED；本单元未验证跨 stage 长期训练收敛。
 
 本地 migration verification：
 
@@ -2107,12 +2141,15 @@ checkpoint 加载   MjLab runner 的 load(..., load_cfg={"actor": True}, strict=
 
 当前标准入口：`uv run export --task-id <task>`。由 `load_rl_cfg(task_id)` 取得
 `experiment_name`，在 `logs/rsl_rl/<experiment_name>` 下直接使用 MjLab v1.6
-`get_checkpoint_path()` 选择最新匹配 run（默认 `.*`）与 checkpoint（默认
+`get_checkpoint_path()` 按 task runner 的 stage 默认 `load_run`（flat 为 `.*_flat$`，
+rough 为 `.*_rough$`）选择最新匹配 run 与 checkpoint（默认
 `model_.*.pt`），输出到 `<run>/exported/policy.pt`。可用 `--load-run`、
 `--checkpoint` 指定名称或正则，用 `--output-dir` 改输出目录；文件名始终为
 `policy.pt`，设备默认 CPU。Black flat / rough 当前共用 `black_velocity` 日志目录，
-因此默认按日志中的最新 run 选择，具体 checkpoint 以打印路径为准。
+因此在共同 root 中分别按 stage 选择；历史无后缀 run 仅通过显式 `--load-run` 访问。
 CLI 仅改变路径解析；actor 加载、RSL-RL 原生 JIT 导出与三组 probe 数值等价验证不变。
+无对应 stage run 时明确报无匹配，不回退到 legacy run。显式 legacy `model_498.pt`
+actor-only CPU export 三组 probe 误差均为 0，TorchScript 独立 reload PASS。
 
 导出模块的 deployment contract（冻结）：
 
