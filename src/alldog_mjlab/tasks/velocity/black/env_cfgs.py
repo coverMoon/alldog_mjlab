@@ -103,10 +103,10 @@ BLACK_ILLEGAL_CONTACT_BODIES = (
 # Command term 名称属于 task wiring：reward / termination / observation 都按名字取它。
 BLACK_COMMAND_NAME = "twist"
 
-# Black critic（privileged）observation 顺序 contract。flat 为 MjLab velocity baseline
-# 的 privileged 派生（72 维）；rough 只在末尾追加 terrain height scan（+187 = 259 维）。
+# Black flat / rough 共用 critic（privileged）observation 顺序 contract：
+# MjLab velocity baseline 的 72 维之后追加 terrain height scan（+187 = 259 维）。
 # 显式重建顺序，不依赖 native `critic_terms = {**actor_terms, ...}` 的 dict 顺序。
-BLACK_FLAT_CRITIC_TERM_ORDER = (
+BLACK_BASE_CRITIC_TERM_ORDER = (
     "base_lin_vel",
     "base_ang_vel",
     "projected_gravity",
@@ -119,7 +119,7 @@ BLACK_FLAT_CRITIC_TERM_ORDER = (
     "foot_contact",
     "foot_contact_forces",
 )
-BLACK_ROUGH_CRITIC_TERM_ORDER = BLACK_FLAT_CRITIC_TERM_ORDER + ("height_scan",)
+BLACK_CRITIC_TERM_ORDER = BLACK_BASE_CRITIC_TERM_ORDER + ("height_scan",)
 
 # Terrain height scan sensor 身份 contract。sensor 对象复用 MjLab v1.6 native
 # `terrain_scan`（GridPatternCfg(size=(1.6, 1.0), resolution=0.1) = 17 x 11 = 187 rays，
@@ -491,20 +491,11 @@ def _configure_rough_sim(cfg: ManagerBasedRlEnvCfg) -> None:
 
 
 def _configure_flat_terrain(cfg: ManagerBasedRlEnvCfg) -> None:
-    """flat task specialization：plane terrain、无 terrain generator / scan / curriculum。
-
-    `terrain_scan` sensor 在这里从 scene 移除（critic 侧的 height_scan term 由
-    `_configure_observations()` 移除），因此 flat 不承担 raycast 开销。
-    """
+    """flat task specialization：plane terrain、无 terrain generator / curriculum。"""
     assert cfg.scene.terrain is not None
     cfg.scene.terrain.terrain_type = "plane"
     cfg.scene.terrain.terrain_generator = None
 
-    cfg.scene.sensors = tuple(
-        sensor
-        for sensor in (cfg.scene.sensors or ())
-        if sensor.name != BLACK_TERRAIN_SCAN_SENSOR
-    )
     cfg.curriculum.pop("terrain_levels", None)
 
 
@@ -514,16 +505,16 @@ def _configure_rough_terrain(cfg: ManagerBasedRlEnvCfg) -> None:
     覆盖 `_configure_flat_terrain()` 的 plane / 无 generator；generator 内部
     `curriculum=True`，因此列数 = terrain 类型数（5），`proportion` 是 env 分配权重。
 
-    `terrain_scan` 复用 MjLab v1.6 native sensor（geometry / ray_alignment /
-    max_distance 全部保持 native），只把 frame 绑到 trunk（与 native rough task 相同），
-    供 `_configure_rough_privileged_observation()` 的 critic height scan 使用；
-    flat specialization 会移除这个 sensor，因此两者不会同时存在。
+    terrain scan 的公共绑定由 `_configure_terrain_scan()` 处理。
     """
     assert cfg.scene.terrain is not None
     cfg.scene.terrain.terrain_type = "generator"
     cfg.scene.terrain.terrain_generator = black_rough_terrain_generator_cfg()
     cfg.scene.terrain.max_init_terrain_level = BLACK_CONFIG.terrain.max_init_terrain_level
 
+
+def _configure_terrain_scan(cfg: ManagerBasedRlEnvCfg) -> None:
+    """flat / rough 共用 native terrain_scan，并将 frame 绑到 trunk。"""
     terrain_scans = [
         sensor
         for sensor in (cfg.scene.sensors or ())
@@ -537,8 +528,8 @@ def _configure_rough_terrain(cfg: ManagerBasedRlEnvCfg) -> None:
     terrain_scan.frame.name = BLACK_TERRAIN_SCAN_BODY
 
 
-def _configure_rough_privileged_observation(cfg: ManagerBasedRlEnvCfg) -> None:
-    """rough critic 在 flat 72 维之后追加 187 维 terrain height scan。
+def _configure_privileged_height_observation(cfg: ManagerBasedRlEnvCfg) -> None:
+    """flat / rough critic 均在原 72 维之后追加 187 维 terrain height scan。
 
     数值语义为 native `envs_mdp.height_scan()`：raw = sensor frame z - terrain hit z
     （offset 0），scale = 1 / max_distance = 0.2，无 noise / 无 clip；不做 legacy 的
@@ -546,13 +537,13 @@ def _configure_rough_privileged_observation(cfg: ManagerBasedRlEnvCfg) -> None:
     difference，见 MIGRATION.md）。actor 不含 height_scan（仍 45 维）。
     """
     critic_terms = cfg.observations["critic"].terms
-    assert tuple(critic_terms) == BLACK_FLAT_CRITIC_TERM_ORDER, tuple(critic_terms)
+    assert tuple(critic_terms) == BLACK_BASE_CRITIC_TERM_ORDER, tuple(critic_terms)
     critic_terms["height_scan"] = ObservationTermCfg(
         func=envs_mdp.height_scan,
         params={"sensor_name": BLACK_TERRAIN_SCAN_SENSOR},
         scale=1.0 / BLACK_TERRAIN_SCAN_MAX_DISTANCE,
     )
-    assert tuple(critic_terms) == BLACK_ROUGH_CRITIC_TERM_ORDER, tuple(critic_terms)
+    assert tuple(critic_terms) == BLACK_CRITIC_TERM_ORDER, tuple(critic_terms)
 
 
 def _configure_terrain_curriculum(cfg: ManagerBasedRlEnvCfg) -> None:
@@ -619,13 +610,12 @@ def _configure_observations(cfg: ManagerBasedRlEnvCfg) -> None:
     cfg.observations["actor"].enable_corruption = (
         BLACK_CONFIG.observation.actor_corruption_enabled and BLACK_CONFIG.noise.enabled
     )
-    # critic（privileged）observation：flat v1 不含 height_scan，且 term 顺序由常量
-    # 显式重建，不依赖 native `critic_terms = {**actor_terms, ...}` 的 dict 顺序。
-    # rough 的 height_scan 由 `_configure_rough_privileged_observation()` 追加。
+    # critic（privileged）observation：先重建原 72 维顺序，再为 flat / rough
+    # 共用的 `_configure_privileged_height_observation()` 追加 height_scan。
     critic_terms = cfg.observations["critic"].terms
     critic_terms.pop("height_scan", None)
     cfg.observations["critic"].terms = {
-        name: critic_terms[name] for name in BLACK_FLAT_CRITIC_TERM_ORDER
+        name: critic_terms[name] for name in BLACK_BASE_CRITIC_TERM_ORDER
     }
 
 
@@ -716,17 +706,15 @@ def _foot_geom_names() -> tuple[str, ...]:
 
 
 def _build_black_env_cfg(play: bool, rough: bool) -> ManagerBasedRlEnvCfg:
-    """flat / rough 共用装配路径：二者只差 terrain specialization 与 critic height scan。
+    """flat / rough 共用装配路径：二者只差 terrain specialization 等任务语义。
 
     顺序：command / scene+sensors / actions / events / rewards（rough 再覆盖 base_height
-    与 sim contact capacity）→ flat 或 rough terrain → observations（rough 追加 critic
-    height scan）→ terminations（rough 追加 out_of_terrain_bounds）/ common runtime
+    与 sim contact capacity）→ flat 或 rough terrain → 公共 terrain scan / observations
+    → terminations（rough 追加 out_of_terrain_bounds）/ common runtime
     → terrain curriculum（仅 rough 训练）→ play。
 
-    rough 专门化保留 native `terrain_scan` sensor（flat 专门化会移除它），因此不再
-    需要从 flat 配置事后恢复 sensor，也不复制 MjLab baseline 的 sensor / observation
-    dict。action / observation / reward / reset / termination / DR / command 的装配
-    与已冻结 contract 完全一致。
+    flat / rough 均保留 native `terrain_scan` sensor，使用相同 critic layout；
+    actor、reward、reset、termination、DR、command 的现有装配保持不变。
     """
     cfg = make_velocity_env_cfg()
 
@@ -741,9 +729,9 @@ def _build_black_env_cfg(play: bool, rough: bool) -> ManagerBasedRlEnvCfg:
         _configure_rough_terrain(cfg)
     else:
         _configure_flat_terrain(cfg)
+    _configure_terrain_scan(cfg)
     _configure_observations(cfg)
-    if rough:
-        _configure_rough_privileged_observation(cfg)
+    _configure_privileged_height_observation(cfg)
     _configure_terminations(cfg)
     if rough:
         _configure_rough_terminations(cfg)
@@ -759,8 +747,7 @@ def _build_black_env_cfg(play: bool, rough: bool) -> ManagerBasedRlEnvCfg:
 def black_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     """Create the flat-ground velocity task for Black.
 
-    actor 45 维单帧；critic 72 维（MjLab-derived privileged baseline，不含
-    height_scan）；terrain 为 plane，scene 里没有 terrain_scan。
+    actor 45 维单帧；critic 259 维（末尾 187 维 height_scan）；terrain 为 plane。
     """
     return _build_black_env_cfg(play=play, rough=False)
 
@@ -768,8 +755,8 @@ def black_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 def black_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     """Create the rough-terrain velocity task for Black（flat contract + rough terrain）。
 
-    actor 仍为 45 维单帧（不含 height_scan）；critic 在 flat 的 72 维之后追加 187 维
-    terrain height scan，共 259 维。terrain 装配见 `_configure_rough_terrain()`。
+    actor 仍为 45 维单帧（不含 height_scan）；critic 与 flat 相同，为 259 维。
+    terrain 装配见 `_configure_rough_terrain()`。
 
     play 模式沿用 flat play contract（无 DR / 无 corruption / episode 极长 /
     `curriculum = {}`），并保留同一 generator 布局与 env 分配比例，因此 play 看到的

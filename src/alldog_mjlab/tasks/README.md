@@ -20,9 +20,10 @@ tasks/
 
 - 机器人模型、初始姿态和控制参数归 `robots/black`。
 - 环境配置通过 MjLab velocity factory 创建，每次调用返回独立配置。
-- `black-rough` 在 `black-flat` 之上覆盖 terrain generator、terrain curriculum、terrain
-  scan 与 critic privileged height（critic 由 72 维增至 259 维，actor 仍 45 维），把
-  `base_height` 换为 local terrain-relative 语义，并在 training 下末尾追加 native
+- `black-flat` 与 `black-rough` 共用 terrain scan 和 259 维 privileged critic（末尾
+  187 维为高度扫描；actor 均为 45 维）。`black-rough` 在 `black-flat` 之上覆盖 terrain
+  generator、terrain curriculum，把 `base_height` 换为 local terrain-relative 语义，
+  并在 training 下末尾追加 native
   `out_of_terrain_bounds` safety truncation（play 移除）；其余 9 项 reward 与 DR /
   command 仍是 flat contract；约 500 iteration 的 PPO baseline 已完成，长期收敛与
   定量评估尚未完成

@@ -21,15 +21,21 @@ Black real backend v1 IMU / orientation contract: COMPLETE（静态；§19.16）
 Black real backend v1 timing / freshness / failure contract: COMPLETE（静态；§19.17）
 Black RealRobotIO v1 architecture / implementation plan: COMPLETE（静态；§19.18）
 Black training configuration consolidation v2: COMPLETE（behavior-neutral）
+Black flat/rough shared critic height scan: COMPLETE（flat critic 72→259；§13.4）
 Hardware effort/current ceiling: UNCONFIRMED（实机前确认）
 ```
 
-Black flat PPO baseline、Black rough PPO baseline（约 500 iteration，见 §17.2）与 rough 的
-MJWarp runtime workaround（`nconmax = 128`，见 §10）均已完成。Black PPO 部署契约、
+旧版 Black flat PPO baseline（critic 72）、Black rough PPO baseline（critic 259，
+约 500 iteration，见 §17.2）与 rough 的 MJWarp runtime workaround
+（`nconmax = 128`，见 §10）均已完成。Black PPO 部署契约、
 `rl_sar` 与 `quadruped_control` 的 config / trace / rollout，以及训练侧跨 runtime
 observation、actor、pre-safety `q_policy` 比较均已通过（§17.10 / §19.12）。
 `quadruped_control` 的硬件位置裁剪属于已确认的 deployment safety layer；最终
 `q_command` 有意不同。MJWarp GPU convex CCD 的 upstream 根因尚未修复。
+当前 flat 配置已改为 259-D critic，与 rough 同 layout；该配置尚未重新长训。
+旧 flat 72-D critic checkpoint 不能直接作为当前 flat/rough 的完整 PPO resume 起点。
+新 flat 配置生成的 2-iteration CPU checkpoint 已在 rough runner 严格完整加载
+（actor / critic / optimizer，非长期训练效果验证）。
 
 当前尚未进入：
 
@@ -1151,11 +1157,11 @@ max_episode_length_s x 0.5 降一级；达到 num_rows 时随机新 level；首�
 
 ### 13.4 Terrain scan 与 critic privileged height
 
-rough 的 terrain scan 复用 MjLab v1.6 native `terrain_scan` sensor（`RayCastSensorCfg`），
-只把 frame 绑到 `robot/trunk`（与 native rough task 相同）：
+flat 与 rough 共用 MjLab v1.6 native `terrain_scan` sensor（`RayCastSensorCfg`），
+均把 frame 绑到 `robot/trunk`（与 native rough task 相同）：
 
 ```text
-name                 terrain_scan（恰好一个；flat 会移除它）
+name                 terrain_scan（flat / rough 各恰好一个）
 frame                robot 的 trunk body
 ray_alignment        "yaw"（随 yaw 旋转，不随 roll / pitch 倾斜；ray 恒为 world-down）
 pattern              GridPatternCfg(size=(1.6, 1.0), resolution=0.1) = 17 x 11 = 187 rays
@@ -1169,8 +1175,8 @@ include_geom_groups  (0,)（仅 terrain）
 observation 维度 contract：
 
 ```text
-black-flat   actor 45 / critic 72   （无 terrain_scan）
-black-rough  actor 45 / critic 259 = flat critic 72 + height_scan 187
+black-flat   actor 45 / critic 259 = 原 privileged 72 + height_scan 187
+black-rough  actor 45 / critic 259 = 原 privileged 72 + height_scan 187
 ```
 
 critic term 顺序被显式冻结（不依赖 native `critic_terms = {**actor_terms, ...}` 的 dict 顺序）：
@@ -1178,7 +1184,7 @@ critic term 顺序被显式冻结（不依赖 native `critic_terms = {**actor_te
 ```text
 base_lin_vel, base_ang_vel, projected_gravity, joint_pos, joint_vel, actions,
 command, foot_height, foot_air_time, foot_contact, foot_contact_forces,
-height_scan            ← 仅 rough，追加在最后
+height_scan            ← flat / rough 共用，追加在最后
 ```
 
 height_scan 数值语义为 native `mjlab.envs.mdp.height_scan()`：
@@ -1190,6 +1196,10 @@ noise = 无
 clip  = 无
 ```
 
+flat plane 的 CPU reset/rollout 检查确认 187 条 ray 均命中 z=0，critic 最后
+187 维逐值等于 raw height scan × 0.2；rough 原有 scan 与 terrain 检查继续通过。
+flat 的 `base_height` reward 仍按 world-z 计算，rough 仍按 local terrain clearance。
+
 Intentional difference（**不是 legacy 238-D / HIM privileged observation migration**）：
 
 ```text
@@ -1199,7 +1209,7 @@ legacy（super-dog black_env.py）
     height noise raw scale = 0.1
     privileged = 45 + base_lin_vel 3 + external disturbance 3 + heights 187 = 238
 
-Black rough PPO v1
+Black flat / rough PPO 当前配置
     MjLab native height_scan 语义（offset 0、scale 0.2、无 noise / clip）
     不含 external disturbance 分量；45 + 3 + 187 的 238-D layout 属于后续 HIM
     observation contract，不在本 baseline 内
@@ -1302,11 +1312,11 @@ Black flat v1 有意不迁任何 command curriculum（见 §4）：范围固定�
 
 ### Critic Observation
 
-flat critic 沿用 MjLab privileged observation（72 维）。
-rough critic 在 flat 72 维之后追加 187 维 terrain height scan（共 259 维，见 §13.4）。
+flat / rough critic 均在原 MjLab privileged observation 72 维之后追加 187 维
+terrain height scan（共 259 维，见 §13.4）；flat plane 也保留 raycast。
 旧 Black/HIM privileged critic layout（238-D）尚未迁移。
-
-不要在 PPO actor 任务中修改 critic layout。
+这次只改 critic 输入；actor 45-D 与部署接口不变。新 flat checkpoint 向 rough
+完整续训的 checkpoint 加载已完成小规模 CPU smoke；训练收敛需后续验证。
 
 ------
 
@@ -1347,9 +1357,10 @@ tests/render_black_rough.py      rough terrain 的可视化渲染（人工检查
 
 作为 migration verification tool。
 
-`tests/check_black_rough.py` 覆盖（见 §13 / §13.4）：flat 仍为 plane / 空 curriculum /
-无 terrain_scan；rough generator 的 size / num_rows / difficulty_range / border /
-max_init / 5 类 sub-terrain 与 proportion；curriculum 只含 terrain_levels；逐行难度
+`tests/check_black_rough.py` 覆盖（见 §13 / §13.4）：flat 仍为 plane / 空 curriculum，
+与 rough 共用 terrain_scan 和 critic layout；rough generator 的 size / num_rows /
+difficulty_range / border / max_init / 5 类 sub-terrain 与 proportion；curriculum 只含
+terrain_levels；逐行难度
 0.0 → 0.9；slope = 0.7d、rough noise ±(0.015 + 0.1d) / step 0.005 / downsample 0.2、
 obstacle height 0.06 + 0.2d；50 个 spawn origin 的 ray-cast 落面检查；terrain_scan
 sensor 唯一性与 frame / alignment / grid 187 rays / max_distance；actor 45-D 与
@@ -1862,7 +1873,7 @@ trunk、IMU 和四足 world pose 差为零；传感器绑定不变，静态值�
 当前 flat/rough 环境中的 trunk/thigh contact、四足碰撞、terrain-scan、viewer、
 payload/COM selectors 均能解析。`tests/check_black_flat.py --device cpu` 与
 `tests/check_black_rough.py --device cpu` 均 PASS。冻结的 rough `model_498.pt`
-因 critic 输入 259-D 不能整包加载到 flat 72-D critic；使用 MjLab/RSL-RL 原生
+在当时因 critic 输入 259-D 不能整包加载到旧 flat 72-D critic；使用 MjLab/RSL-RL 原生
 actor-only checkpoint load，在 black-flat play 环境以 zero 与 `vx=0.6` 各走
 100 policy step：actor 45→12、无 NaN/重置/立即摔倒，root 最低约 0.440/0.449 m。
 **Classification：behavior-neutral structural asset fix，regression PASS。**
