@@ -19,6 +19,7 @@ Black real backend v1 motor mapping / calibration contract: COMPLETE（静态；
 Black real backend v1 actuator / PD contract: COMPLETE（静态；§19.15）
 Black real backend v1 IMU / orientation contract: COMPLETE（静态；§19.16）
 Black real backend v1 timing / freshness / failure contract: COMPLETE（静态；§19.17）
+Black RealRobotIO v1 architecture / implementation plan: COMPLETE（静态；§19.18）
 Hardware effort/current ceiling: UNCONFIRMED（实机前确认）
 ```
 
@@ -41,8 +42,8 @@ BlackW migration
 next decision：
 
 ```text
-Black RealRobotIO v1 backend architecture / implementation plan
-（下一候选单元；尚未开始）
+Unit 0 — CommandFrame semantic target timing metadata
+（下一 implementation unit；尚未开始，先于 real hardware config）
 ```
 
 ------
@@ -2705,7 +2706,8 @@ COMMAND；joint/IMU 失效则属于状态完整性故障，不得仅清零速度
 最多跨一次 20 ms policy 更新，下一更新仍失败便退出 RL。此 hold 不能
 复用过期 CommandFrame，低层须发带新时间戳的命令，且不更新 previous_action。
 **当前同步 MotionRuntime 没有该路径，real backend 不可直接沿用**；
-下一架构单元须决定调度/有限 hold 的实现及独立写命令 watchdog，再做实机启用。
+执行侧独立调度与有限 hold 的架构见 §19.18，完成相应 implementation units
+之前不得启用实机主动控制。
 policy 异常、非有限/错维输出、非有限 state、无效姿态、标定缺失、critical motor
 fault、持续超龄/通信失败及 E-stop 不允许继续 RL 或 hold 旧 RL 目标。
 
@@ -2720,7 +2722,7 @@ Kd=3 joint-side、tau=0；旧安全分支拟用 joint-side Kd=6 但上述 latch 
 自动解释为物理断电或安全支撑**。当前 `GetDown` 可在有 rest pose、
 状态和执行侧安全条件满足时从 RL 受控趴下；`Stand` 请求从 Running 被拒绝，
 `EnterPassive` 立即 Disabled。正常退出优先用 GetDown；若需 RL→Stand，
-须在下一架构单元明确过渡，不得声称现有代码已支持。
+须单独定义过渡，不得声称现有代码已支持。
 SAFE HOLD 与 DISABLED 最终切换条件、阻尼值及掉电/跌倒风险需实体试验。
 外部 E-stop 覆盖 RL、Stand、SAFE HOLD 和 Disabled，须能由独立硬件安全通道
 使电机进入已确认状态，具体实现不在本单元。
@@ -2749,18 +2751,123 @@ previous_action、history 和目标，第一帧 previous_action=0，立即推理
 第一目标仍受 `max_position_jump=1.0 rad` 与硬件 position clamp 约束。
 RealRobotIO 负责硬件采集、每关节/IMU timestamp 与 age、标定、fault、命令
 编码及执行侧失效保护；MotionRuntime 负责 5/20 ms 调度、freshness gate、
-有限 hold、模式/失败转换；RlController 只处理 canonical state→obs→actor→
+模式/失败转换；执行侧负责独立于 motiond 的有限 hold 与最终 watchdog；
+RlController 只处理 canonical state→obs→actor→
 安全裁剪后的 joint target，不感知串口与 ROS 丢包。
 
 **剩余实现前关口。**无状态帧时不能依赖 MotionRuntime 发送 SAFE HOLD，
 实机执行侧须独立监督 CommandFrame 失效、`motiond` 停滞及串口通信失效。
-同步推理阻塞 5 ms 控制路径与所需 BOUNDED HOLD 冲突，需在下一架构单元
-确定独立低层刷新/推理调度。joint/IMU stale 阈值、样本偏差、hold 寿命
+同步推理阻塞 5 ms 控制路径与所需 BOUNDED HOLD 的隔离方案见 §19.18。
+joint/IMU stale 阈值、样本偏差、hold 寿命
 （上界已定为一次 policy 更新）、阻尼值、firmware mode 和 fault 恢复条件
 均为 **BRING-UP TUNING / HARDWARE DECISION**，未作实机验证。
 既有 rollout 在 `OMP_NUM_THREADS=1` 下 10949 次推理 max 12.85 ms，
 但当前 `TorchPolicy` 源码另在创建时设置 Torch 线程数为 1 并预热；
 这些仅是已测试配置及降低长尾的措施，不是 5/20 ms 实时保证。
+
+### 19.18 Black RealRobotIO v1 architecture / implementation plan（静态冻结，未实现）
+
+**进程与责任。**沿用 `ros2_gateway → motiond(MotionRuntime + RL + Torch)
+→ IPC → real_backendd → RealRobotIO → 四条电机总线 + AB5465 IMU`。
+`alldog_mjlab` 仍仅通过 policy deployment contract 对接，不依赖部署工程。
+`real_backendd` 是独立 IPC owner，负责 session/heartbeat、CommandFrame intake、
+StateFrame/RobotIOStatus 发布和硬件生命周期；daemon 主循环不执行串口交易。
+`RealRobotIO::read_latest()` 仅快照缓存、按 FL/FR/RL/RR × hip/thigh/calf
+组装 canonical StateFrame，按 monotonic now 计算每关节及 IMU age，返回有效性、
+online/error/fault/safety 与序号；`submit()` 仅校验 schema、identity、session、
+sequence、数值和时间并缓存命令。两者均不得等待串口、IMU 或四腿反馈；
+accepted command 不等于 hardware executed。状态缓存只保留最新值，不向
+MotionRuntime 暴露高频历史队列。
+
+**执行线程。**v1 内部固定四个一腿一总线 motor worker、一个 IMU worker、
+一个 execution/safety supervisor。每个 motor worker 独占 fd/SDK/三电机，
+发 supervisor 批准的 snapshot，验证反馈包/ID，记录各电机 monotonic 样本时间、
+通信及故障；legacy 约 2 ms 仅是 bring-up 测量起点，一条总线阻塞不能拖停其余
+三条。IMU worker 独占 AB5465 parser 与 VQF，发布 canonical body-frame IMU：
+`diag(1,-1,-1)`、gyro deg/s→rad/s、VQF 6D body→world wxyz；不构造 observation。
+supervisor 在独立线程按同一 host monotonic clock 检查命令、target、反馈、IMU、
+session、fault 和 E-stop，决定 effective mode 与每条总线的命令快照。优先级：
+E-stop/硬件保护 → backend 锁存故障 → 无效或 stale 硬件状态 → frame/target watchdog
+→ 请求的安全模式 → 正常 CommandFrame。worker 还须有 supervisor 停滞时的最后
+失效保护或经验证的固件 watchdog；不得无限重放旧 snapshot。
+
+**同步 policy 的前提。**v1 保持 `Policy::forward()`、history、previous_action 和
+`MotionRuntime` 5 ms control / 每四周期一次 20 ms policy 的同步路径；不加 async
+Policy API、推理队列或新 RL controller。只有最终执行与 watchdog 独立于
+`motiond`/Torch/IPC 返回，才接受这个决定。推理迟到、motiond 卡死或失联时，
+执行侧在 target 仍有效且所有状态 fresh、可写、无故障时可 BOUNDED HOLD；
+新的显式 Passive/Disabled 命令立即覆盖旧 RL target。target 到期或状态失效则
+退 SAFE HOLD/已验证的硬件 fallback，绝不继续 impedance hold。若实测同步
+推理抖动仍影响步态，异步调度另作 v2 unit。
+
+**Unit 0 必先补足时间语义。**现有 `CommandFrame` 只有 frame timestamp 与
+`expires_at_ns`，IPC wire 同样缺 semantic target 年龄；每 5 ms 重新包装同一 RL
+target 会掩盖其实际年龄。新增 `target_generated_at_ns`、`target_expires_at_ns`
+（字段名可调整，语义不变）：成功推理且完成 action conversion 才更新 RL target
+生成时间，余下三个 decimation cycle 原值不变；frame expiry 仍只管 transport/
+control frame，不能延长 target hard expiry。由 control period、RL decimation、
+允许 miss 次数推导 hard lifetime；Black 当前 5 ms × 4 × (1+1)=约 40 ms，
+不是全机器人常量。frame 过期但 target 未到期时，仅在硬件状态全部合格的前提
+下允许上一已验证 `q_command`、`dq=0`、原 Kp/Kd、`tau_ff=0` 的有限 hold。
+state sensor sample、StateFrame 生成、target 生成、CommandFrame 生成、
+execution/application 各有独立 timestamp；现有 MotionRuntime 把 `state.now_ns`
+用于命令生成，不能代表推理结束后的真实时间。实机 safety 时间统一 host
+monotonic 域；仿真/replay 保持各自明确的时钟域，不能直接改用 host wall time。
+Unit 0 须同步修改 core validation、IPC wire/schema/version、MotionRuntime 时间
+来源和 session/reset 清理，协调两端版本切换，保持 MuJoCo/replay 现有行为。
+
+**配置、执行与诊断。**`backends/real` 私有版本化 hardware config（建议
+`configs/hardware/black.yaml`）记录 robot identity、四 bus device/baud/timeout、
+12 joint 的 bus/ID/sign/gear/fixed calf correction、IMU device/axis/unit/VQF 及
+安全参数入口。每台机器的 straight/creep calibration 另以显式路径加载，按
+joint name 键控、12 关节完整、有限、带版本与 robot identity；runtime multi-turn
+offset、mapping/conversion 和标定均只归 real backend。任一配置/标定/身份/首批
+样本/IMU 初始化失败，禁止 ControlEnabled 和 RL，不能暗用默认标定。
+v1 仅接受 Disabled、Damping、JointImpedance；Velocity/Torque 显式 Rejected。
+Disabled 无主动 position/velocity/PD/FF 输出，不预设等于断电；SAFE HOLD 为
+Damping（`Kp=0,dq_target=0,Kd=经验证安全值,tau_ff=0`，无 position target）。
+SDK mode、阻尼值和失联后的物理动作须台架确认，未确认前 active enable fail closed。
+critical over-current/temperature、错误 motor identity、持续通信失败、无效标定、
+E-stop 锁存 backend fault 并离开 ControlEnabled；v1 可要求重启/重新初始化清除，
+不得伪造 ResetFault。`last_accepted_command_sequence` 记录缓存接受；全帧
+`effective_command_sequence` 仅在所需四总线均成功发送/接受同一执行 snapshot
+时推进，部分成功必须暴露为未完成及 per-bus 诊断。无 actuator ACK 时只能称
+软件侧已发送，不能称物理执行已确认；fallback 也不能冒充旧 RL 命令生效。
+外部 E-stop 覆盖全部软件模式，具体硬件通路另行验证。
+
+**依赖边界与分步实现。**只集成所需 motor SDK headers/libs、AB5465 parser 和
+VQF，固定版本及 binary/hash；依项目依赖机制或 `.deps/` 获取，不复制旧
+`real_robot` workspace、也不提交私有预编译二进制。可在 `backends/real/src/internal/`
+使用私有 MotorTransport/ImuTransport fake seam，不建公开多厂商 plugin。
+建议模块为 `backends/real` 的 RealRobotIO、motor conversion、calibration、
+IMU processing、worker/supervisor，另设 hardware config loader、
+`apps/runtime_daemons/real_backendd.cpp` 和 `configs/hardware/black.yaml`；
+不增加 Black 专属 MotionRuntime、RL controller 或 observation。当前 CMake 的
+motiond 受 Torch 选项约束且源码直接依赖 Torch，`scripts/build.sh --target motion`
+还打开 MuJoCo；后续最小拆分应使 real_backendd/read-only/basic motion path 无
+MuJoCo、无 Torch 可构建，RL enable 才要求 Torch，保持同一进程拓扑。
+
+| Unit | 范围与完成门槛 |
+|---|---|
+| 0 — core target timing | 只补 target 生成/硬过期、frame/state/command 时间语义、validation、IPC wire、RL decimation/session/reset；离线验证 timestamp 仅成功推理更新、三次复用不更新、重新包装不延寿、IPC round-trip/schema mismatch。无实机。 |
+| 1 — config + pure conversion | hardware schema、joint→bus/ID、sign/gear/calf correction、独立 calibration、multi-turn offset、IMU static config；离线验证错误 identity、重复 bus/ID、缺项/NaN、转换 round-trip。不打开 serial。 |
+| 2 — read-only RealRobotIO | fake transport 的 worker/cache、非阻塞 read_latest/submit、sample age/invalid packet/单 bus 与 IMU loss、fault/status、部分执行诊断；主动输出关闭。 |
+| 3 — real_backendd read-only IPC | shared memory/session/heartbeat/StateFrame/RobotIOStatus、shutdown/reconnect；端到端读取真/假状态，仍禁止主动电机输出。 |
+| 4 — execution supervisor | fake transport 测 frame/target expiry、bounded hold、motiond loss、session change、fault latch、partial bus、sequence、Disabled/Damping/JointImpedance、shutdown；Velocity/Torque 拒绝。 |
+| 5 — actual transport | 接 legacy SDK、AB5465、VQF 与 serial，先只读核查 12 电机及 IMU、时间戳与 fault，不启用主动输出。 |
+| 6 — hardware safety bring-up | read-only → Disabled 语义 → 单电机 Damping → 单腿 → 四腿 → GetUp → Stand → GetDown；每步台架记录与放行。 |
+| 7 — RL enable | 仅前序全通过后进入 Black PPO，先零速度命令再低速前进，记录 freshness、延迟、watchdog、fault 与安全退出。 |
+
+后续每单元保持 `./scripts/build.sh`、`./scripts/test/ctest.sh`、
+`./scripts/test/ros2_headless.sh` 通过；Black PPO observation/action、history、
+previous_action、policy switch、MuJoCo/replay 不得回退。**首个实机端到端里程碑**
+是主动输出 Disabled 下的 12 motor feedback + IMU → canonical StateFrame → IPC
+→ motiond/gateway，且 freshness、fault、calibration validity 可见，不是 RL 行走。
+joint/IMU stale 数值、sample skew、transaction timeout、safe Kd、SDK Disabled
+编码、固件/外部 E-stop 行为、effort/current ceiling、物理接线和实时抖动均需
+实机 bring-up；本节未实现或验证硬件。现有部署仓库 real migration reference
+推荐 hardware config 先行并沿用现有 CommandFrame，缺 semantic target 年龄与
+独立 supervisor；本冻结计划以 Unit 0 先行，旧参考待对应实施阶段再更新。
 
 ------
 
@@ -2790,7 +2897,8 @@ RealRobotIO 负责硬件采集、每关节/IMU timestamp 与 age、标定、faul
    timing / freshness / watchdog / failure 静态契约 COMPLETE（§19.14–§19.17）；
    用户已确认 IMU 安装与 legacy 配置一致。实体电机接线、标定、
    effort/current ceiling、固件安全动作及数值门槛仍待 bring-up；real backend 未实现。
-   下一候选：Black RealRobotIO v1 backend architecture / implementation plan。
+   RealRobotIO v1 架构与 Unit 0–7 实施顺序已静态冻结（§19.18）；
+   下一单元仅做 Unit 0 — CommandFrame semantic target timing metadata。
 8. HIM observation / estimator / algorithm integration
 ```
 
