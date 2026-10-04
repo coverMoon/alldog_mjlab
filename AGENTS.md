@@ -673,13 +673,16 @@ MjLab v1.6.0
 为了 exporter 修改 policy contract
 ```
 
-`params.py` 当前定位：
+`src/alldog_mjlab/tasks/velocity/black/black_config.py` 当前定位：
 
 ```text
-人工调参 numeric / range 参数入口
+Black flat/rough 单一人工训练参数入口。
+env / control / command / observation scale / noise / reset / termination /
+reward / DR / terrain / simulation / PPO / runner 的日常训练数值集中在这里。
 ```
 
-它不是新的 runtime config system。
+它不是新的 runtime config system。joint / action / observation order 等 interface
+contract 不属于普通调参，继续留在 `env_cfgs.py` / `robots/black/`。
 
 MjLab：
 

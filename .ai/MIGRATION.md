@@ -85,9 +85,10 @@ src/alldog_mjlab/tasks/velocity/black/rl_cfg.py
 black_config.py
     Black flat/rough 单一人工训练参数入口：BLACK_CONFIG，typed sections 覆盖
     env/control/command/observation/noise/reset/termination/reward/domain_rand/
-    terrain/simulation/policy/algorithm/runner。physics dt=0.005、decimation=4，
-    policy dt 由二者相乘；MjLab factory 的默认 num_envs=1，既有 4096-env
-    训练命令通过 CLI 覆盖。observation scales 和 control dt 为部署敏感字段。
+    terrain/simulation/policy/algorithm/runner。train_num_envs=4096、
+    play_num_envs=1；CLI 显式环境数量仍可覆盖 task 默认值。physics dt=0.005、
+    decimation=4，policy dt 由二者相乘；control.action_scale=0.25。
+    observation scales、control dt 和 action scale 为部署敏感字段。
 
 env_cfgs.py
     MjLab task assembly + policy / task interface contract

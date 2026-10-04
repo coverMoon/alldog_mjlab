@@ -4,8 +4,8 @@
 这里不替代 ManagerBasedRlEnvCfg，也不定义 term 顺序或 policy joint order。
 机器人固有参数、default pose 与 actuator 见 robots/black/。
 
-POLICY / DEPLOYMENT CONTRACT-SENSITIVE：control timestep/decimation 与 actor
-observation scales。修改它们须建立新训练契约并重验导出和部署兼容性。
+POLICY / DEPLOYMENT CONTRACT-SENSITIVE：control timestep/decimation、action
+scale 与 actor observation scales。修改它们须建立新训练契约并重验导出和部署兼容性。
 """
 
 from dataclasses import dataclass, field
@@ -14,17 +14,20 @@ import math
 
 @dataclass(frozen=True)
 class EnvParams:
-    # MjLab v1.6 velocity factory 默认 1，已验证训练命令另用 CLI 覆盖成 4096。
-    # CLI 覆盖仍优先；若要从此文件控制训练数量，请移除 CLI 的 --env.scene.num-envs。
-    num_envs: int = 1
+    # Black 训练默认 4096 env，play 默认 1；CLI 显式指定时仍以 CLI 为准。
+    # 要由此处控制训练环境数，运行 train 时不要传 --env.scene.num-envs。
+    train_num_envs: int = 4096
+    play_num_envs: int = 1
     episode_length_s: float = 20.0
 
 
 @dataclass(frozen=True)
 class ControlParams:
-    # POLICY / DEPLOYMENT CONTRACT-SENSITIVE：policy dt 由两者相乘，不单独存储。
+    # POLICY / DEPLOYMENT CONTRACT-SENSITIVE：policy dt 由两者相乘，不单独存储；
+    # q_policy = q_default + action_scale * raw_action。
     physics_dt: float = 0.005
     decimation: int = 4
+    action_scale: float = 0.25
 
     @property
     def policy_dt(self) -> float:

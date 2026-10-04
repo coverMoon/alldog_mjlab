@@ -34,7 +34,7 @@ from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 from mjlab.utils.noise import UniformNoiseCfg
 
-from alldog_mjlab.robots.black import BLACK_ACTION_SCALE, get_black_robot_cfg
+from alldog_mjlab.robots.black import get_black_robot_cfg
 from alldog_mjlab.robots.black.black_constants import (
     BLACK_FOOT_NAMES,
     BLACK_JOINT_NAMES,
@@ -246,7 +246,7 @@ def _configure_actions(cfg: ManagerBasedRlEnvCfg) -> None:
         f"joint_pos_{leg.lower()}": JointPositionActionCfg(
             entity_name="robot",
             actuator_names=leg_joint_names[leg],
-            scale=BLACK_ACTION_SCALE,
+            scale=BLACK_CONFIG.control.action_scale,
             use_default_offset=True,
         )
         for leg in BLACK_FOOT_NAMES
@@ -676,9 +676,11 @@ def _configure_rough_terminations(cfg: ManagerBasedRlEnvCfg) -> None:
     )
 
 
-def _configure_common_runtime(cfg: ManagerBasedRlEnvCfg) -> None:
+def _configure_common_runtime(cfg: ManagerBasedRlEnvCfg, *, play: bool) -> None:
     """不属于上面各分组的少量 task 级字段。"""
-    cfg.scene.num_envs = BLACK_CONFIG.env.num_envs
+    cfg.scene.num_envs = (
+        BLACK_CONFIG.env.play_num_envs if play else BLACK_CONFIG.env.train_num_envs
+    )
     cfg.episode_length_s = BLACK_CONFIG.env.episode_length_s
     cfg.decimation = BLACK_CONFIG.control.decimation
     cfg.sim.mujoco.timestep = BLACK_CONFIG.control.physics_dt
@@ -745,7 +747,7 @@ def _build_black_env_cfg(play: bool, rough: bool) -> ManagerBasedRlEnvCfg:
     _configure_terminations(cfg)
     if rough:
         _configure_rough_terminations(cfg)
-    _configure_common_runtime(cfg)
+    _configure_common_runtime(cfg, play=play)
     if rough and not play:
         _configure_terrain_curriculum(cfg)
     if play:

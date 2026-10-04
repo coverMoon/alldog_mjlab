@@ -77,9 +77,6 @@ BLACK_EFFORT_LIMIT = {
     "RR_calf_joint": 20.0,
 }
 
-# Position offsets in radians per unit action; independent of PD gains.
-BLACK_ACTION_SCALE = 0.25
-
 # Policy / action / deployment 腿顺序：FL → FR → RL → RR。
 # 注意：这不是 MuJoCo MJCF 的 natural joint order（XML 中为 FL → FR → RR → RL），
 # 两者是不同概念，不得混用；MJCF 顺序由 robot.joint_names 反映。
