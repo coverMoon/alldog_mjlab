@@ -18,6 +18,15 @@ tasks/
 当前注册 `black-flat` 与 `black-rough`（均为标准 PPO）。使用 MjLab 的 `train` /
 `play` CLI，不另设训练入口。
 
+从最新匹配训练 run 的最新 checkpoint 导出 actor：
+
+```bash
+uv run export --task-id black-flat
+```
+
+默认输出到 `<run>/exported/policy.pt`；可用 `--load-run`、`--checkpoint` 与
+`--output-dir` 指定来源或目标。
+
 - 机器人模型、初始姿态和控制参数归 `robots/black`。
 - 环境配置通过 MjLab velocity factory 创建，每次调用返回独立配置。
 - `black-flat` 与 `black-rough` 共用 terrain scan 和 259 维 privileged critic（末尾

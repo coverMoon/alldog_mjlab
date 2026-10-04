@@ -22,6 +22,7 @@ Black real backend v1 timing / freshness / failure contract: COMPLETE（静态�
 Black RealRobotIO v1 architecture / implementation plan: COMPLETE（静态；§19.18）
 Black training configuration consolidation v2: COMPLETE（behavior-neutral）
 Black flat/rough shared critic height scan: COMPLETE（flat critic 72→259；§13.4）
+Black actor export short CLI: COMPLETE（§19.3）
 Hardware effort/current ceiling: UNCONFIRMED（实机前确认）
 ```
 
@@ -1579,7 +1580,7 @@ kernel 的 capacity-related boundary access；upstream MJWarp 根因尚未修复
 code state        HEAD eda3e82 + 新增 src/alldog_mjlab/utils/export_policy.py（未提交）
 task              black-rough（生产 CLI）/ black-flat（check_black_flat）
 checkpoint        logs/rsl_rl/black_velocity/2026-09-18_19-37-17/model_498.pt（iter 498）
-export command    uv run python -m alldog_mjlab.utils.export_policy \
+export command    当时使用：uv run python -m alldog_mjlab.utils.export_policy \
                       --task-id black-rough --checkpoint <model_498.pt> \
                       --output <policy.pt> --device cpu
 exported module   actor-only TorchScript：input float32 [1,45] / output float32 [1,12]
@@ -1594,6 +1595,7 @@ linspace(-1,1,45)  max abs diff 0.0
 ```
 
 独立加载（不依赖 runner 对象）：`torch.jit.load()` + `eval()` 后可推理，输出 [1,12] float32 有限。
+上述命令是历史验证记录；当前 exporter CLI 参数见 §19.3。
 
 ```text
 uv run python tests/check_black_flat.py --device cpu    PASS（含导出检查）
@@ -2102,6 +2104,15 @@ checkpoint 加载   MjLab runner 的 load(..., load_cfg={"actor": True}, strict=
 导出              RSL-RL 5.4.2 原生 runner.export_policy_to_jit()（actor.as_jit()）
 环境              task registry 的 play cfg（num_envs = 1），维度取自 env 而非 checkpoint
 ```
+
+当前标准入口：`uv run export --task-id <task>`。由 `load_rl_cfg(task_id)` 取得
+`experiment_name`，在 `logs/rsl_rl/<experiment_name>` 下直接使用 MjLab v1.6
+`get_checkpoint_path()` 选择最新匹配 run（默认 `.*`）与 checkpoint（默认
+`model_.*.pt`），输出到 `<run>/exported/policy.pt`。可用 `--load-run`、
+`--checkpoint` 指定名称或正则，用 `--output-dir` 改输出目录；文件名始终为
+`policy.pt`，设备默认 CPU。Black flat / rough 当前共用 `black_velocity` 日志目录，
+因此默认按日志中的最新 run 选择，具体 checkpoint 以打印路径为准。
+CLI 仅改变路径解析；actor 加载、RSL-RL 原生 JIT 导出与三组 probe 数值等价验证不变。
 
 导出模块的 deployment contract（冻结）：
 

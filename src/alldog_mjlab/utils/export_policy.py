@@ -20,12 +20,14 @@ actor 无 observation normalization（§5.3），因此这里不做任何额外 
 用法：
 
 ```bash
-uv run python -m alldog_mjlab.utils.export_policy \
-    --task-id black-rough \
-    --checkpoint logs/rsl_rl/black_velocity/<run>/model_498.pt \
-    --output /tmp/policy.pt \
-    --device cpu
+uv run export --task-id black-flat
+uv run export --task-id black-rough --load-run 2026-09-18_19-37-17 \
+    --checkpoint model_498.pt --output-dir ~/models/black --device cpu
 ```
+
+默认用 MjLab v1.6 ``get_checkpoint_path()`` 从
+``logs/rsl_rl/<experiment_name>`` 选择最新匹配 run / checkpoint，输出到
+``<run>/exported/policy.pt``。
 """
 
 import argparse
@@ -39,6 +41,7 @@ from tensordict import TensorDict
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
+from mjlab.utils.os import get_checkpoint_path
 
 # Black PPO actor contract（冻结值，见 .ai/MIGRATION.md §5 / §19.1）。
 ACTOR_OBS_DIM = 45
@@ -50,6 +53,27 @@ RTOL = 1e-5
 NUM_ENVS = 1
 # probe 生成用的固定 seed（probe 本身仍由固定公式给出，不依赖随机数）。
 PROBE_SEED = 42
+
+
+def resolve_export_paths(
+    task_id: str,
+    load_run: str = ".*",
+    checkpoint_pattern: str = "model_.*.pt",
+    output_dir: Path | None = None,
+) -> tuple[str, Path, Path]:
+    """按 MjLab v1.6 规则选择 checkpoint，并确定固定文件名的输出路径。"""
+    try:
+        experiment_name = load_rl_cfg(task_id).experiment_name
+    except KeyError as exc:
+        raise ValueError(f"unknown task id: {task_id}") from exc
+    log_root = Path("logs/rsl_rl") / experiment_name
+    checkpoint = get_checkpoint_path(
+        log_root, run_dir=load_run, checkpoint=checkpoint_pattern
+    )
+    export_dir = (
+        checkpoint.parent / "exported" if output_dir is None else output_dir.expanduser()
+    )
+    return experiment_name, checkpoint, export_dir / "policy.pt"
 
 
 def check_env_contract(wrapped: RslRlVecEnvWrapper) -> list[str]:
@@ -214,16 +238,34 @@ def run_export(task_id: str, checkpoint: Path, output: Path, device: str) -> dic
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--task-id", required=True)
-    parser.add_argument("--checkpoint", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True, help="导出的 .pt 文件路径")
-    parser.add_argument("--device", default="cpu")
+    parser = argparse.ArgumentParser(description="导出并验证 MjLab checkpoint 中的 Black PPO actor")
+    parser.add_argument("--task-id", required=True, help="已注册的 MjLab task ID")
+    parser.add_argument("--load-run", default=".*", help="run 目录名或正则；默认匹配全部")
+    parser.add_argument(
+        "--checkpoint",
+        default="model_.*.pt",
+        help="checkpoint 文件名或正则；默认 model_.*.pt",
+    )
+    parser.add_argument("--output-dir", type=Path, help="导出目录；默认 <run>/exported")
+    parser.add_argument("--device", default="cpu", help="导出设备；默认 cpu")
     args = parser.parse_args()
+    experiment, checkpoint, output = resolve_export_paths(
+        args.task_id, args.load_run, args.checkpoint, args.output_dir
+    )
+    print(
+        f"[export]\n"
+        f"task:       {args.task_id}\n"
+        f"experiment: {experiment}\n"
+        f"run:        {checkpoint.parent}\n"
+        f"checkpoint: {checkpoint}\n"
+        f"output:     {output}\n"
+        f"device:     {args.device}"
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
     torch.set_num_threads(2)
-    report = run_export(args.task_id, args.checkpoint, args.output, args.device)
+    report = run_export(args.task_id, checkpoint, output, args.device)
     print(json.dumps(report, indent=2))
-    print(f"PASS: exported actor-only TorchScript -> {args.output}")
+    print(f"PASS: exported actor-only TorchScript -> {output}")
 
 
 if __name__ == "__main__":
