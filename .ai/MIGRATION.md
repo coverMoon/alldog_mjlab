@@ -24,6 +24,7 @@ Black training configuration consolidation v2: COMPLETE（behavior-neutral）
 Black flat/rough shared critic height scan: COMPLETE（flat critic 72→259；§13.4）
 Black actor export short CLI: COMPLETE（§19.3）
 Black stage-aware run / resume / export: COMPLETE（§2 / §19.3）
+Black HIM observation / history / estimator target contract: COMPLETE（§20）
 Hardware effort/current ceiling: UNCONFIRMED（实机前确认）
 ```
 
@@ -43,8 +44,7 @@ observation、actor、pre-safety `q_policy` 比较均已通过（§17.10 / §19.
 
 ```text
 Black real robot backend（尚未实现；quadruped_control 项目接手）
-HIM observation/history
-HIM algorithm integration
+HIM algorithm integration（estimator / HIMPPO / runner；task-side contract 已完成 §20）
 BlackW migration
 ```
 
@@ -53,8 +53,8 @@ BlackW migration
 ```text
 Black sim2real training/deployment contract: COMPLETE
 quadruped_control RealRobotIO/runtime implementation: HANDOFF TO quadruped_control PROJECT
-alldog_mjlab next: Black training/tuning workflow after configuration consolidation,
-                   or user decision; HIM is not in progress
+alldog_mjlab next candidate: HIM model + RSL-RL algorithm integration（§21）;
+                   HIM task-side observation / history / terminal contract 已完成（§20）
 ```
 
 ------
@@ -1274,6 +1274,7 @@ Black quadruped_control observation/action/torque trace: COMPLETE（§19.10 / §
 Black quadruped_control MuJoCo locomotion rollout: COMPLETE（§19.11 / §17.9）
 Black cross-runtime policy/safety contract: COMPLETE（§19.12 / §17.10）
 Black PPO deployment / sim2sim compatibility: COMPLETE（§19）
+Black HIM observation / history / estimator target contract: COMPLETE（§20 / §17.12）
 ```
 
 command 已冻结为固定范围 + native sampler，且不再有任何 curriculum（§4）。
@@ -1291,11 +1292,14 @@ convergence 结论。
 next decision：
 
 ```text
-Black real robot backend / sim2real contract（等待用户决定，不自动开始实现）
+HIM model + RSL-RL algorithm integration
+（task-side observation / history / terminal contract 已完成，见 §20）
 ```
 
-进入实机前仍须单独决定 inference deadline / 线程配置与 torque 语义（§19.12）；
-本阶段不要开始 HIM integration。ONNX metadata 归属见 §18.1 / §19.4。
+Black real robot backend / sim2real contract 仍等待用户决定，不自动开始实现。
+进入实机前仍须单独决定 inference deadline / 线程配置与 torque 语义（§19.12）。
+`black-flat-him` / `black-rough-him` 只有 env-side contract，尚未注册 task。
+ONNX metadata 归属见 §18.1 / §19.4。
 
 ------
 
@@ -1363,20 +1367,20 @@ terrain height scan（共 259 维，见 §13.4）；flat plane 也保留 raycast
 Black real robot backend / sim2real
     （§19 的 sim2sim contract 验证通过前不开始；ONNX metadata 归属见 §18.1 / §19.4）
 
-HIM single-step/history observation contract
-
 HIM estimator
 
 HIM actor-critic/storage/update integration
 
-black-flat-him
-
-black-rough-him
+black-flat-him / black-rough-him task registration
 
 blackw-flat
 
 blackw-rough
 ```
+
+HIM task-side observation / history / estimator target contract 已完成（§20），但
+HIM estimator / HIMPPO / runner / warm start / exporter 均未实现，因此
+`black-flat-him` / `black-rough-him` 尚未注册，也不得宣称可训练。
 
 ------
 
@@ -1914,6 +1918,35 @@ actor-only checkpoint load，在 black-flat play 环境以 zero 与 `vx=0.6` 各
 100 policy step：actor 45→12、无 NaN/重置/立即摔倒，root 最低约 0.440/0.449 m。
 **Classification：behavior-neutral structural asset fix，regression PASS。**
 本次没有重跑历史 500-iteration 训练或跨 runtime 全量 trace。
+
+------
+
+### 17.12 Black HIM observation / history / estimator target contract（PASS）
+
+新增 `src/alldog_mjlab/tasks/velocity/black/him.py` 与
+`black_flat_him_env_cfg` / `black_rough_him_env_cfg`（`env_cfgs.py`），
+并在 §20 冻结 HIM task-side contract。
+本地验证工具：`tests/check_black_him.py`（不提交 Git）。
+
+结果：
+
+```text
+CPU  PASS
+CUDA PASS（RTX 4060 Laptop 8 GiB，sim.use_cuda_graph = True）
+```
+
+覆盖：普通 `black-flat` actor 45 / critic 259 不变；HIM actor `[B, 6, 45]`，当前帧
+与从 raw state 重建的 45-D 一致；MjLab 内部 oldest → newest，
+`flip(1).flatten(1)` 得到 newest → oldest canonical；full / partial reset 后 history
+全帧 backfill 且未 reset env 不被污染；`estimator_velocity` `[B, 3]` =
+`root_link_lin_vel_b × 2.0` 且与 IMU velocimeter 一致；target encoder input
+= 42 + 3 = 45 且不等于 critic slice；terminal transition 用 `auto_reset=False` 的
+terminal observation 作权威值，play 配置逐值一致，training 配置 velocity 逐值一致、
+frame / velocity 均不等于 post-reset observation。
+
+既有回归：`tests/check_black_flat.py --device cpu` 与
+`tests/check_black_rough.py --device cpu` 均 PASS。
+本单元未重跑长训练，也未实现 HIM estimator / HIMPPO / exporter。
 
 ------
 
@@ -2931,7 +2964,148 @@ joint/IMU stale 数值、sample skew、transaction timeout、safe Kd、SDK Disab
 
 ------
 
-## 20. Next Migration Order
+## 20. Frozen Black HIM Observation / History / Estimator Target Contract
+
+阶段状态：
+
+```text
+Black HIM observation / history / estimator target contract: COMPLETE
+HIM estimator / HIMPPO / warm start / exporter:               NOT STARTED
+```
+
+本单元只建立 HIM algorithm integration 之前的 task-side 数据契约，不包含任何算法更新，
+也**不注册** `black-flat-him` / `black-rough-him` task（HIM runner 未实现）。
+`black-flat` / `black-rough` 的现有 PPO 任务不受影响。
+
+### 20.1 Actor history
+
+```text
+group                 actor（复用普通 Black PPO 的全部 actor term）
+MjLab history_length  6
+flatten_history_dim   False
+actor group obs       [B, 6, 45]（frame-major，MjLab 内部 oldest → newest）
+当前帧                actor_history[:, -1, :]
+canonical flatten     actor_history.flip(1).flatten(1) → [B, 270]（newest → oldest）
+```
+
+actor term 顺序、scale、noise、clip 全部保持冻结的 Black PPO contract：
+
+```text
+command / base_ang_vel / projected_gravity / joint_pos / joint_vel / actions
+```
+
+history 由 MjLab v1.6.0 `ObservationGroupCfg.history_length` 原生实现
+（pipeline 仍为 compute → noise → clip → scale → history），不是 runner-side FIFO，
+也不是旧 legged_gym 的 `obs_buf` 更新。
+task-side 有意保持 `flatten_history_dim = False`；term-major flatten 不能当作
+official HIM 的 270-D history。canonical frame-major flatten 由 model adapter
+（`him.canonical_him_history()`）在后续 algorithm unit 负责。
+
+### 20.2 History reset semantics
+
+采用 MjLab v1.6.0 原生语义：reset 后第一帧 post-reset observation 填满整个 history
+（`[obs0] × 6`）。partial reset 只影响被 reset 的 env，其余 env 的 history 不前进、
+不被污染。不沿用旧 HIMLoco 可能保留上一 episode history 的隐式行为。
+
+### 20.3 Estimator velocity target
+
+```text
+group    estimator_velocity
+shape    [B, 3]
+term     envs_mdp.base_lin_vel（root_link_lin_vel_b，body frame）
+scale    2.0（official HIM obs_scales.lin_vel）
+noise    none（privileged target）
+frame    body frame（不是 raw world-frame velocity）
+```
+
+`base_lin_vel` 与 Black 的 IMU velocimeter（`robot/imu_lin_vel`，imu site 位于 trunk
+原点）等价；使用 root body-frame lin vel 更直接对应 official HIM。
+
+### 20.4 Estimator target encoder input
+
+official HIM 的 critic packing trick（`next_critic_obs[:, 3:48]`）不迁移，显式定义为：
+
+```text
+successor actor frame 去掉 command（42）
++ successor scaled true base linear velocity（3）
+= 45
+```
+
+由 `him.him_target_encoder_input(frame, velocity, spec)` 构造；切片维度来自
+`BlackHimObservationSpec`（`command_dim` / `velocity_dim`），不是 magic slice。
+当前 actor frame 的唯一来源是 `actor_history[:, -1, :]`；不新建第二套 noisy
+current observation group（否则 noise 会独立重采样，与 history 当前帧不一致）。
+
+### 20.5 Terminal transition
+
+HIM estimator 使用 successor observation；MjLab 的 `step()` 会对 done env 自动 reset，
+返回的是新 episode 第一帧，不能作为 terminal successor target。
+
+采用 MjLab v1.6.0 原生 `RecorderTerm.record_pre_reset`（在 `_reset_idx` 之前触发），
+从 terminal state 重新计算并保存：
+
+```text
+env.extras["him_terminal_env_ids"]             [n]
+env.extras["him_terminal_actor_frame"]         [n, 45]
+env.extras["him_terminal_estimator_velocity"]  [n, 3]
+```
+
+- 计算前调用 `sim.forward()` + `sim.sense()`：`step()` 中 derived quantities 落后一个
+  physics substep，terminal target 必须基于 terminal state 本身；
+- actor frame 复用与 ObservationManager 相同的 pipeline（compute → noise → clip →
+  scale）与已 resolve 的 term cfg，因此 corruption 开关一致；
+- noise 为独立重采样，与正常 transition 同分布，而不是同一个 draw；这与 official HIM
+  的 `compute_termination_observations` 一致；
+- 没有 done env 的 step 结束时清除这些 key，避免 stale target 被 algorithm 使用；
+- 代价：有 reset 的 step 会额外执行一次 forward / sense 与 actor frame 计算
+  （仅供 terminal target 使用）。
+
+### 20.6 Critic
+
+critic 继续使用当前 259 维（原 72 维 + 187 维 height_scan），flat / rough 相同。
+不恢复旧 HIMLoco 的 238-D privileged observation。
+
+### 20.7 维度 specification
+
+`him.black_him_observation_spec(env)` 从 runtime resolved dims 读取：
+
+```text
+single_frame_dim         = 45
+history_length           = 6
+history_dim              = 270
+command_dim              = 3
+velocity_dim             = 3
+action_dim               = 12
+target_encoder_input_dim = (single_frame_dim - command_dim) + velocity_dim = 45
+```
+
+后续 algorithm 必须从这里取维度，不得硬编码 270 / 238 / 45 / 12。
+
+### 20.8 Config 与 task registration
+
+```text
+black_flat_him_env_cfg  = black_flat_env_cfg  + HIM observation / terminal contract
+black_rough_him_env_cfg = black_rough_env_cfg + HIM observation / terminal contract
+```
+
+reward / command / reset / DR / termination / action / terrain / robot config 全部复用，
+没有第二套 `black_config`。`black-flat-him` / `black-rough-him` 尚未注册：HIM
+actor-critic / runner 未实现，不能复用普通 PPO runner（其 actor 输入为单帧 45-D）。
+
+### 20.9 本单元不做
+
+```text
+HIM estimator 网络 / Sinkhorn / prototype loss
+HIMPPO update / custom HIM runner
+PPO→HIM warm start
+HIM TorchScript exporter
+deployment contract 修改
+BlackW / symmetry
+```
+
+------
+
+## 21. Next Migration Order
 
 Black flat/rough 与训练侧 sim2real contract 已完成；部署代码由独立项目接手。
 下表保留完成状态与本仓库当前下一候选：
@@ -2963,7 +3137,13 @@ Black flat/rough 与训练侧 sim2real contract 已完成；部署代码由独�
 8. Black training configuration consolidation v2
    （完成：black_config.py 是单一人工入口；flat/rough 默认配置逐字段等价，
      CPU local migration verification 通过；CUDA 本轮设备不可用。）
-9. Black training/tuning workflow 或用户决定下一单元；HIM 暂不启动。
+9. Black training/tuning workflow 或用户决定下一单元。
+10. Black HIM observation / history / estimator target contract
+    （完成：§20。actor history [B, 6, 45] + estimator_velocity [B, 3] +
+     terminal successor recorder；black-flat-him / black-rough-him 未注册。）
+11. HIM model + RSL-RL algorithm integration
+    （下一单元：HIM estimator / actor-critic / storage / HIMPPO update / runner；
+     仍不开始 BlackW / real backend。）
 ```
 
 已插入完成的非 behavior 任务：
@@ -2979,7 +3159,7 @@ Black training configuration consolidation v2    （完成，behavior-neutral）
 
 ------
 
-## 21. Update Rule
+## 22. Update Rule
 
 每完成一个 behavior unit：
 

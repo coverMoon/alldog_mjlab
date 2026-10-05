@@ -40,6 +40,10 @@ from alldog_mjlab.robots.black.black_constants import (
     BLACK_JOINT_NAMES,
 )
 from alldog_mjlab.tasks.velocity.black.black_config import BLACK_CONFIG
+from alldog_mjlab.tasks.velocity.black.him import (
+    configure_him_observations,
+    configure_him_terminal_targets,
+)
 from alldog_mjlab.tasks.velocity.black.rewards import (
     angular_velocity_xy_l2,
     base_height_l2_flat,
@@ -765,3 +769,30 @@ def black_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     critic 259 / terrain_scan 均与训练相同（inference policy 不使用 critic）。
     """
     return _build_black_env_cfg(play=play, rough=True)
+
+
+def black_flat_him_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+    """``black-flat`` + HIM observation / history / terminal contract。
+
+    与 ``black_flat_env_cfg`` 的 reward / command / reset / DR / termination /
+    action / terrain / robot 完全相同，只增量应用 HIM 契约（见 him.py）：
+
+    - actor group 打开 MjLab 原生 history（``[B, 6, 45]``，oldest → newest）；
+    - 新增 ``estimator_velocity`` group（``[B, 3]``，scaled true base lin vel）；
+    - 注册 terminal successor target recorder。
+
+    本 unit 尚未注册 ``black-flat-him`` task：HIM actor-critic / runner 未实现，
+    不能复用普通 PPO runner。
+    """
+    cfg = black_flat_env_cfg(play=play)
+    configure_him_observations(cfg)
+    configure_him_terminal_targets(cfg)
+    return cfg
+
+
+def black_rough_him_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+    """``black-rough`` + HIM observation / history / terminal contract（同 flat）。"""
+    cfg = black_rough_env_cfg(play=play)
+    configure_him_observations(cfg)
+    configure_him_terminal_targets(cfg)
+    return cfg
