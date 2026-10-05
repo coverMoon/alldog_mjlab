@@ -1,131 +1,122 @@
-# SPDX-FileCopyrightText: Copyright (c) 2021 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: BSD-3-Clause
-# 
-# Redistribution and use in source and binary forms, with or without
-# modification, are permitted provided that the following conditions are met:
-#
-# 1. Redistributions of source code must retain the above copyright notice, this
-# list of conditions and the following disclaimer.
-#
-# 2. Redistributions in binary form must reproduce the above copyright notice,
-# this list of conditions and the following disclaimer in the documentation
-# and/or other materials provided with the distribution.
-#
-# 3. Neither the name of the copyright holder nor the names of its
-# contributors may be used to endorse or promote products derived from
-# this software without specific prior written permission.
-#
-# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-# DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-# SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-# CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-# OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-#
-# Copyright (c) 2021 ETH Zurich, Nikita Rudin
+"""HIM estimator：source encoder + target encoder + prototype representation objective。
 
-import copy
-import math
+数学行为移植自 official InternRobotics/HIMLoco
+``rsl_rl/rsl_rl/modules/him_estimator.py``（commit ef289ac，2024-05-14），只做必要适配：
+
+- 维度由 ``HIMSpec`` 提供，不出现 Black 固定维度；
+- target encoder 输入显式化为 ``next_estimator_input``（frame 去掉 command + velocity）
+  与 ``next_estimator_velocity``，不再从 critic privileged observation 里做 packing slice；
+- optimizer 归属显式化：estimator optimizer 独立持有 source encoder / target encoder /
+  prototypes，PPO optimizer 不包含它们（official 依赖 no_grad 而不是分账，见报告）。
+
+official 默认网络（保持 released code，而不是论文里的 extractor 描述）：
+
+```text
+source encoder: history_dim -> 128 -> 64 -> velocity_dim + latent_dim
+target encoder: target_dim  -> 128 -> 64 -> latent_dim
+prototypes:     32 × latent_dim（temperature 3.0）
+optimizer:      Adam, lr 1e-3, max_grad_norm 10.0
+```
+"""
+
+from __future__ import annotations
+
 import torch
 import torch.nn as nn
-import torch.optim as optim
 import torch.nn.functional as F
-import torch.distributions as torchd
-from torch.distributions import Normal, Categorical
+
+from rsl_rl.modules import MLP
+from rsl_rl.utils import resolve_optimizer
+
+from .spec import HIMSpec
 
 
 class HIMEstimator(nn.Module):
-    def __init__(self,
-                 temporal_steps,
-                 num_one_step_obs,
-                 enc_hidden_dims=[128, 64, 16],
-                 tar_hidden_dims=[128, 128],
-                 activation='elu',
-                 learning_rate=1e-3,
-                 max_grad_norm=10.0,
-                 num_prototype=32,
-                 temperature=3.0,
-                 **kwargs):
-        if kwargs:
-            print("Estimator_CL.__init__ got unexpected arguments, which will be ignored: " + str(
-                [key for key in kwargs.keys()]))
-        super(HIMEstimator, self).__init__()
-        activation = get_activation(activation)
+    """HIM estimator（source encoder / target encoder / prototypes / loss）。"""
 
-        self.temporal_steps = temporal_steps
-        self.num_one_step_obs = num_one_step_obs
-        self.num_latent = enc_hidden_dims[-1]
+    def __init__(
+        self,
+        spec: HIMSpec,
+        *,
+        encoder_hidden_dims: tuple[int, ...] | list[int] = (128, 64),
+        target_encoder_hidden_dims: tuple[int, ...] | list[int] = (128, 64),
+        activation: str = "elu",
+        learning_rate: float = 1e-3,
+        max_grad_norm: float = 10.0,
+        num_prototypes: int = 32,
+        temperature: float = 3.0,
+        optimizer: str = "adam",
+    ) -> None:
+        super().__init__()
+        if len(encoder_hidden_dims) < 1 or len(target_encoder_hidden_dims) < 1:
+            raise ValueError("encoder_hidden_dims and target_encoder_hidden_dims must be non-empty.")
+
+        self.spec = spec
         self.max_grad_norm = max_grad_norm
         self.temperature = temperature
+        self.num_prototypes = num_prototypes
 
-        # Encoder
-        enc_input_dim = self.temporal_steps * self.num_one_step_obs
-        enc_layers = []
-        for l in range(len(enc_hidden_dims) - 1):
-            enc_layers += [nn.Linear(enc_input_dim, enc_hidden_dims[l]), activation]
-            enc_input_dim = enc_hidden_dims[l]
-        enc_layers += [nn.Linear(enc_input_dim, enc_hidden_dims[-1] + 3)]
-        self.encoder = nn.Sequential(*enc_layers)
+        # Source encoder：输出 estimated velocity + raw latent。
+        self.encoder = MLP(
+            spec.history_dim,
+            spec.velocity_dim + spec.latent_dim,
+            hidden_dims=list(encoder_hidden_dims),
+            activation=activation,
+        )
+        # Target encoder：输出 target latent。
+        self.target = MLP(
+            spec.target_encoder_input_dim,
+            spec.latent_dim,
+            hidden_dims=list(target_encoder_hidden_dims),
+            activation=activation,
+        )
+        # Prototypes。
+        self.proto = nn.Embedding(num_prototypes, spec.latent_dim)
 
-        # Target
-        tar_input_dim = self.num_one_step_obs
-        tar_layers = []
-        for l in range(len(tar_hidden_dims)):
-            tar_layers += [nn.Linear(tar_input_dim, tar_hidden_dims[l]), activation]
-            tar_input_dim = tar_hidden_dims[l]
-        tar_layers += [nn.Linear(tar_input_dim, enc_hidden_dims[-1])]
-        self.target = nn.Sequential(*tar_layers)
-
-        # Prototype
-        self.proto = nn.Embedding(num_prototype, enc_hidden_dims[-1])
-
-        # Optimizer
+        # Estimator optimizer 只拥有本模块参数（encoder / target / proto）。
         self.learning_rate = learning_rate
-        self.optimizer = optim.Adam(self.parameters(), lr=self.learning_rate)
+        self.optimizer = resolve_optimizer(optimizer)(self.parameters(), lr=learning_rate)
 
-    def get_latent(self, obs_history):
-        vel, z = self.encode(obs_history)
-        return vel.detach(), z.detach()
+    def encode(self, history: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """source encoder：canonical history → (estimated velocity, L2-normalized latent)。"""
+        parts = self.encoder(history)
+        velocity = parts[..., : self.spec.velocity_dim]
+        latent = F.normalize(parts[..., self.spec.velocity_dim :], dim=-1, p=2)
+        return velocity, latent
 
-    def forward(self, obs_history):
-        parts = self.encoder(obs_history.detach())
-        vel, z = parts[..., :3], parts[..., 3:]
-        z = F.normalize(z, dim=-1, p=2)
-        return vel.detach(), z.detach()
+    def encode_target(self, next_input: torch.Tensor) -> torch.Tensor:
+        """target encoder：successor target input → L2-normalized target latent。"""
+        return F.normalize(self.target(next_input), dim=-1, p=2)
 
-    def encode(self, obs_history):
-        parts = self.encoder(obs_history.detach())
-        vel, z = parts[..., :3], parts[..., 3:]
-        z = F.normalize(z, dim=-1, p=2)
-        return vel, z
+    @torch.no_grad()
+    def predict(self, history: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """推理用：estimated velocity + normalized latent（无梯度）。"""
+        return self.encode(history)
 
-    def update(self, obs_history, next_critic_obs, lr=None):
-        if lr is not None:
-            self.learning_rate = lr
-            for param_group in self.optimizer.param_groups:
-                param_group['lr'] = self.learning_rate
-                
-        vel = next_critic_obs[:, self.num_one_step_obs:self.num_one_step_obs+3].detach()
-        next_obs = next_critic_obs.detach()[:, :self.num_one_step_obs]
+    def losses(
+        self,
+        history: torch.Tensor,
+        next_input: torch.Tensor,
+        next_velocity: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """official HIM estimator objective：(velocity loss, representation swap loss)。
 
-        z_s = self.encoder(obs_history)
-        z_t = self.target(next_obs)
-        pred_vel, z_s = z_s[..., :3], z_s[..., 3:]
-
-        z_s = F.normalize(z_s, dim=-1, p=2)
-        z_t = F.normalize(z_t, dim=-1, p=2)
+        official 语义：
+        - prototype 权重在每次更新前先做一次 L2 normalize（in-place，no_grad）；
+        - Sinkhorn 只在 no_grad 下产生软分配 q_s / q_t（swapped prediction 目标）；
+        - swap loss = -0.5 * (q_s · log p_t + q_t · log p_s).mean()，
+          其中 log p 是 temperature 缩放后的 log-softmax；
+        - velocity loss = MSE(estimated velocity, successor true scaled base lin vel)。
+        """
+        velocity, source_latent = self.encode(history)
+        target_latent = self.encode_target(next_input)
 
         with torch.no_grad():
-            w = self.proto.weight.data.clone()
-            w = F.normalize(w, dim=-1, p=2)
-            self.proto.weight.copy_(w)
+            normalized_proto = F.normalize(self.proto.weight.data.clone(), dim=-1, p=2)
+            self.proto.weight.copy_(normalized_proto)
 
-        score_s = z_s @ self.proto.weight.T
-        score_t = z_t @ self.proto.weight.T
+        score_s = source_latent @ self.proto.weight.T
+        score_t = target_latent @ self.proto.weight.T
 
         with torch.no_grad():
             q_s = sinkhorn(score_s)
@@ -135,51 +126,44 @@ class HIMEstimator(nn.Module):
         log_p_t = F.log_softmax(score_t / self.temperature, dim=-1)
 
         swap_loss = -0.5 * (q_s * log_p_t + q_t * log_p_s).mean()
-        estimation_loss = F.mse_loss(pred_vel, vel)
-        losses = estimation_loss + swap_loss
+        estimation_loss = F.mse_loss(velocity, next_velocity)
+        return estimation_loss, swap_loss
+
+    def update(
+        self,
+        history: torch.Tensor,
+        next_input: torch.Tensor,
+        next_velocity: torch.Tensor,
+        lr: float | None = None,
+    ) -> tuple[float, float]:
+        """official estimator update：loss → zero_grad → backward → clip → step。"""
+        if lr is not None:
+            self.learning_rate = lr
+            for param_group in self.optimizer.param_groups:
+                param_group["lr"] = lr
+
+        estimation_loss, swap_loss = self.losses(history, next_input, next_velocity)
+        loss = estimation_loss + swap_loss
 
         self.optimizer.zero_grad()
-        losses.backward()
+        loss.backward()
         nn.utils.clip_grad_norm_(self.parameters(), self.max_grad_norm)
         self.optimizer.step()
-
         return estimation_loss.item(), swap_loss.item()
 
 
 @torch.no_grad()
-def sinkhorn(out, eps=0.05, iters=3):
+def sinkhorn(out: torch.Tensor, eps: float = 0.05, iters: int = 3) -> torch.Tensor:
+    """official HIM Sinkhorn normalization（逐行/逐列交替归一化，iters 次）。"""
     Q = torch.exp(out / eps).T
     K, B = Q.shape[0], Q.shape[1]
     Q /= Q.sum()
 
-    for it in range(iters):
+    for _ in range(iters):
         # normalize each row: total weight per prototype must be 1/K
         Q /= torch.sum(Q, dim=1, keepdim=True)
         Q /= K
-
         # normalize each column: total weight per sample must be 1/B
         Q /= torch.sum(Q, dim=0, keepdim=True)
         Q /= B
     return (Q * B).T
-
-
-def get_activation(act_name):
-    if act_name == "elu":
-        return nn.ELU()
-    elif act_name == "selu":
-        return nn.SELU()
-    elif act_name == "relu":
-        return nn.ReLU()
-    elif act_name == "crelu":
-        return nn.ReLU()
-    elif act_name == "silu":
-        return nn.SiLU()
-    elif act_name == "lrelu":
-        return nn.LeakyReLU()
-    elif act_name == "tanh":
-        return nn.Tanh()
-    elif act_name == "sigmoid":
-        return nn.Sigmoid()
-    else:
-        print("invalid activation function!")
-        return None

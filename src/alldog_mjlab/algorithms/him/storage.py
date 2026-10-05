@@ -1,167 +1,122 @@
-# SPDX-FileCopyrightText: Copyright (c) 2021 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: BSD-3-Clause
-# 
-# Redistribution and use in source and binary forms, with or without
-# modification, are permitted provided that the following conditions are met:
-#
-# 1. Redistributions of source code must retain the above copyright notice, this
-# list of conditions and the following disclaimer.
-#
-# 2. Redistributions in binary form must reproduce the above copyright notice,
-# this list of conditions and the following disclaimer in the documentation
-# and/or other materials provided with the distribution.
-#
-# 3. Neither the name of the copyright holder nor the names of its
-# contributors may be used to endorse or promote products derived from
-# this software without specific prior written permission.
-#
-# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-# DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-# SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-# CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-# OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-#
-# Copyright (c) 2021 ETH Zurich, Nikita Rudin
+"""HIM rollout storage：RSL-RL v5.4.2 ``RolloutStorage`` 的最小扩展。
+
+只额外保存 HIM estimator 真正缺失的 successor target：
+
+```text
+next_estimator_input     [T, B, target_encoder_input_dim]
+next_estimator_velocity  [T, B, velocity_dim]
+```
+
+current canonical history 不需要额外保存：它由 transition observation（``actor`` group）
+在 update 时通过 ``canonical_history`` 得到。不复制 legacy ``HIMRolloutStorage`` 全文件，
+也不重复保存 actor / critic tensor。
+"""
+
+from __future__ import annotations
+
+from collections.abc import Generator
 
 import torch
-import numpy as np
+
+from rsl_rl.storage import RolloutStorage
 
 
+class HIMTransition(RolloutStorage.Transition):
+    """transition + HIM successor estimator target。"""
 
-class HIMRolloutStorage:
-    class Transition:
-        def __init__(self):
-            self.observations = None
-            self.critic_observations = None
-            self.actions = None
-            self.rewards = None
-            self.dones = None
-            self.values = None
-            self.actions_log_prob = None
-            self.action_mean = None
-            self.action_sigma = None
-            self.next_critic_observations = None
-        
-        def clear(self):
-            self.__init__()
+    def __init__(self) -> None:
+        super().__init__()
+        self.next_estimator_input: torch.Tensor | None = None
+        self.next_estimator_velocity: torch.Tensor | None = None
 
-    def __init__(self, num_envs, num_transitions_per_env, obs_shape, privileged_obs_shape, actions_shape, device='cpu'):
 
-        self.device = device
+class HIMBatch(RolloutStorage.Batch):
+    """mini-batch + HIM successor estimator target。"""
 
-        self.obs_shape = obs_shape
-        self.privileged_obs_shape = privileged_obs_shape
-        self.actions_shape = actions_shape
+    def __init__(
+        self,
+        *args,
+        next_estimator_input: torch.Tensor | None = None,
+        next_estimator_velocity: torch.Tensor | None = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.next_estimator_input = next_estimator_input
+        self.next_estimator_velocity = next_estimator_velocity
 
-        # Core
-        self.observations = torch.zeros(num_transitions_per_env, num_envs, *obs_shape, device=self.device)
-        if privileged_obs_shape[0] is not None:
-            self.privileged_observations = torch.zeros(num_transitions_per_env, num_envs, *privileged_obs_shape, device=self.device)
-            self.next_privileged_observations = torch.zeros(num_transitions_per_env, num_envs, *privileged_obs_shape, device=self.device)
-        else:
-            self.privileged_observations = None
-            self.next_privileged_observations = None
-        self.rewards = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
-        self.actions = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
-        self.dones = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device).byte()
 
-        # For PPO
-        self.actions_log_prob = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
-        self.values = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
-        self.returns = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
-        self.advantages = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
-        self.mu = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
-        self.sigma = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
+class HIMRolloutStorage(RolloutStorage):
+    """``RolloutStorage`` + successor estimator target buffers。"""
 
-        self.num_transitions_per_env = num_transitions_per_env
-        self.num_envs = num_envs
+    def __init__(
+        self,
+        training_type: str,
+        num_envs: int,
+        num_transitions_per_env: int,
+        obs,
+        actions_shape: tuple[int, ...] | list[int],
+        device: str = "cpu",
+        *,
+        next_estimator_input_dim: int,
+        next_estimator_velocity_dim: int,
+    ) -> None:
+        super().__init__(
+            training_type, num_envs, num_transitions_per_env, obs, actions_shape, device
+        )
+        self.next_estimator_input = torch.zeros(
+            num_transitions_per_env, num_envs, next_estimator_input_dim, device=device
+        )
+        self.next_estimator_velocity = torch.zeros(
+            num_transitions_per_env, num_envs, next_estimator_velocity_dim, device=device
+        )
 
-        self.step = 0
+    def add_transition(self, transition: HIMTransition) -> None:
+        index = self.step
+        super().add_transition(transition)
+        self.next_estimator_input[index].copy_(transition.next_estimator_input)
+        self.next_estimator_velocity[index].copy_(transition.next_estimator_velocity)
 
-    def add_transitions(self, transition: Transition):
-        if self.step >= self.num_transitions_per_env:
-            raise AssertionError("Rollout buffer overflow")
-        self.observations[self.step].copy_(transition.observations)
-        if self.privileged_observations is not None: self.privileged_observations[self.step].copy_(transition.critic_observations)
-        if self.next_privileged_observations is not None: self.next_privileged_observations[self.step].copy_(transition.next_critic_observations)
-        self.actions[self.step].copy_(transition.actions)
-        self.rewards[self.step].copy_(transition.rewards.view(-1, 1))
-        self.dones[self.step].copy_(transition.dones.view(-1, 1))
-        self.values[self.step].copy_(transition.values)
-        self.actions_log_prob[self.step].copy_(transition.actions_log_prob.view(-1, 1))
-        self.mu[self.step].copy_(transition.action_mean)
-        self.sigma[self.step].copy_(transition.action_sigma)
-        self.step += 1
+    def mini_batch_generator(
+        self, num_mini_batches: int, num_epochs: int = 8
+    ) -> Generator[HIMBatch, None, None]:
+        """与父类相同顺序的 mini-batch 生成器，额外携带 successor estimator target。
 
-    def clear(self):
-        self.step = 0
-
-    def compute_returns(self, last_values, gamma, lam):
-        advantage = 0
-        for step in reversed(range(self.num_transitions_per_env)):
-            if step == self.num_transitions_per_env - 1:
-                next_values = last_values
-            else:
-                next_values = self.values[step + 1]
-            next_is_not_terminal = 1.0 - self.dones[step].float()
-            delta = self.rewards[step] + next_is_not_terminal * gamma * next_values - self.values[step]
-            advantage = delta + next_is_not_terminal * gamma * lam * advantage
-            self.returns[step] = advantage + self.values[step]
-
-        # Compute and normalize the advantages
-        self.advantages = self.returns - self.values
-        self.advantages = (self.advantages - self.advantages.mean()) / (self.advantages.std() + 1e-8)
-
-    def get_statistics(self):
-        done = self.dones
-        done[-1] = 1
-        flat_dones = done.permute(1, 0, 2).reshape(-1, 1)
-        done_indices = torch.cat((flat_dones.new_tensor([-1], dtype=torch.int64), flat_dones.nonzero(as_tuple=False)[:, 0]))
-        trajectory_lengths = (done_indices[1:] - done_indices[:-1])
-        return trajectory_lengths.float().mean(), self.rewards.mean()
-
-    def mini_batch_generator(self, num_mini_batches, num_epochs=8):
+        复制父类实现的原因：父类按内部 ``randperm`` 索引打乱后再 yield，子类无法从
+        yield 出来的 ``Batch`` 反推同一 ``batch_idx``；要保证 estimator target 与
+        PPO mini-batch 逐样本对齐，只能在同一处索引下构造 batch。
+        """
+        if self.training_type != "rl":
+            raise ValueError("This function is only available for reinforcement learning training.")
         batch_size = self.num_envs * self.num_transitions_per_env
         mini_batch_size = batch_size // num_mini_batches
-        indices = torch.randperm(num_mini_batches*mini_batch_size, requires_grad=False, device=self.device)
+        indices = torch.randperm(
+            num_mini_batches * mini_batch_size, requires_grad=False, device=self.device
+        )
 
         observations = self.observations.flatten(0, 1)
-        if self.privileged_observations is not None:
-            critic_observations = self.privileged_observations.flatten(0, 1)
-            next_critic_observations = self.next_privileged_observations.flatten(0, 1)
-        else:
-            critic_observations = observations
-            next_critic_observations = observations
-
         actions = self.actions.flatten(0, 1)
         values = self.values.flatten(0, 1)
         returns = self.returns.flatten(0, 1)
         old_actions_log_prob = self.actions_log_prob.flatten(0, 1)
         advantages = self.advantages.flatten(0, 1)
-        old_mu = self.mu.flatten(0, 1)
-        old_sigma = self.sigma.flatten(0, 1)
+        old_distribution_params = tuple(p.flatten(0, 1) for p in self.distribution_params)
+        next_estimator_input = self.next_estimator_input.flatten(0, 1)
+        next_estimator_velocity = self.next_estimator_velocity.flatten(0, 1)
 
-        for epoch in range(num_epochs):
+        for _ in range(num_epochs):
             for i in range(num_mini_batches):
+                start = i * mini_batch_size
+                stop = (i + 1) * mini_batch_size
+                batch_idx = indices[start:stop]
 
-                start = i*mini_batch_size
-                end = (i+1)*mini_batch_size
-                batch_idx = indices[start:end]
-
-                obs_batch = observations[batch_idx]
-                next_critic_observations_batch = next_critic_observations[batch_idx]
-                critic_observations_batch = critic_observations[batch_idx]
-                actions_batch = actions[batch_idx]
-                target_values_batch = values[batch_idx]
-                returns_batch = returns[batch_idx]
-                old_actions_log_prob_batch = old_actions_log_prob[batch_idx]
-                advantages_batch = advantages[batch_idx]
-                old_mu_batch = old_mu[batch_idx]
-                old_sigma_batch = old_sigma[batch_idx]
-                yield obs_batch, critic_observations_batch, actions_batch, next_critic_observations_batch, target_values_batch, advantages_batch, returns_batch, \
-                       old_actions_log_prob_batch, old_mu_batch, old_sigma_batch
+                yield HIMBatch(
+                    observations=observations[batch_idx],
+                    actions=actions[batch_idx],
+                    values=values[batch_idx],
+                    advantages=advantages[batch_idx],
+                    returns=returns[batch_idx],
+                    old_actions_log_prob=old_actions_log_prob[batch_idx],
+                    old_distribution_params=tuple(p[batch_idx] for p in old_distribution_params),
+                    next_estimator_input=next_estimator_input[batch_idx],
+                    next_estimator_velocity=next_estimator_velocity[batch_idx],
+                )
