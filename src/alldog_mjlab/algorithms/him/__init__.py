@@ -24,6 +24,7 @@ from .spec import (
     him_spec_from_obs,
 )
 from .storage import HIMBatch, HIMRolloutStorage, HIMTransition
+from .warm_start import WarmStartReport, warm_start_from_ppo_actor
 
 __all__ = [
     "HIMBatch",
@@ -34,8 +35,10 @@ __all__ = [
     "HIMRolloutStorage",
     "HIMSpec",
     "HIMTransition",
+    "WarmStartReport",
     "canonical_history",
     "estimator_target_input",
     "him_spec_from_obs",
     "sinkhorn",
+    "warm_start_from_ppo_actor",
 ]

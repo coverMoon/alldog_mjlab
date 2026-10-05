@@ -365,6 +365,10 @@ class HimParams:
     继续复用 PolicyParams / AlgorithmParams，不在 HIM section 重复。
     official HIM released code 默认：encoder 128→64→latent、target 128→64→latent、
     32 prototypes、temperature 3.0、Adam lr 1e-3、max_grad_norm 10.0。
+
+    ``estimator_learning_rate`` 只是 estimator optimizer 的**构造初始值**；official 语义下
+    每个 update 都会用 PPO 当前/adaptive ``learning_rate`` 覆盖它（见
+    ``HIMPPO._update_estimator``），不是独立的 estimator LR schedule。
     """
 
     latent_dim: int = 16
@@ -372,6 +376,7 @@ class HimParams:
     target_encoder_hidden_dims: tuple[int, ...] = (128, 64)
     num_prototypes: int = 32
     temperature: float = 3.0
+    # 构造初始值；训练时每个 update 被 PPO self.learning_rate 覆盖。
     estimator_learning_rate: float = 1.0e-3
     estimator_max_grad_norm: float = 10.0
 

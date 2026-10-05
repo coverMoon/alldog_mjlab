@@ -76,11 +76,16 @@ def _default_him_params() -> HimRunnerParams:
 
 @dataclass
 class HimRslRlOnPolicyRunnerCfg(RslRlOnPolicyRunnerCfg):
-    """HIM runner cfg（actor/algorithm class 与 HIM interface 为 HIM 独有）。"""
+    """HIM runner cfg（actor/algorithm class 与 HIM interface 为 HIM 独有）。
+
+    ``warm_start``：用 black-flat PPO checkpoint 初始化新 HIM run（初始化，不是 resume）；
+    与 ``resume`` 互斥。source checkpoint 由 ``load_run`` / ``load_checkpoint`` 定位。
+    """
 
     actor: HimRslRlModelCfg = field(default_factory=HimRslRlModelCfg)
     algorithm: HimRslRlPpoAlgorithmCfg = field(default_factory=HimRslRlPpoAlgorithmCfg)
     him: HimRunnerParams = field(default_factory=_default_him_params)
+    warm_start: bool = False
 
 
 def black_him_runner_cfg(stage: Literal["flat", "rough"]) -> HimRslRlOnPolicyRunnerCfg:
