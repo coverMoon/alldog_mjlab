@@ -243,8 +243,15 @@ class HIMPPO(PPO):
         alg_class = resolve_callable(cfg["algorithm"].pop("class_name"))
         actor_class = resolve_callable(cfg["actor"].pop("class_name"))
         critic_class = resolve_callable(cfg["critic"].pop("class_name"))
+        # 与 PPO.construct_algorithm 一样清理 runner cfg 中的非构造字段；HIM 不启用 RND /
+        # symmetry，但 OnPolicyRunner.learn / Logger 会直接读 cfg["algorithm"]["rnd_cfg"]，
+        # 所以必须显式置为 None（与 resolve_rnd_config / resolve_symmetry_config 等价）。
+        cfg["algorithm"].pop("share_cnn_encoders", None)
+        cfg["algorithm"].setdefault("rnd_cfg", None)
+        cfg["algorithm"].setdefault("symmetry_cfg", None)
 
         him_cfg = cfg["him"]
+
         interface = HIMInterface(
             history_group=him_cfg["history_group"],
             velocity_group=him_cfg["velocity_group"],

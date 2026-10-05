@@ -358,6 +358,25 @@ class AlgorithmParams:
 
 
 @dataclass(frozen=True)
+class HimParams:
+    """Black HIM estimator / latent 参数（HIM-only）。
+
+    PPO 侧超参数（actor/critic dims、learning rate、gamma、lam、KL、max_grad_norm 等）
+    继续复用 PolicyParams / AlgorithmParams，不在 HIM section 重复。
+    official HIM released code 默认：encoder 128→64→latent、target 128→64→latent、
+    32 prototypes、temperature 3.0、Adam lr 1e-3、max_grad_norm 10.0。
+    """
+
+    latent_dim: int = 16
+    encoder_hidden_dims: tuple[int, ...] = (128, 64)
+    target_encoder_hidden_dims: tuple[int, ...] = (128, 64)
+    num_prototypes: int = 32
+    temperature: float = 3.0
+    estimator_learning_rate: float = 1.0e-3
+    estimator_max_grad_norm: float = 10.0
+
+
+@dataclass(frozen=True)
 class StageRunnerParams:
     run_name: str
     load_run: str
@@ -374,6 +393,18 @@ class RunnerParams:
     )
     rough: StageRunnerParams = field(
         default_factory=lambda: StageRunnerParams(run_name="rough", load_run=r".*_rough$")
+    )
+    # HIM stage 使用独立 run 名，避免与普通 PPO run 混用（Unit 3 未注册 task，
+    # 也不再做 PPO→HIM warm start；命名只用于将来的正式 HIM run）。
+    flat_him: StageRunnerParams = field(
+        default_factory=lambda: StageRunnerParams(
+            run_name="flat_him", load_run=r".*_flat_him$"
+        )
+    )
+    rough_him: StageRunnerParams = field(
+        default_factory=lambda: StageRunnerParams(
+            run_name="rough_him", load_run=r".*_rough_him$"
+        )
     )
     save_interval: int = 50
     num_steps_per_env: int = 24
@@ -394,6 +425,7 @@ class BlackConfig:
     terrain: TerrainParams = field(default_factory=TerrainParams)
     simulation: SimulationParams = field(default_factory=SimulationParams)
     policy: PolicyParams = field(default_factory=PolicyParams)
+    him: HimParams = field(default_factory=HimParams)
     algorithm: AlgorithmParams = field(default_factory=AlgorithmParams)
     runner: RunnerParams = field(default_factory=RunnerParams)
 

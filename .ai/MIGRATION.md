@@ -26,6 +26,7 @@ Black actor export short CLI: COMPLETE（§19.3）
 Black stage-aware run / resume / export: COMPLETE（§2 / §19.3）
 Black HIM observation / history / estimator target contract: COMPLETE（§20）
 Black HIM algorithm（HIMPolicy / HIMEstimator / HIMPPO）: COMPLETE（§21）
+Black HIM runner integration / checkpoint / resume: COMPLETE（§22）
 Hardware effort/current ceiling: UNCONFIRMED（实机前确认）
 ```
 
@@ -45,7 +46,7 @@ observation、actor、pre-safety `q_policy` 比较均已通过（§17.10 / §19.
 
 ```text
 Black real robot backend（尚未实现；quadruped_control 项目接手）
-HIM runner integration / task registration / warm start / exporter
+HIM task registration / PPO→HIM warm start / flat→rough HIM resume / exporter
 BlackW migration
 ```
 
@@ -54,8 +55,8 @@ BlackW migration
 ```text
 Black sim2real training/deployment contract: COMPLETE
 quadruped_control RealRobotIO/runtime implementation: HANDOFF TO quadruped_control PROJECT
-alldog_mjlab next candidate: HIM runner integration + checkpoint/resume state（§22）;
-                   HIM task-side contract（§20）与 HIM algorithm（§21）已完成
+alldog_mjlab next candidate: black-flat-him registration + PPO actor warm start（§23）;
+                   HIM task-side contract（§20）/ algorithm（§21）/ runner（§22）已完成
 ```
 
 ------
@@ -1277,6 +1278,7 @@ Black cross-runtime policy/safety contract: COMPLETE（§19.12 / §17.10）
 Black PPO deployment / sim2sim compatibility: COMPLETE（§19）
 Black HIM observation / history / estimator target contract: COMPLETE（§20 / §17.12）
 Black HIM algorithm（HIMPolicy / HIMEstimator / HIMPPO / HIMRolloutStorage）: COMPLETE（§21 / §17.13）
+Black HIM runner integration / checkpoint / resume: COMPLETE（§22 / §17.14）
 ```
 
 command 已冻结为固定范围 + native sampler，且不再有任何 curriculum（§4）。
@@ -1294,13 +1296,13 @@ convergence 结论。
 next decision：
 
 ```text
-Unit 3 — MjlabOnPolicyRunner integration + checkpoint/resume state
-（task-side contract §20 与 HIM algorithm §21 已完成）
+Unit 4 — black-flat-him registration + PPO actor warm start
+（task-side contract §20 / HIM algorithm §21 / runner + checkpoint §22 已完成）
 ```
 
 Black real robot backend / sim2real contract 仍等待用户决定，不自动开始实现。
 进入实机前仍须单独决定 inference deadline / 线程配置与 torque 语义（§19.12）。
-`black-flat-him` / `black-rough-him` 仍只有 env-side + algorithm，尚未注册 task。
+`black-flat-him` / `black-rough-him` 已有 env + algorithm + runner cfg，但仍未注册 task。
 ONNX metadata 归属见 §18.1 / §19.4。
 
 ------
@@ -1369,13 +1371,11 @@ terrain height scan（共 259 维，见 §13.4）；flat plane 也保留 raycast
 Black real robot backend / sim2real
     （§19 的 sim2sim contract 验证通过前不开始；ONNX metadata 归属见 §18.1 / §19.4）
 
-HIM runner integration（MjlabOnPolicyRunner / storage-optimizer checkpoint round-trip）
-
 black-flat-him / black-rough-him task registration
 
 PPO→HIM actor warm start
 
-flat HIM → rough HIM resume
+flat HIM → rough HIM resume（含 curriculum / command 跨 stage 语义）
 
 HIM TorchScript / ONNX exporter
 
@@ -1384,10 +1384,10 @@ blackw-flat
 blackw-rough
 ```
 
-HIM task-side observation / history / estimator target contract（§20）与 HIM 模型 /
-HIMPPO 算法（§21）已完成，但 runner、task registration、warm start、checkpoint
-round-trip 与 exporter 仍未实现，因此 `black-flat-him` / `black-rough-him` 尚未注册，
-也不得宣称可训练。
+HIM task-side observation / history / estimator target contract（§20）、HIM 模型 /
+HIMPPO 算法（§21）、`MjlabOnPolicyRunner` 接入与 checkpoint / resume（§22）均已完成，
+但 task registration、PPO→HIM actor warm start、flat→rough HIM full-resume workflow 与
+exporter 未实现，因此 `black-flat-him` / `black-rough-him` 尚未注册，也不得宣称可长训练。
 
 ------
 
@@ -1994,6 +1994,52 @@ checkpoint state    save() 包含 estimator_optimizer_state_dict；新实例 str
 --device cpu` PASS。
 本单元未注册 task、未做 warm start、未验证 checkpoint round-trip、未实现 exporter、
 未做长训练 / 收敛验证。
+
+------
+
+### 17.14 Black HIM runner / checkpoint / resume（PASS）
+
+新增 `src/alldog_mjlab/tasks/velocity/black/him_rl_cfg.py`，共享 refactor 在
+`rl_cfg.py`（`black_ppo_algorithm_kwargs` / `black_critic_model_cfg` /
+`black_actor_distribution_cfg`），`black_config.py` 增加 HIM-only `him` section 与
+`flat_him` / `rough_him` run 名。本地验证工具：`tests/check_black_him_runner.py`
+（不提交 Git）。
+
+结果（Black flat HIM env，8 envs，12 steps/rollout，episode 0.2 s）：
+
+```text
+CPU  PASS
+CUDA PASS（RTX 4060 Laptop 8 GiB）
+```
+
+关键验证：
+
+```text
+config layering    12 项 PPO 超参数 / critic cfg / actor dims 与普通 PPO 逐值一致，
+                   仅 HIM 独有字段（class、encoder、latent、prototype、estimator lr）单独声明
+construction       MjlabOnPolicyRunner → HIMPPO → HIMPolicy + MLPModel + HIMRolloutStorage
+obs routing        obs_groups actor=[actor] / critic=[critic]；estimator_velocity 不进入两者
+module ownership   actor 22 params（estimator 13 + mlp 8 + std 1）无重复注册；
+                   estimator.state_dict() 带前缀后是 actor.state_dict() 子集；无 estimator_state_dict 重复
+runner learn       learn(2) 真实跑通 rollout/update；loss = value 0.014 / surrogate -0.068 /
+                   entropy 17.02 / estimation 0.356 / swap 0.108，均 finite
+checkpoint         lr 3e-4（模拟 KL 调整值）、iter 1、common_step_counter 24、
+                   critic normalizer 逐一恢复
+optimizer state    PPO 51 个 / estimator 39 个 Adam tensor（step / exp_avg / exp_avg_sq）逐值一致
+inference parity   固定 obs：action [4,12] / critic / source encoder + latent 均一致；
+                   仅给 actor group 也能得到同一 action
+shared source enc  load 后 estimator optimizer 参数与 inference 读取的 source encoder 同一对象；
+                   estimator step 后 inference 输出同步变化
+resume             load 后 learn(2)：首个 logged iter = 1（从恢复值继续），
+                   iter 1→2；PPO step 和 680→1360，estimator step 和 533→1053；loss finite
+flat/rough         actor [6,45] / critic [259] / estimator_velocity [3]、HIMSpec、
+                   model state shapes 完全一致
+```
+
+既有回归：`tests/check_black_flat.py --device cpu`（含 `rl_cfg.py` refactor 后的 PPO
+config）PASS；`tests/check_black_him.py --device cpu`、`tests/check_black_him_algo.py
+--device cpu` 均 PASS。
+本单元未注册 task、未做 warm start、未做 flat→rough resume、未实现 exporter、未做长训练。
 
 ------
 
@@ -3292,7 +3338,123 @@ HIM TorchScript / ONNX exporter
 
 ------
 
-## 22. Next Migration Order
+## 22. Frozen Black HIM Runner / Checkpoint Contract
+
+阶段状态：
+
+```text
+Black HIM runner integration（MjlabOnPolicyRunner）+ checkpoint / resume: COMPLETE
+task registration / PPO→HIM warm start / flat→rough HIM resume / exporter: NOT STARTED
+```
+
+本单元把 §21 的算法接入现有 `MjlabOnPolicyRunner`，不新增 custom HIM runner，也不注册
+task；验证通过本地 config 构造 + runner 直接实例化（与 MjLab train CLI 同路径，只是不经过
+registry）。
+
+### 22.1 Runner 调用链
+
+```text
+ManagerBasedRlEnv(black_flat_him_env_cfg)
+   ↓
+RslRlVecEnvWrapper
+   ↓
+MjlabOnPolicyRunner(env, agent_cfg_dict, log_dir, device)
+   ↓
+OnPolicyRunner.__init__ → HIMPPO.construct_algorithm(obs, env, cfg, device)
+   ↓
+HIMPolicy（含 HIMEstimator）+ MLPModel(critic) + HIMRolloutStorage
+   ↓
+OnPolicyRunner.learn() → alg.act / process_env_step / compute_returns / update
+```
+
+- 无 `HIMRunner` / `HIMOnPolicyRunner`；`MjlabOnPolicyRunner` 内不含任何 HIM 特判。
+- `HIMPPO.construct_algorithm` 与 `PPO.construct_algorithm` 同签名，并补齐
+  `share_cnn_encoders` pop 与 `rnd_cfg` / `symmetry_cfg = None`（RSL-RL 5.4.2 的
+  `OnPolicyRunner.learn` / `Logger` 会直接读 `cfg["algorithm"]["rnd_cfg"]`）。
+
+### 22.2 Config layering
+
+```text
+BLACK_CONFIG（唯一人工入口 black_config.py）
+   ├── policy / algorithm / runner   ← black_ppo_runner_cfg 与 black_him_runner_cfg 共用
+   └── him（HimParams）               ← HIM-only：latent_dim / encoder dims / prototypes /
+                                         temperature / estimator lr / max_grad_norm
+```
+
+- `rl_cfg.py` 提供 `black_ppo_algorithm_kwargs` / `black_critic_model_cfg` /
+  `black_actor_distribution_cfg`，两条路径复用同一映射，不复制 PPO 数值。
+- `him_rl_cfg.py` 只声明 HIM-only：`HIMPPO` / `HIMPolicy` class、estimator 结构、
+  `HimRunnerParams`（history/velocity group、command_dim、latent_dim、terminal keys）。
+- HIM stage run 名：`flat_him` / `rough_him`（`load_run` 对应 `.*_flat_him$` /
+  `.*_rough_him$`），与普通 PPO run 分离。
+
+### 22.3 Observation group 路由
+
+```text
+obs_groups actor  = ["actor"]      （[B,6,45] history）
+obs_groups critic = ["critic"]     （[B,259]）
+estimator_velocity（[B,3]）不进入 actor / critic obs set，只被 HIMPPO.process_env_step 读取
+actor normalizer = disabled；critic normalizer = enabled（与 Black PPO 一致）
+```
+
+### 22.4 Module ownership
+
+```text
+source encoder 唯一 Parameter object：HIMPolicy.estimator.encoder
+HIMPolicy.state_dict() 含 estimator.{encoder,target,proto} + mlp + distribution.std_param
+HIMEstimator.state_dict() 是 HIMPolicy.state_dict() 的带前缀子集（无重复 authoritative state）
+checkpoint 不单独保存 estimator_state_dict，只额外保存 estimator optimizer state
+inference（HIMPolicy.forward）只用 source encoder + actor MLP；target encoder / prototypes
+不参与推理，也不被 policy inference 读取
+```
+
+### 22.5 Checkpoint contract
+
+`HIMPPO.save()` = `PPO.save()`（actor_state_dict / critic_state_dict /
+optimizer_state_dict）+ `estimator_optimizer_state_dict`；`MjlabOnPolicyRunner.save()`
+再补 `iter` 与 `infos.env_state.common_step_counter`。
+
+保存 / 恢复：
+
+```text
+actor policy params（含 mlp / distribution std）          ✔
+source encoder / target encoder / prototypes                ✔（在 actor_state_dict 内）
+critic params                                                ✔
+critic normalizer buffers                                    ✔
+PPO optimizer state（含 adaptive lr 的 param_groups）        ✔
+estimator optimizer state（Adam step/exp_avg/exp_avg_sq）    ✔
+current learning rate                                        ✔（PPO optimizer param_groups[0]["lr"]）
+training iteration                                           ✔
+MjLab common_step_counter（training metadata）                ✔
+```
+
+### 22.6 Resume 语义边界
+
+```text
+training-state continuation
+    模型 / optimizer / normalizer / adaptive lr / iteration / common_step_counter
+
+simulator trajectory continuation
+    未保存完整 qpos/qvel、warp RNG、command RNG 等，不保证
+    resume 后逐 step 与未中断训练 bitwise 相同
+```
+
+resume 后的环境从新的 reset state 继续；不实现 simulator serialization。
+
+### 22.7 本单元不做
+
+```text
+black-flat-him / black-rough-him task registration
+PPO→HIM actor warm start
+flat HIM → rough HIM resume workflow
+HIM TorchScript / ONNX exporter（HIMPolicy 尚无 as_jit / as_onnx）
+multi-GPU HIM（reduce_parameters / broadcast_parameters 未按 HIM 参数分账适配；
+当前项目默认单进程训练）
+```
+
+------
+
+## 23. Next Migration Order
 
 Black flat/rough 与训练侧 sim2real contract 已完成；部署代码由独立项目接手。
 下表保留完成状态与本仓库当前下一候选：
@@ -3333,10 +3495,12 @@ Black flat/rough 与训练侧 sim2real contract 已完成；部署代码由独�
      CPU + CUDA 真实 rollout → storage → update PASS，optimizer 分账与 terminal
      override 已验证；black-flat-him / black-rough-him 仍未注册。）
 12. MjlabOnPolicyRunner integration + checkpoint / resume state
-    （下一单元：把 §21 算法接入现有 MjlabOnPolicyRunner（不复制 legacy HIM runner），
-     打通 estimator optimizer state / checkpoint round-trip / resume，再注册
-     black-flat-him / black-rough-him；仍不做 warm start / exporter；
-     不开始 BlackW / real backend。）
+    （完成：§22。HIMPPO 接入现有 MjlabOnPolicyRunner，无 custom HIM runner；
+     estimator optimizer state / adaptive lr / iteration / common_step_counter 均 round-trip；
+     CPU + CUDA runner learn / save / load / resume PASS。）
+13. black-flat-him registration + PPO→HIM actor warm start
+    （下一单元：注册 black-flat-him（必要时 black-rough-him），并把 45-D PPO actor
+     迁移到 64-D HIM actor；仍不做 exporter / BlackW / real backend。）
 ```
 
 已插入完成的非 behavior 任务：
@@ -3352,7 +3516,7 @@ Black training configuration consolidation v2    （完成，behavior-neutral）
 
 ------
 
-## 23. Update Rule
+## 24. Update Rule
 
 每完成一个 behavior unit：
 
