@@ -15,7 +15,6 @@ import math
 @dataclass(frozen=True)
 class EnvParams:
     # Black 训练默认 4096 env，play 默认 1；CLI 显式指定时仍以 CLI 为准。
-    # 要由此处控制训练环境数，运行 train 时不要传 --env.scene.num-envs。
     train_num_envs: int = 4096
     play_num_envs: int = 1
     episode_length_s: float = 20.0
@@ -438,7 +437,7 @@ class RunnerParams:
         )
     )
     save_interval: int = 50
-    num_steps_per_env: int = 24
+    num_steps_per_env: int = 100
     max_iterations: int = 10_000
 
 
