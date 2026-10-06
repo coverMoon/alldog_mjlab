@@ -7,10 +7,14 @@ warm start 与 resume 严格区分：
 
 ```text
 --agent.warm-start True   ：用 black-flat PPO checkpoint 初始化新 HIM run（新 optimizer /
-                            新 iteration / 新 env state）
+                            新 iteration / 新 env state）；仅 black-flat-him 支持
+                            （rough HIM 从 flat HIM checkpoint full resume，见下方）
 --agent.resume True       ：同一 HIM 算法的完整训练状态恢复（HIMPPO.load）
 两者同时开启 → 直接报错
 ```
+
+正式训练路线为 flat PPO → flat HIM → rough HIM，因此 rough HIM 显式不支持 PPO→HIM
+warm start（`warm_start_supported = False`，见 him_rl_cfg.py），请求时直接报错。
 
 source checkpoint 定位复用 runner cfg 的 ``load_run`` / ``load_checkpoint``，
 路径解析与 MjLab ``run_train`` 的 resume 路径完全一致
@@ -41,6 +45,11 @@ class BlackHimOnPolicyRunner(MjlabOnPolicyRunner):
                 "PPO→HIM warm start 与同算法 resume 互斥："
                 "`--agent.warm-start` 与 `--agent.resume` 不能同时使用。"
                 "warm start 是初始化（新 optimizer / iteration），resume 是 HIM 训练状态恢复。"
+            )
+        if train_cfg.get("warm_start") and not train_cfg.get("warm_start_supported", True):
+            raise ValueError(
+                "PPO→HIM warm start currently supported only for black-flat-him. "
+                "Train/warm-start flat HIM first, then full-resume into black-rough-him."
             )
         self._warm_start_info: dict | None = None
         super().__init__(env, train_cfg, log_dir, device, **kwargs)

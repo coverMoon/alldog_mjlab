@@ -86,6 +86,7 @@ class HimRslRlOnPolicyRunnerCfg(RslRlOnPolicyRunnerCfg):
     algorithm: HimRslRlPpoAlgorithmCfg = field(default_factory=HimRslRlPpoAlgorithmCfg)
     him: HimRunnerParams = field(default_factory=_default_him_params)
     warm_start: bool = False
+    warm_start_supported: bool = True
 
 
 def black_him_runner_cfg(stage: Literal["flat", "rough"]) -> HimRslRlOnPolicyRunnerCfg:
@@ -120,4 +121,7 @@ def black_him_runner_cfg(stage: Literal["flat", "rough"]) -> HimRslRlOnPolicyRun
         save_interval=runner.save_interval,
         num_steps_per_env=runner.num_steps_per_env,
         max_iterations=runner.max_iterations,
+        # 正式训练路线 flat PPO → flat HIM → rough HIM：PPO→HIM warm start 只支持 flat。
+        # rough HIM 只能从 flat HIM checkpoint full resume。
+        warm_start_supported=(stage == "flat"),
     )
