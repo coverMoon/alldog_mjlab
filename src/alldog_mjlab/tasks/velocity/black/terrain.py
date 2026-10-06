@@ -34,6 +34,8 @@ from scipy import interpolate
 
 from mjlab.terrains import (
     BoxFlatTerrainCfg,
+    BoxInvertedPyramidStairsTerrainCfg,
+    BoxPyramidStairsTerrainCfg,
     HfDiscreteObstaclesTerrainCfg,
     HfPyramidSlopedTerrainCfg,
     SubTerrainCfg,
@@ -231,8 +233,19 @@ class BlackRoughSlopeTerrainCfg(SubTerrainCfg):
 def black_rough_terrain_generator_cfg() -> TerrainGeneratorCfg:
     """Black rough v1 的 curriculum terrain generator。
 
-    5 类 sub-terrain（curriculum 模式下每类一列）、10 行难度；`proportion` 在
+    7 类 sub-terrain（curriculum 模式下每类一列）、10 行难度；`proportion` 在
     curriculum 模式下是 **env 分配权重**，不是列数。
+
+    stairs（up / down）使用 native box 金字塔台阶（MjLab v1.6.0 无 heightfield
+    台阶 primitive）：step_height 按 difficulty 线性插值，
+    ``step_height_range = (base, base + gain)`` 使
+    ``step_height(d) = 0.05 + 0.18 d`` 与 legacy super-dog 一致；step_width 0.3、
+    platform 3.0 同 legacy。spawn 语义：up 在顶层 platform、down 在底部 platform
+    （native origin；legacy add_terrain_to_map 取中心区域最大高度，等价）。
+    与 legacy 的差异：native 是真实竖直台阶沿，legacy heightfield 台缘是
+    0.1 m 网格的 1 格斜坡；native 台阶层数比 legacy 多一层（origin
+    = (num_steps+1) × step_height vs legacy 顶层 8 步）。这是有意 framework
+    difference，不声称 exact reproduction。
     """
     terrain_params = BLACK_CONFIG.terrain
     terrain_params.validate()
@@ -284,6 +297,26 @@ def black_rough_terrain_generator_cfg() -> TerrainGeneratorCfg:
                 horizontal_scale=terrain_params.horizontal_scale,
                 vertical_scale=terrain_params.vertical_scale,
                 square_obstacles=False,
+            ),
+            "stairs_up": BoxPyramidStairsTerrainCfg(
+                proportion=proportions["stairs_up"],
+                # (base, base + gain)：difficulty d ∈ [0, 0.9] 上等价 legacy
+                # step_height = 0.05 + 0.18 d（difficulty_range 上限 0.9）。
+                step_height_range=(
+                    terrain_params.stair_step_height_base,
+                    terrain_params.stair_step_height_base + terrain_params.stair_step_height_gain,
+                ),
+                step_width=terrain_params.stair_step_width,
+                platform_width=terrain_params.platform_width,
+            ),
+            "stairs_down": BoxInvertedPyramidStairsTerrainCfg(
+                proportion=proportions["stairs_down"],
+                step_height_range=(
+                    terrain_params.stair_step_height_base,
+                    terrain_params.stair_step_height_base + terrain_params.stair_step_height_gain,
+                ),
+                step_width=terrain_params.stair_step_width,
+                platform_width=terrain_params.platform_width,
             ),
         },
     )

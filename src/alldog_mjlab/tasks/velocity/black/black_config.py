@@ -278,11 +278,13 @@ class TerrainParams:
     # 各 terrain 的 env 分配权重
     proportions: dict[str, float] = field(
         default_factory=lambda: {
-            "flat": 0.20,
-            "smooth_slope_up": 0.15,
-            "smooth_slope_down": 0.15,
-            "rough_slope": 0.30,
+            "flat": 0.10,
+            "smooth_slope_up": 0.05,
+            "smooth_slope_down": 0.05,
+            "rough_slope": 0.10,
             "discrete_obstacles": 0.20,
+            "stairs_up": 0.25,
+            "stairs_down": 0.25,
         }
     )
 
@@ -301,6 +303,17 @@ class TerrainParams:
     obstacle_width_range: tuple[float, float] = (1.0, 2.0)
     obstacle_count: int = 20
 
+    # stairs（native box 金字塔台阶，up / down）：
+    # step_height = stair_step_height_base + difficulty x stair_step_height_gain
+    #             = 0.05 + 0.18 x d（super-dog HEAD lineage）；
+    # step_width 恒 0.3 m（legacy 中的宽度课程学习插值是 dead code，实际恒 0.3）。
+    # 几何实现为 MjLab native BoxPyramidStairsTerrainCfg /
+    # BoxInvertedPyramidStairsTerrainCfg（真实竖直台阶沿，legacy 为 heightfield
+    # 0.1 m 网格量化；台缘形状为有意 framework difference）。
+    stair_step_height_base: float = 0.05
+    stair_step_height_gain: float = 0.18
+    stair_step_width: float = 0.3
+
     # 初始 terrain level 上限（inclusive，与 legacy max_init_terrain_level 同义）
     max_init_terrain_level: int = 5
 
@@ -311,6 +324,8 @@ class TerrainParams:
             "smooth_slope_down",
             "rough_slope",
             "discrete_obstacles",
+            "stairs_up",
+            "stairs_down",
         }
         if set(self.proportions) != expected:
             raise ValueError(f"Black terrain proportions must have keys {sorted(expected)}")
