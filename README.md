@@ -90,58 +90,6 @@ logs/rsl_rl/black_velocity/
 | Rough → Rough | `uv run train black-rough --agent.resume True` |
 | Flat → Rough | `uv run train black-rough --agent.resume True --agent.load-run '.*_flat$'` |
 
-### HIM 训练链（Black HIM）
-
-正式路线为三步：flat PPO →（warm start）flat HIM →（full resume）rough HIM。
-
-```bash
-# ① PPO → HIM warm start（初始化，不是 resume；仅 black-flat-him 支持）
-uv run train black-flat-him \
-    --agent.warm-start True \
-    --agent.load-run '.*_flat$' \
-    --agent.max-iterations 3000 \
-    --agent.logger tensorboard
-
-# ② 也可随机初始化直接训 HIM（官方 HIMLoco 标准路线）
-uv run train black-flat-him --agent.max-iterations 3000 --agent.logger tensorboard
-
-# ③ flat HIM → rough HIM full resume（完整恢复训练状态）
-uv run train black-rough-him \
-    --agent.resume True \
-    --agent.load-run '.*_flat_him$' \
-    --agent.max-iterations 3000 \
-    --agent.logger tensorboard
-```
-
-warm start 只迁移 actor / critic / normalizer（初始化，新 optimizer / 新 iteration）；
-full resume 恢复完整训练状态（模型 / 双 optimizer / normalizer / lr / iteration /
-common_step_counter）。rough HIM 上 warm start 显式不支持（fail-loud）。
-注意默认 logger 是 wandb，本地使用需显式传 `--agent.logger tensorboard`。
-
-### `load-run` 的寻找机制
-
-checkpoint 解析由 MjLab 原生 `get_checkpoint_path()` 完成，路径从固定根开始：
-
-```text
-<log-root>/<experiment_name>/        ← 默认 logs/rsl_rl/black_velocity/
-    ├── <timestamp>_<run_name>/      ← 第一层子目录即 run，不递归更深
-    │   └── model_*.pt              ← checkpoint 文件
-    └── ...
-```
-
-1. 从 `<log-root>/<experiment_name>` 目录开始，扫描**第一层子目录**（不递归；
-   `wandb_checkpoints` 目录被排除）；
-2. 目录名用 `re.match` 匹配 `--agent.load-run` 正则（match 从名字开头锚定，所以
-   写 `.*_flat$` 这种带前缀通配的形式）；
-3. 匹配的 run 按**目录名字典序**排序（时间戳前缀 → 即时间序），取最新；
-4. 在该 run 内，文件名匹配 `--agent.load-checkpoint` 正则（默认 `model_.*.pt`），
-   同样取最新；
-5. 无匹配 run / checkpoint 直接报错，不静默回退。
-
-`--agent.resume True` 不传 `--agent.load-run` 时，默认 load-run 来自该 stage 的
-runner cfg（`.*_flat$` / `.*_rough$` / `.*_flat_him$` / `.*_rough_him$`），即
-“本 stage 最新 run”。跨 stage 续训必须显式传 `--agent.load-run`。
-
 ### 常用 CLI 覆盖参数
 
 ```bash
