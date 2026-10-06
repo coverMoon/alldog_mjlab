@@ -141,14 +141,25 @@ class ResetParams:
 class TerminationParams:
     """终止阈值。
 
-    illegal_contact_force [N]：trunk / thigh 与 terrain 接触力超过它即终止；
-    illegal_contact_history 取一个 control step 内的 physics substep 数。
+    illegal_contact_force [N]：illegal_contact_bodies 内 body 与 terrain 接触力
+    超过它即终止；illegal_contact_history 取一个 control step 内的 physics
+    substep 数。illegal_contact_bodies 是 legged_gym 式
+    ``termination_contact_names`` 的等价配置项：触发碰撞终止的 body 集合，
+    默认为冻结的 trunk + 四 thigh（不含 hip / calf / foot）。名字必须与 robot
+    body 名一致，错误名字在 env 构建时 fail-loud。
     stuck_* [s] / [m/s] / [m/s] / [s]：有效 planar command 下沿指令方向无 progress
     的连续时长超过 stuck_timeout 即终止，stuck_grace 内不计时。
     """
 
     illegal_contact_force: float = 1.0
     illegal_contact_history: int = 4
+    illegal_contact_bodies: tuple[str, ...] = (
+        "trunk",
+        "FL_thigh",
+        "FR_thigh",
+        "RL_thigh",
+        "RR_thigh",
+    )
 
     stuck_timeout: float = 4.0
     stuck_velocity_threshold: float = 0.05

@@ -93,16 +93,10 @@ BLACK_ACTOR_OBS_SCALE: dict[str, float | tuple[float, ...]] = {
     "actions": BLACK_CONFIG.observation.last_action_scale,
 }
 
-# 摔倒终止 sensor 身份与 body selector：trunk + 四 thigh 对 terrain。
-# 不含 calf / foot / hip。
+# 摔倒终止 sensor 身份：illegal_contact_bodies（config 可配）对 terrain。
+# 触发 body 集合由 BLACK_CONFIG.termination.illegal_contact_bodies 决定
+# （默认 trunk + 四 thigh，不含 calf / foot / hip）。
 BLACK_ILLEGAL_CONTACT_SENSOR = "illegal_ground_contact"
-BLACK_ILLEGAL_CONTACT_BODIES = (
-    "trunk",
-    "FL_thigh",
-    "FR_thigh",
-    "RL_thigh",
-    "RR_thigh",
-)
 
 # Command term 名称属于 task wiring：reward / termination / observation 都按名字取它。
 BLACK_COMMAND_NAME = "twist"
@@ -217,7 +211,7 @@ def _configure_scene_and_sensors(cfg: ManagerBasedRlEnvCfg) -> None:
         name=BLACK_ILLEGAL_CONTACT_SENSOR,
         primary=ContactMatch(
             mode="body",
-            pattern=BLACK_ILLEGAL_CONTACT_BODIES,
+            pattern=BLACK_CONFIG.termination.illegal_contact_bodies,
             entity="robot",
         ),
         secondary=ContactMatch(
