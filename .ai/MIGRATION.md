@@ -28,6 +28,8 @@ Black HIM observation / history / estimator target contract: COMPLETE（§20）
 Black HIM algorithm（HIMPolicy / HIMEstimator / HIMPPO）: COMPLETE（§21）
 Black HIM runner integration / checkpoint / resume: COMPLETE（§22）
 black-flat-him registration + PPO→HIM warm start: COMPLETE（§23）
+black-rough-him registration + flat→rough HIM full resume: COMPLETE（§24）
+Black rough stairs terrain（up / down）: COMPLETE（§13.5）
 Hardware effort/current ceiling: UNCONFIRMED（实机前确认）
 ```
 
@@ -47,7 +49,7 @@ observation、actor、pre-safety `q_policy` 比较均已通过（§17.10 / §19.
 
 ```text
 Black real robot backend（尚未实现；quadruped_control 项目接手）
-black-rough-him registration / flat→rough HIM resume / exporter
+HIM exporter
 BlackW migration
 ```
 
@@ -56,8 +58,8 @@ BlackW migration
 ```text
 Black sim2real training/deployment contract: COMPLETE
 quadruped_control RealRobotIO/runtime implementation: HANDOFF TO quadruped_control PROJECT
-alldog_mjlab next candidate: black-rough-him registration + flat HIM → rough HIM full resume（§24）;
-                   HIM task-side（§20）/ algorithm（§21）/ runner（§22）/ flat HIM task（§23）已完成
+alldog_mjlab next candidate: Black HIM training validation（§24 / §25 item 16）;
+                   black-rough-him 注册与 flat→rough HIM full resume 已完成（§24）
 ```
 
 ------
@@ -491,7 +493,9 @@ episode_length = 20.0 s
 contact force magnitude > 1.0 N
 ```
 
-时 termination：
+时 termination。触发 body 集合由
+`BLACK_CONFIG.termination.illegal_contact_bodies` 配置（legged_gym 式
+``termination_contact_names`` 等价项），冻结默认为：
 
 ```text
 trunk
@@ -588,15 +592,16 @@ limit  = max(0, half - margin)
 out    = |root_x_w| > limit_x  OR  |root_y_w| > limit_y      # 严格 >，非 >=
 ```
 
-当前 Black rough 数值（由 runtime terrain config 推导，非硬编码）：
+当前 Black rough 数值（由 runtime terrain config 推导，非硬编码；§13.5 加入
+stairs up/down 后 terrain 类型数 5 → 7）：
 
 ```text
-effective grid   10 x 5（curriculum 模式一个 terrain 一列）
+effective grid   10 x 7（curriculum 模式一个 terrain 一列）
 patch            8 x 8 m
 border_width     20 m
 margin           0.3 m（native default，未显式传入）
-half_x / half_y  60.0 / 40.0 m
-limit_x / limit_y  59.7 / 39.7 m
+half_x / half_y  60.0 / 48.0 m
+limit_x / limit_y  59.7 / 47.7 m
 train  注册（末尾追加）
 play   移除
 flat   不注册（也不依赖 always-False）
@@ -1138,6 +1143,7 @@ discrete_obstacles   0.20   HfDiscreteObstaclesTerrainCfg(mode="choice")
 slope            = 0.7 * d        （smooth 与 rough 相同；max 0.63）
 rough noise      = ±(0.015 + 0.1 d)，step 0.005，downsample 0.2（双线性）
 obstacle height  = 0.06 + 0.2 d   （choice 模式：±h 与 ±h/2 混合坑与凸起）
+stair step height = 0.05 + 0.18 d （up / down 同式，见 §13.5）
 ```
 
 未迁移（本轮明确不含）：stairs / wave / stepping stones / gap / bridge / wall。
@@ -1253,6 +1259,49 @@ Black flat / rough PPO 当前配置
     observation contract，不在本 baseline 内
 ```
 
+### 13.5 stairs（up / down，2026-10 stair unit 加入）
+
+用户确认的两个决策：几何用 native box stairs；权重用 super-dog HEAD lineage 分布。
+
+legacy 来源（super-dog `legged_gym/utils/terrain.py` `make_terrain()`，HEAD lineage）：
+
+```text
+step_height = 0.05 + 0.18 × difficulty       # d=0 → 0.05 m，d=0.9 → 0.212 m
+up / down   ：stairs block 内按 choice 分方向（HEAD 版本 up/down 各 0.25）
+step_width  ：恒 0.3 m（legacy 中的"宽度课程学习"插值是 dead code：
+              current_step_width 算完未使用，调用写死 step_width=0.3）
+platform    3.0 m
+几何        heightfield 金字塔台阶（0.1 m 网格 / 0.005 m 量化，台缘 1 格斜坡）
+```
+
+MjLab v1.6.0 只有 mesh box 台阶（无 heightfield 台阶 primitive），采用 native：
+
+```text
+stairs_up     BoxPyramidStairsTerrainCfg
+stairs_down   BoxInvertedPyramidStairsTerrainCfg
+step_height_range = (0.05, 0.23)
+    → h(d) = 0.05 + d × 0.18，d ∈ [0, 0.9] 与 legacy 公式逐值一致
+step_width = 0.3 / platform_width = 3.0（同 legacy）
+```
+
+spawn 语义：up 的 origin z = (num_steps+1) × step_height（顶层 platform，实测
+0.45 → 1.908 m 随难度递增）；down 的 origin z = -(num_steps+1) × step_height
+（底部 platform，实测 -0.45 → -1.908 m）。legacy 的 add_terrain_to_map 取中心
+区域最大 raw 高度，对 up/down 台阶同样落在顶层 / 底部 platform，等价。
+
+Intentional framework difference（不声称 exact reproduction）：
+
+```text
+1. native 是真实竖直台阶沿的 mesh box；legacy heightfield 台缘是 0.1 m 网格上
+   的 1 格斜坡。box 台阶对 policy 略更严格。
+2. native 顶层 platform 比 legacy 多一层（(num_steps+1) 步 vs legacy 8 步）。
+3. legacy 的"宽度课程学习"插值（0.3 → 0.2 m）是 dead code，不迁移。
+```
+
+不变量：terrain curriculum（terrain_levels_vel）、height_scan / critic 187 维、
+base_height footprint reward、OOB（effective grid 10 x 7 → limit 59.7 / 47.7）、
+command / action / reward / DR / termination 全部不变；nconmax = 128 保持。
+
 ------
 
 ## 14. In Progress
@@ -1281,6 +1330,8 @@ Black HIM observation / history / estimator target contract: COMPLETE（§20 / �
 Black HIM algorithm（HIMPolicy / HIMEstimator / HIMPPO / HIMRolloutStorage）: COMPLETE（§21 / §17.13）
 Black HIM runner integration / checkpoint / resume: COMPLETE（§22 / §17.14）
 black-flat-him registration + PPO→HIM warm start: COMPLETE（§23 / §17.15）
+black-rough-him registration + flat→rough HIM full resume: COMPLETE（§24 / §17.16）
+Black rough stairs terrain（up / down, native box）: COMPLETE（§13.5）
 ```
 
 command 已冻结为固定范围 + native sampler，且不再有任何 curriculum（§4）。
@@ -1298,13 +1349,13 @@ convergence 结论。
 next decision：
 
 ```text
-Unit 5 — black-rough-him registration + flat HIM → rough HIM full resume
-（task-side §20 / algorithm §21 / runner §22 / flat HIM task §23 已完成）
+Black HIM training validation — flat HIM 收敛 + flat→rough HIM 训练行为
+（registration / resume 机制已全部完成；"算法能跑" ≠ "算法训练有效"）
 ```
 
 Black real robot backend / sim2real contract 仍等待用户决定，不自动开始实现。
 进入实机前仍须单独决定 inference deadline / 线程配置与 torque 语义（§19.12）。
-`black-flat-him` 已注册；`black-rough-him` 仍未注册。
+`black-flat-him` / `black-rough-him` 均已注册；flat→rough HIM full resume 已验证。
 ONNX metadata 归属见 §18.1 / §19.4。
 
 ------
@@ -1370,12 +1421,10 @@ terrain height scan（共 259 维，见 §13.4）；flat plane 也保留 raycast
 以下均未开始，不得提前宣称支持：
 
 ```text
+Black HIM 长训练收敛验证（flat HIM 收敛 + flat→rough HIM 训练有效性）
+
 Black real robot backend / sim2real
-    （§19 的 sim2sim contract 验证通过前不开始；ONNX metadata 归属见 §18.1 / §19.4）
-
-black-rough-him task registration
-
-flat HIM → rough HIM full resume（含 curriculum / command 跨 stage 语义）
+    （ONNX metadata 归属见 §18.1 / §19.4）
 
 HIM TorchScript / ONNX exporter
 
@@ -1386,8 +1435,8 @@ blackw-rough
 
 HIM task-side observation / history / estimator target contract（§20）、HIM 模型 /
 HIMPPO 算法（§21）、`MjlabOnPolicyRunner` 接入与 checkpoint / resume（§22）、
-`black-flat-him` 注册与 PPO→HIM warm start（§23）均已完成；但 `black-rough-him` 未注册，
-flat→rough HIM full-resume workflow 与 exporter 未实现。
+`black-flat-him` 注册与 PPO→HIM warm start（§23）、`black-rough-him` 注册与
+flat→rough HIM full resume（§24）均已完成。rough stairs terrain（§13.5）已完成。
 
 ------
 
@@ -1398,14 +1447,20 @@ flat→rough HIM full-resume workflow 与 exporter 未实现。
 ```text
 tests/check_black_flat.py        flat 的 migration verification tool
 tests/check_black_rough.py       rough 的 terrain / terrain scan verification tool
+tests/check_black_rough_him.py   rough HIM 注册 + flat→rough HIM full resume verification
+tests/check_black_him.py         HIM task-side contract（Unit 1）
+tests/check_black_him_algo.py    HIM 算法（Unit 2）
+tests/check_black_him_runner.py  HIM runner / checkpoint（Unit 3）
+tests/check_black_him_warm_start.py  flat HIM 注册 + warm start（Unit 4）
 tests/render_black_rough.py      rough terrain 的可视化渲染（人工检查用）
 ```
 
 作为 migration verification tool。
 
-`tests/check_black_rough.py` 覆盖（见 §13 / §13.4）：flat 仍为 plane / 空 curriculum，
+`tests/check_black_rough.py` 覆盖（见 §13 / §13.4 / §13.5）：flat 仍为 plane / 空 curriculum，
 与 rough 共用 terrain_scan 和 critic layout；rough generator 的 size / num_rows /
-difficulty_range / border / max_init / 5 类 sub-terrain 与 proportion；curriculum 只含
+difficulty_range / border / max_init / 7 类 sub-terrain（含 native box stairs up/down 的
+step_height_range / step_width / platform）与 proportion；curriculum 只含
 terrain_levels；逐行难度
 0.0 → 0.9；slope = 0.7d、rough noise ±(0.015 + 0.1d) / step 0.005 / downsample 0.2、
 obstacle height 0.06 + 0.2d；50 个 spawn origin 的 ray-cast 落面检查；terrain_scan
@@ -1421,6 +1476,7 @@ native OOB、time_out=True、params 为空）与 OOB runtime（由 runtime terra
 effective 10 x 5 grid / 60.0 / 40.0 / 59.7 / 39.7 、严格 > 边界 probe、
 ``time_outs`` True 而 ``terminated`` False 的 truncation 语义、OOB reset 后 curriculum
 level 合法且无 NaN、plane 恒 False、正常 rollout OOB fires = 0）；
+stairs 列的 spawn z 随难度单调（up 递增 / down 递减负值）与 spawn 落面；
 少量 env 的 zero / random rollout smoke。
 
 当前应持续覆盖：
@@ -2092,6 +2148,33 @@ CUDA：black-flat-him --agent.warm-start True ...                     exit 0
 既有回归：`tests/check_black_flat.py` / `check_black_rough.py` / `check_black_him.py` /
 `check_black_him_algo.py` / `check_black_him_runner.py` 均 `--device cpu` PASS。
 本单元未注册 `black-rough-him`、未做 flat→rough resume、未实现 exporter、未做长训练。
+
+------
+
+### 17.16 Unit 5 / stairs 验证记录（2026-10-06）
+
+```text
+tests/check_black_rough_him.py --device cpu        PASS
+    registry / task contract / command 一致 / schema 一致 / full-resume state parity
+    （双 optimizer step/exp_avg/exp_avg_sq 逐 tensor）/ model parity max_abs_error=0.0 /
+    rough env identity / iteration 续接（1→3）/ losses finite / 参数变化 /
+    terrain curriculum term 执行 / warm-start 显式拒绝
+tests/check_black_rough_him.py --device cuda       PASS
+tests/check_black_flat.py    cpu + cuda            PASS
+tests/check_black_rough.py   cpu + cuda            PASS（7 类 terrain + stairs 数值）
+tests/check_black_him.py / check_black_him_algo.py /
+tests/check_black_him_runner.py / check_black_him_warm_start.py（cpu）   PASS
+CLI（CUDA）: uv run train black-flat-him 2-iter smoke →
+             uv run train black-rough-him --agent.resume True
+             --agent.load-run '.*_flat_him$' 2-iter smoke        PASS（iter 1→2 续接）
+CLI 负例: uv run train black-rough-him --agent.warm-start True →
+             ValueError "PPO→HIM warm start currently supported only for
+             black-flat-him. ..."                                 PASS
+```
+
+注：smoke checkpoint 仅 2 iteration（随机初始化），不能站立 / 行走属预期，
+不是配置缺陷（play viewer 观察到的摔倒 / 频繁 reset 已由诊断确认：action 非 0、
+qvel 正常、illegal_contact ≈0.65 s 一次）。
 
 ------
 
@@ -3115,7 +3198,7 @@ joint/IMU stale 数值、sample skew、transaction timeout、safe Kd、SDK Disab
 
 ```text
 Black HIM observation / history / estimator target contract: COMPLETE
-HIM estimator / HIMPPO / warm start / exporter:               NOT STARTED
+HIM estimator / HIMPPO / warm start / exporter:               NOT STARTED（后续 unit 完成；task 注册见 §23 / §24）
 ```
 
 本单元只建立 HIM algorithm integration 之前的 task-side 数据契约，不包含任何算法更新，
@@ -3256,7 +3339,7 @@ BlackW / symmetry
 
 ```text
 Black HIM algorithm（HIMPolicy / HIMEstimator / HIMPPO / HIMRolloutStorage）: COMPLETE
-MjlabOnPolicyRunner integration / task registration / checkpoint round-trip:     NOT STARTED
+MjlabOnPolicyRunner integration / task registration / checkpoint round-trip:     NOT STARTED（后续 unit 完成；见 §22 / §23 / §24）
 ```
 
 本单元在 Unit 1 task-side contract 之上实现 HIM 模型与训练算法，并在 RSL-RL v5.4.2 +
@@ -3397,6 +3480,7 @@ HIM TorchScript / ONNX exporter
 ```text
 Black HIM runner integration（MjlabOnPolicyRunner）+ checkpoint / resume: COMPLETE
 task registration / PPO→HIM warm start / flat→rough HIM resume / exporter: NOT STARTED
+（task 注册与 warm start 后续完成：§23 / §24；exporter 仍未开始）
 ```
 
 本单元把 §21 的算法接入现有 `MjlabOnPolicyRunner`，不新增 custom HIM runner，也不注册
@@ -3513,7 +3597,8 @@ multi-GPU HIM（reduce_parameters / broadcast_parameters 未按 HIM 参数分账
 ```text
 black-flat-him registration:                        COMPLETE
 PPO → HIM warm start（black-flat → black-flat-him）: COMPLETE
-black-rough-him / flat→rough HIM resume / exporter:  NOT STARTED
+black-rough-him / flat→rough HIM resume:            COMPLETE（§24）
+exporter:                                           NOT STARTED
 ```
 
 ### 23.1 Registration
@@ -3610,7 +3695,107 @@ rl_sar / quadruped_control / BlackW / symmetry / multi-GPU
 
 ------
 
-## 24. Next Migration Order
+## 24. Frozen black-rough-him Task + Flat HIM → Rough HIM Full Resume Contract
+
+阶段状态：
+
+```text
+black-rough-him registration:                          COMPLETE
+flat HIM → rough HIM full resume:                      COMPLETE（CPU + CUDA）
+rough HIM PPO→HIM warm start:                          显式不支持（fail-loud）
+exporter / BlackW / 长训练收敛验证:                      NOT STARTED
+```
+
+### 24.1 Registration
+
+```text
+task_id     black-rough-him
+env cfg     black_rough_him_env_cfg（= black_rough_env_cfg + HIM contract，Unit 1 已有）
+play cfg    black_rough_him_env_cfg(play=True)
+rl cfg      black_him_runner_cfg("rough")
+runner_cls  BlackHimOnPolicyRunner（与 black-flat-him 同一个 class，无 rough-specific runner）
+```
+
+四个 Black task：`black-flat` / `black-rough`（VelocityOnPolicyRunner + black_ppo_runner_cfg）、
+`black-flat-him` / `black-rough-him`（BlackHimOnPolicyRunner + black_him_runner_cfg）。
+flat / rough HIM 的 runner cfg 除 stage 命名外逐字段相等（测试断言）。
+
+### 24.2 训练路线与 CLI
+
+```text
+正式路线：black-flat PPO →（warm start）black-flat-him →（full resume）black-rough-him
+
+# PPO → HIM warm start（仅 black-flat-him）
+uv run train black-flat-him --agent.warm-start True --agent.load-run '.*_flat$' ...
+
+# flat HIM → rough HIM full resume
+uv run train black-rough-him \
+    --agent.resume True \
+    --agent.load-run '.*_flat_him$' [short-smoke overrides]
+
+# rough HIM 上 warm start 显式拒绝（ HimRslRlOnPolicyRunnerCfg.warm_start_supported=False，
+# BlackHimOnPolicyRunner.__init__ fail-loud）：
+#   "PPO→HIM warm start currently supported only for black-flat-him. "
+#   "Train/warm-start flat HIM first, then full-resume into black-rough-him."
+# 不根据 checkpoint shape 自动放行。
+```
+
+`--agent.warm-start` 与 `--agent.resume` 仍互斥；checkpoint 解析复用
+`get_checkpoint_path()`（load_run / load_checkpoint 正则，最新匹配）。
+
+### 24.3 Full-resume state contract（与普通 PPO 跨 stage 完全同语义）
+
+transfer（经继承自 `MjlabOnPolicyRunner` 的标准 `load()` 路径，无 HIM 特判）：
+
+```text
+actor MLP + distribution std                    yes
+source encoder / target encoder / prototypes    yes（actor_state_dict 内）
+critic + critic normalizer                      yes
+PPO optimizer state（含 adaptive lr）            yes（step / exp_avg / exp_avg_sq 逐 tensor 验证）
+estimator optimizer state                       yes（同上）
+learning rate                                   yes
+training iteration                              yes
+common_step_counter                             yes（继承；与 rough env runtime state 是两回事）
+```
+
+fresh（不迁移）：
+
+```text
+flat qpos/qvel / episode / command sampler runtime / simulator state /
+RNG trajectory / terrain state —— 全部不迁移；rough env 与 terrain curriculum
+按 rough cfg 新建（terrain_levels 由 rough env 初始化 contract 产生）。
+```
+
+iteration 语义与普通 PPO 一致：`max_iterations` 是 additional iterations
+（source iter = N 时继续 N → N + M），不是绝对上限（实测 source iter=1 → 2 iters → 3）。
+
+### 24.4 已验证事实
+
+```text
+checkpoint parity: actor / critic / estimator / normalizer / 双 optimizer
+                   （step / exp_avg / exp_avg_sq）/ lr / iteration / counter 逐项一致
+model parity:      固定 synthetic obs 下 deterministic action / critic /
+                   source encoder velocity+latent 的 max_abs_error = 0.0
+rough env:         terrain generator + terrain_levels curriculum + OOB truncation +
+                   nconmax 128 均存在；terrain levels 属于新 rough env
+terrain curriculum: term 实际执行（episode 推进后 level 状态合法；极短 smoke 不伪造
+                   level 数值变化的 PASS）
+command:           flat HIM == rough HIM（固定范围、无 command curriculum）
+CLI:               flat HIM checkpoint → black-rough-him full resume（CPU + CUDA）PASS
+```
+
+### 24.5 本单元不做
+
+```text
+HIM 长训练 / 收敛验证 / reward / 超参调优
+rough PPO → rough HIM warm start（路线外，显式拒绝）
+HIM TorchScript / ONNX exporter
+rl_sar / quadruped_control / BlackW / symmetry / multi-GPU
+```
+
+------
+
+## 25. Next Migration Order
 
 Black flat/rough 与训练侧 sim2real contract 已完成；部署代码由独立项目接手。
 下表保留完成状态与本仓库当前下一候选：
@@ -3659,9 +3844,16 @@ Black flat/rough 与训练侧 sim2real contract 已完成；部署代码由独�
      做 actor first-layer 45→64 零填充映射 + distribution + critic + normalizer 迁移；
      CPU + CUDA CLI / runner / parity / negative cases PASS。）
 14. black-rough-him registration + flat HIM → rough HIM full resume
-    （下一单元：注册 black-rough-him，并验证 flat HIM checkpoint 向 rough HIM 的完整
-     HIMPPO resume（含 curriculum / command 跨 stage 语义）；仍不做 exporter /
-     BlackW / real backend。）
+    （完成：§24。注册 + standard load() full resume + warm-start 显式拒绝；
+     CPU + CUDA checkpoint parity / model parity / runner smoke PASS。）
+15. Black rough stairs terrain（up / down）
+    （完成：§13.5。native box stairs + HEAD lineage proportions（7 类）；
+     terrain curriculum / height_scan / OOB / reward contract 不变；
+     CPU + CUDA PASS。）
+16. Black HIM training validation — flat convergence + flat→rough training behavior
+    （下一单元：先真实确认 Black HIM 能在 flat 上稳定学习（随机初始化直训为首选，
+     官方 HIMLoco 标准路线），再 full resume 到 rough 完成合理续训；
+     "算法能跑" ≠ "算法训练有效"。不直接开始 exporter。）
 ```
 
 已插入完成的非 behavior 任务：
@@ -3677,7 +3869,7 @@ Black training configuration consolidation v2    （完成，behavior-neutral）
 
 ------
 
-## 25. Update Rule
+## 26. Update Rule
 
 每完成一个 behavior unit：
 

@@ -15,7 +15,7 @@ AllDog MjLab 是 XJTUROBOCON 四足机器人强化学习训练仓库，基于 Mj
 | Black rough PPO | Available / baseline verified；长期收敛与定量评估尚未完成 |
 | TorchScript actor export | Available |
 | Black deployment policy contract | Verified；observation/action trace 与 sim2sim 已验证 |
-| HIM | Not yet integrated into production |
+| Black HIM（flat-him / rough-him） | Available；注册 + warm start + flat→rough full resume 已验证，长训练收敛未验证 |
 | BlackW | Not yet migrated |
 | Real robot backend | 在独立 deployment project 中维护，尚未实现 |
 
@@ -37,11 +37,13 @@ uv run train black-rough \
     --agent.load-run '.*_flat$'
 ```
 
-播放本地 rough checkpoint：
+播放本地 rough checkpoint（桌面环境默认开 MuJoCo native 窗口，网页版用 `--viewer viser`，
+详见下文 Playing a Policy）：
 
 ```bash
 uv run play black-rough \
-    --checkpoint-file 'logs/rsl_rl/black_velocity/<rough-run>/model_500.pt'
+    --checkpoint-file 'logs/rsl_rl/black_velocity/<rough-run>/model_500.pt' \
+    --viewer viser
 ```
 
 导出最新 rough actor：
@@ -88,6 +90,73 @@ logs/rsl_rl/black_velocity/
 | Rough → Rough | `uv run train black-rough --agent.resume True` |
 | Flat → Rough | `uv run train black-rough --agent.resume True --agent.load-run '.*_flat$'` |
 
+### HIM 训练链（Black HIM）
+
+正式路线为三步：flat PPO →（warm start）flat HIM →（full resume）rough HIM。
+
+```bash
+# ① PPO → HIM warm start（初始化，不是 resume；仅 black-flat-him 支持）
+uv run train black-flat-him \
+    --agent.warm-start True \
+    --agent.load-run '.*_flat$' \
+    --agent.max-iterations 3000 \
+    --agent.logger tensorboard
+
+# ② 也可随机初始化直接训 HIM（官方 HIMLoco 标准路线）
+uv run train black-flat-him --agent.max-iterations 3000 --agent.logger tensorboard
+
+# ③ flat HIM → rough HIM full resume（完整恢复训练状态）
+uv run train black-rough-him \
+    --agent.resume True \
+    --agent.load-run '.*_flat_him$' \
+    --agent.max-iterations 3000 \
+    --agent.logger tensorboard
+```
+
+warm start 只迁移 actor / critic / normalizer（初始化，新 optimizer / 新 iteration）；
+full resume 恢复完整训练状态（模型 / 双 optimizer / normalizer / lr / iteration /
+common_step_counter）。rough HIM 上 warm start 显式不支持（fail-loud）。
+注意默认 logger 是 wandb，本地使用需显式传 `--agent.logger tensorboard`。
+
+### `load-run` 的寻找机制
+
+checkpoint 解析由 MjLab 原生 `get_checkpoint_path()` 完成，路径从固定根开始：
+
+```text
+<log-root>/<experiment_name>/        ← 默认 logs/rsl_rl/black_velocity/
+    ├── <timestamp>_<run_name>/      ← 第一层子目录即 run，不递归更深
+    │   └── model_*.pt              ← checkpoint 文件
+    └── ...
+```
+
+1. 从 `<log-root>/<experiment_name>` 目录开始，扫描**第一层子目录**（不递归；
+   `wandb_checkpoints` 目录被排除）；
+2. 目录名用 `re.match` 匹配 `--agent.load-run` 正则（match 从名字开头锚定，所以
+   写 `.*_flat$` 这种带前缀通配的形式）；
+3. 匹配的 run 按**目录名字典序**排序（时间戳前缀 → 即时间序），取最新；
+4. 在该 run 内，文件名匹配 `--agent.load-checkpoint` 正则（默认 `model_.*.pt`），
+   同样取最新；
+5. 无匹配 run / checkpoint 直接报错，不静默回退。
+
+`--agent.resume True` 不传 `--agent.load-run` 时，默认 load-run 来自该 stage 的
+runner cfg（`.*_flat$` / `.*_rough$` / `.*_flat_him$` / `.*_rough_him$`），即
+“本 stage 最新 run”。跨 stage 续训必须显式传 `--agent.load-run`。
+
+### 常用 CLI 覆盖参数
+
+```bash
+--env.scene.num-envs 2048          # 环境数量（默认 BLACK_CONFIG.env.train_num_envs = 4096）
+--agent.max-iterations 500         # 追加 iteration 数（resume 时是“再训多少”，非绝对上限）
+--agent.seed 43
+--agent.save-interval 100          # checkpoint 保存间隔（另：最后一个 iteration 总是保存）
+--agent.logger tensorboard
+--agent.run-name mytag             # run 目录后缀 → <timestamp>_mytag
+--agent.load-run / --agent.load-checkpoint
+```
+
+环境数量不影响 checkpoint 兼容性：不同 env 数训练的 run 可以互相 resume。
+显式 CLI 参数优先于 `black_config.py` 中的 task 默认值。
+
 同 stage resume 默认选最新匹配的 `*_flat` / `*_rough` run，再选最新 `model_*.pt`。
 指定某个 flat run 和 checkpoint：
 
@@ -118,10 +187,54 @@ uv run play black-rough \
     --checkpoint-file 'logs/rsl_rl/black_velocity/<rough-run>/model_500.pt'
 ```
 
-`--checkpoint-file` 接收训练 checkpoint 的路径。play 使用对应 task 的 play configuration，
-默认一个环境，关闭 training DR 与 actor observation corruption；reset events 保留。
-rough play 保留 terrain generator，关闭 curriculum 和 terrain 越界 truncation。
-推理仅加载 actor，不使用 critic。
+HIM task 同样可播（推理只读 actor history，不读 estimator target）：
+
+```bash
+uv run play black-flat-him \
+    --checkpoint-file 'logs/rsl_rl/black_velocity/<flat-him-run>/model_*.pt'
+uv run play black-rough-him \
+    --checkpoint-file 'logs/rsl_rl/black_velocity/<rough-him-run>/model_*.pt'
+```
+
+### Viewer 选择
+
+```bash
+--viewer viser     # 浏览器网页 UI（viser，默认 http://localhost:8080；
+                   #   command 滑条 / reward 面板 / checkpoint 热切换）
+--viewer native    # MuJoCo 桌面窗口（无 command 控件）
+--viewer auto      # 默认：检测到桌面显示环境 → native，否则 → viser
+```
+
+`auto` 在桌面会话下落到 native，因此想用网页控制速度必须显式传 `--viewer viser`。
+
+### Play 参数
+
+```bash
+--num-envs 4                       # 环境/机器人数量（默认单 env）
+--agent zero|random|trained        # policy 模式（zero/random 可做 ad-hoc 检查）
+--checkpoint-file '<path>'         # 直接指定 checkpoint 文件
+```
+
+play 使用对应 task 的 play configuration，默认关闭 training DR 与 actor observation
+corruption；reset events 保留。rough play 保留 terrain generator，关闭 curriculum 和
+terrain 越界 truncation。推理仅加载 actor，不使用 critic。
+
+## Inspection / Visualization
+
+只看地形（不训练、不 play、无机器人）：
+
+```bash
+# 交互式 MuJoCo 窗口（需 DISPLAY；鼠标左键旋转 / 右键平移 / 滚轮缩放）
+uv run python tests/render_black_rough.py --viewer
+uv run python tests/render_black_rough.py --viewer --row 9 --col 5   # 聚焦最难的上台阶
+
+# headless 输出图片（俯视全图 + 每列斜视图 + rough slope 三档难度）
+uv run python tests/render_black_rough.py --out /tmp/render
+```
+
+网格为 10 行（难度 0.0 → 0.9）x 7 列（terrain 类型）：
+`flat / smooth_slope_up / smooth_slope_down / rough_slope / discrete_obstacles /
+stairs_up / stairs_down`。`tests/` 下的脚本仅用于本地检查，不提交 Git。
 
 ## Exporting a Policy
 
@@ -188,8 +301,25 @@ Actor 为单帧 **45-D**，privileged critic 为 **259-D**，包含 terrain heig
 
 在 flat 契约上加入 rough terrain generator、terrain curriculum、terrain-relative
 base-height reward 和 training 下的 rough terrain safety truncation。
+Terrain 为 7 类 curriculum generator（含 native box 台阶 stairs up/down，
+step_height = 0.05 + 0.18 × difficulty；spawn 权重取 super-dog HEAD lineage：
+flat 0.10 / slopes 0.05+0.05 / rough 0.10 / obstacles 0.20 / stairs 0.25+0.25）。
 Actor contract 与 flat 一致（45-D），critic layout 也与 flat 一致（259-D）。
 约 500 iteration 的 PPO baseline 已验证，长期收敛与定量评估仍待完成。
+
+### `black-flat-him`
+
+`black-flat` + HIM observation contract：actor 输入为 6 帧 history `[B, 6, 45]`，
+推理另需 source encoder（history → velocity 估计 + latent）；训练额外使用
+estimator velocity target 与 terminal successor recorder，算法为 HIMPPO。
+支持 `--agent.warm-start True` 从 black-flat PPO checkpoint 初始化。
+
+### `black-rough-him`
+
+`black-rough` + HIM contract（同 flat-him 与 rough 的关系，环境 contract 不因 HIM 改变）。
+不支持 PPO→HIM warm start；训练入口是 flat HIM checkpoint 的 full resume：
+`--agent.resume True --agent.load-run '.*_flat_him$'`。
+长训练收敛未验证。
 
 Task 层组织与进一步说明见 [`src/alldog_mjlab/tasks/README.md`](src/alldog_mjlab/tasks/README.md)。
 
@@ -243,10 +373,11 @@ Deployment framework 从 simulation/hardware state 构造 observation，把 poli
 
 ## Roadmap
 
-当前 production 已提供 Black flat/rough PPO、stage-aware resume、TorchScript export
-和已验证的 deployment policy contract。近期继续训练调参与评估；
-后续计划包括 HIM integration、BlackW flat/rough，以及更晚的任务扩展。
-HIM、BlackW 和实机 backend 当前均未在本仓库实现。
+当前 production 已提供 Black flat/rough PPO、Black HIM（flat-him / rough-him）训练链路
+（warm start + full resume 已验证）、stage-aware resume、TorchScript actor-only export
+和已验证的 deployment policy contract。近期继续 HIM 长训练收敛验证、训练调参与评估；
+后续计划包括 HIM exporter、BlackW flat/rough，以及更晚的任务扩展。
+HIM TorchScript/ONNX exporter、BlackW 和实机 backend 当前均未在本仓库实现。
 
 ## Related Projects
 
