@@ -508,7 +508,7 @@ class RunnerParams:
         )
     )
     save_interval: int = 50
-    num_steps_per_env: int = 100
+    num_steps_per_env: int = 64
     max_iterations: int = 10_000
     # resume 时 command curriculum state 的默认恢复策略（PPO / HIM 共用；语义见
     # curriculum_checkpoint.resolve_restore_mode）。
@@ -526,7 +526,7 @@ class RunnerParams:
     #
     # CLI ``--agent.command-curriculum-restore`` 可临时覆盖人工默认值；
     # PPO→HIM warm start 不经过本字段（固定 range，见 him_runner.py）。
-    command_curriculum_restore: Literal["auto", "none", "range", "full"] = "auto"
+    command_curriculum_restore: Literal["auto", "none", "range", "full"] = "range"
 
 
 @dataclass(frozen=True)
