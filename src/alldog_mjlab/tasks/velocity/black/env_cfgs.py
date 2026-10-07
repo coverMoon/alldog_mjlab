@@ -712,11 +712,14 @@ def _configure_common_runtime(cfg: ManagerBasedRlEnvCfg, *, play: bool) -> None:
 def _configure_play(cfg: ManagerBasedRlEnvCfg) -> None:
     """play 模式：nominal physics（移除整组 DR），只保留 reset events。
 
-    ``out_of_terrain_bounds`` 也在 play 下移除（与 MjLab native rough play 一致）；
-    其余 termination（illegal_contact / stuck / time_out）不变。
+    碰撞类终止也在 play 下全部关闭（本轮：``illegal_contact`` 移除；
+    ``out_of_terrain_bounds`` 已移除）—— play 用于观察 / 评估 policy 行为，
+    偶发触地不应打断 rollout；``stuck`` 是无 progress 检测（非碰撞），保留；
+    ``time_out`` 因 play episode 极长实际不会触发，保留 MjLab truncation 语义。
     """
     cfg.episode_length_s = int(1e9)
     cfg.observations["actor"].enable_corruption = False
+    cfg.terminations.pop("illegal_contact", None)
     cfg.terminations.pop("out_of_terrain_bounds", None)
     for event_name in (
         "foot_friction",

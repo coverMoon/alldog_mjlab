@@ -609,12 +609,15 @@ Critic observation仍然沿用当前 MjLab privileged observation设计，尚未
 
 ## 6. Frozen Termination Contract
 
-当前 training termination：
+当前 training termination（play 关闭全部碰撞类终止）：
 
 ```text
-black-flat   train / play : time_out + illegal_contact + stuck
-black-rough  train        : time_out + illegal_contact + stuck + out_of_terrain_bounds
-black-rough  play         : time_out + illegal_contact + stuck
+black-flat   train : time_out + illegal_contact + stuck
+black-flat   play  : time_out + stuck（illegal_contact 已移除；time_out 因 play
+                      episode 极长实际不触发）
+black-rough  train : time_out + illegal_contact + stuck + out_of_terrain_bounds
+black-rough  play  : time_out + stuck（illegal_contact / out_of_terrain_bounds
+                      均已移除）
 ```
 
 ### 6.1 Timeout
@@ -1212,7 +1215,8 @@ push
 只保留 reset events（`reset_base` / `reset_hip_joints` / `reset_thigh_joints` /
 `reset_calf_joints`），并继续关闭 actor corruption。
 
-train / play 的区别仅剩：DR、actor observation corruption、episode 长度；command
+train / play 的区别仅剩：DR、actor observation corruption、episode 长度、
+碰撞类终止（play 无 illegal_contact）；command
 contract 两侧完全相同（见 §4）。
 
 ### 12.3 Deferred DR（不在 v1）
