@@ -102,6 +102,7 @@ def black_him_runner_cfg(stage: Literal["flat", "rough"]) -> HimRslRlOnPolicyRun
         raise ValueError(f"unknown Black HIM training stage: {stage}")
     stage_runner = getattr(runner, f"{stage}_him")
     return HimRslRlOnPolicyRunnerCfg(
+        command_curriculum_restore=runner.command_curriculum_restore,
         actor=HimRslRlModelCfg(
             hidden_dims=policy.actor_hidden_dims,
             activation=policy.activation,

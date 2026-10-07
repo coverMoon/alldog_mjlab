@@ -53,7 +53,9 @@ CURRICULUM_TERM_NAME = "command"
 #   none  —— 不恢复（新训练 / 旧 checkpoint fallback，保持初始范围与 fresh 统计）
 #   range —— 只恢复 vx 范围（跨训练条件 / 跨 stage / PPO→HIM warm start）
 #   full  —— 逐值恢复 range + EMA + streak + buffer（同 stage 精确续训）
+# "auto" 仅用于 runner cfg 默认策略：按 source/target stage 元数据选择 full / range / none。
 RestoreMode = Literal["none", "range", "full"]
+RunnerRestoreMode = Literal["auto", "none", "range", "full"]
 
 
 class ForwardSpeedCommandCurriculum(ManagerTermBase):

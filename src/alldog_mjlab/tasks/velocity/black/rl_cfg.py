@@ -81,6 +81,7 @@ def black_ppo_runner_cfg(stage: Literal["flat", "rough"]) -> BlackRslRlOnPolicyR
         raise ValueError(f"unknown Black training stage: {stage}")
     stage_runner = getattr(runner, stage)
     return BlackRslRlOnPolicyRunnerCfg(
+        command_curriculum_restore=runner.command_curriculum_restore,
         actor=RslRlModelCfg(
             hidden_dims=policy.actor_hidden_dims,
             activation=policy.activation,

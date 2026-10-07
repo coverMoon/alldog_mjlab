@@ -100,7 +100,7 @@ src/alldog_mjlab/tasks/velocity/black/rl_cfg.py
 ```text
 black_config.py
     Black flat/rough 单一人工训练参数入口：BLACK_CONFIG，typed sections 覆盖
-    env/control/command/observation/noise/reset/termination/reward/domain_rand/
+    env/control/command/command_curriculum/observation/noise/reset/termination/reward/domain_rand/
     terrain/simulation/policy/algorithm/runner。train_num_envs=4096、
     play_num_envs=1；CLI 显式环境数量仍可覆盖 task 默认值。physics dt=0.005、
     decimation=4，policy dt 由二者相乘；control.action_scale=0.25。
@@ -445,7 +445,10 @@ src/alldog_mjlab/tasks/velocity/black/curriculum_checkpoint.py
     会整体重建 infos["env_state"]，不复制无法扩展该字段）
 ```
 
-restore mode（``command_curriculum_restore`` config，默认 ``auto``）：
+restore mode（``command_curriculum_restore`` config；默认值由
+``BLACK_CONFIG.runner.command_curriculum_restore`` 统一配置，PPO / HIM 共用，
+CLI ``--agent.command-curriculum-restore`` 仍可临时覆盖；PPO→HIM warm start
+不走该字段，固定 range）：
 
 ```text
 none  —— 不恢复：初始 range [-1,1]、EMA / streak / buffer fresh

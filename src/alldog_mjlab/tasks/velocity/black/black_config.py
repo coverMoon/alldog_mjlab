@@ -9,6 +9,7 @@ scale 与 actor observation scales。修改它们须建立新训练契约并重�
 """
 
 from dataclasses import dataclass, field
+from typing import Literal
 import math
 
 
@@ -509,6 +510,23 @@ class RunnerParams:
     save_interval: int = 50
     num_steps_per_env: int = 100
     max_iterations: int = 10_000
+    # resume 时 command curriculum state 的默认恢复策略（PPO / HIM 共用；语义见
+    # curriculum_checkpoint.resolve_restore_mode）。
+    #
+    # auto:
+    #   same-stage resume   -> full
+    #   cross-stage resume  -> range
+    #   old checkpoint 无 curriculum state -> none + warning
+    # full:
+    #   逐值恢复 range + EMA + streak + pending buffer
+    # range:
+    #   只恢复 vx range；EMA / streak / buffer fresh
+    # none:
+    #   不恢复 curriculum state
+    #
+    # CLI ``--agent.command-curriculum-restore`` 可临时覆盖人工默认值；
+    # PPO→HIM warm start 不经过本字段（固定 range，见 him_runner.py）。
+    command_curriculum_restore: Literal["auto", "none", "range", "full"] = "auto"
 
 
 @dataclass(frozen=True)
