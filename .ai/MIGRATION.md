@@ -1573,7 +1573,7 @@ Black HIM 长训练收敛验证（flat HIM 收敛 + flat→rough HIM 训练有�
 Black real robot backend / sim2real
     （ONNX metadata 归属见 §18.1 / §19.4）
 
-HIM TorchScript / ONNX exporter
+HIM ONNX exporter（HIM TorchScript 导出已完成，见 §19.3；当前部署只消费 TorchScript）
 
 blackw-flat
 
@@ -2545,28 +2545,39 @@ checkpoint（如 `model_498.pt`）是 RSL-RL 训练 checkpoint，**不能**直�
 ```text
 实现              src/alldog_mjlab/utils/export_policy.py
 checkpoint 加载   MjLab runner 的 load(..., load_cfg={"actor": True}, strict=True)
-导出              RSL-RL 5.4.2 原生 runner.export_policy_to_jit()（actor.as_jit()）
-环境              task registry 的 play cfg（num_envs = 1），维度取自 env 而非 checkpoint
+导出              RSL-RL 5.4.2 原生 runner.export_policy_to_jit()
+                  （PPO：MLPModel.as_jit；HIM：HIMPolicy.as_jit，见下）
+环境              task registry 的 play cfg（num_envs = 1），维度取自 env / HIMSpec 而非 checkpoint
 ```
 
-当前标准入口：`uv run export --task-id <task>`。由 `load_rl_cfg(task_id)` 取得
-`experiment_name`，在 `logs/rsl_rl/<experiment_name>` 下直接使用 MjLab v1.6
-`get_checkpoint_path()` 按 task runner 的 stage 默认 `load_run`（flat 为 `.*_flat$`，
-rough 为 `.*_rough$`）选择最新匹配 run 与 checkpoint（默认
-`model_.*.pt`），输出到 `<run>/exported/policy.pt`。可用 `--load-run`、
-`--checkpoint` 指定名称或正则，用 `--output-dir` 改输出目录；文件名始终为
-`policy.pt`，设备默认 CPU。Black flat / rough 当前共用 `black_velocity` 日志目录，
+当前标准入口：`uv run export --task-id <task>`（PPO / HIM task 均支持）。由
+`load_rl_cfg(task_id)` 取得 `experiment_name`，在 `logs/rsl_rl/<experiment_name>`
+下直接使用 MjLab v1.6 `get_checkpoint_path()` 按 task runner 的 stage 默认
+`load_run`（flat 为 `.*_flat$`，rough 为 `.*_rough$`，HIM 为 `.*_flat_him$` /
+`.*_rough_him$`）选择最新匹配 run 与 checkpoint（默认 `model_.*.pt`），输出到
+`<run>/exported/policy.pt`。可用 `--load-run`、`--checkpoint` 指定名称或正则，
+用 `--output-dir` 改输出目录；文件名始终为 `policy.pt`，设备默认 CPU。
+Black flat / rough 当前共用 `black_velocity` 日志目录，
 因此在共同 root 中分别按 stage 选择；历史无后缀 run 仅通过显式 `--load-run` 访问。
-CLI 仅改变路径解析；actor 加载、RSL-RL 原生 JIT 导出与三组 probe 数值等价验证不变。
-无对应 stage run 时明确报无匹配，不回退到 legacy run。显式 legacy `model_498.pt`
-actor-only CPU export 三组 probe 误差均为 0，TorchScript 独立 reload PASS。
+无对应 stage run 时明确报无匹配，不回退到 legacy run。
 
 导出模块的 deployment contract（冻结）：
 
 ```text
-input   float32 [1, 45]   actor 单帧 observation
-output  float32 [1, 12]   policy action
+PPO  input  float32 [1, 45]   actor 单帧 observation
+     output float32 [1, 12]   policy action
+
+HIM  input  float32 [1, 270]  canonical history（frame-major，newest → oldest，
+                              与任务侧 him.canonical_history() 同语义，§20.1）
+     output float32 [1, 12]   policy action
 ```
+
+`_HimActorJit`（algorithms/him/policy.py）为 HIMPolicy 的脚本化包装：输入
+canonical [B, 270]，current frame 取前 45 列（canonical 中最新帧在最前），source
+encoder 直接消费全部 270 列，输出 velocity + L2 normalized latent，与 current frame 拼接后经 actor MLP →
+deterministic action；与推理路径 `get_latent()` 数值
+等价（3 组 probe max_abs_diff = 0）。history / canonical 维度由 HIMSpec 运行时
+读取（不硬编码 6 / 270）。HIM ONNX 导出未实现（当前部署只消费 TorchScript）。
 
 验收已满足：同一 observation 下与 checkpoint actor 的 deterministic forward 在
 atol 1e-6 / rtol 1e-5 内一致（实测三组 probe 的 max abs diff 均为 0.0，见 §17.3）。

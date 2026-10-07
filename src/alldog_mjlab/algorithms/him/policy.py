@@ -28,8 +28,11 @@ obs[history_group]  [B, H, F]
 
 from __future__ import annotations
 
+import copy
+
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from tensordict import TensorDict
 
 from rsl_rl.modules import MLP, HiddenState
@@ -38,6 +41,55 @@ from rsl_rl.utils import resolve_callable
 
 from .estimator import HIMEstimator
 from .spec import HIMSpec, canonical_history
+
+
+class _HimActorJit(nn.Module):
+    """HIM actor 的可脚本化导出包装（TorchScript deployment contract）。
+
+    输入为 canonical history：float32 ``[B, H × F]``，frame-major 且 newest → oldest
+    （与任务侧 ``canonical_history()`` 一致，见 MIGRATION.md §20.1）；内部：
+
+    ```text
+    current frame  = 输入的前 F 列（canonical 中最新帧在最前）
+    encoder        = source encoder(canonical 全部 H×F 列) → velocity + L2-normalized latent
+    actor MLP      = mlp(cat(current, velocity, latent)) → deterministic action
+    ```
+
+    encoder / mlp 为训练权重的 deepcopy，导出后不依赖 runner / estimator 对象。
+    """
+
+    def __init__(self, policy: HIMPolicy) -> None:
+        super().__init__()
+        spec = policy.spec
+        self.frame_dim: int = spec.single_frame_dim
+        self.velocity_dim: int = spec.velocity_dim
+        self.history_dim: int = spec.history_dim
+        self.encoder = copy.deepcopy(policy.estimator.encoder)
+        self.mlp = copy.deepcopy(policy.mlp)
+        if policy.distribution is not None:
+            self.deterministic_output = policy.distribution.as_deterministic_output_module()
+        else:
+            self.deterministic_output = nn.Identity()
+
+    def forward(self, canonical_history: torch.Tensor) -> torch.Tensor:
+        if canonical_history.dim() != 2 or canonical_history.shape[-1] != self.history_dim:
+            # TorchScript 内不能动态打印 shape，只给出固定 contract 文本。
+            raise ValueError(
+                "HIM actor input must be float32 [B, %d] canonical history "
+                "(frame-major, newest→oldest)." % self.history_dim
+            )
+        current = canonical_history[:, : self.frame_dim]
+        encoded = self.encoder(canonical_history)
+        velocity = encoded[:, : self.velocity_dim]
+        latent = F.normalize(encoded[:, self.velocity_dim :], dim=-1, p=2.0)
+        return self.deterministic_output(
+            self.mlp(torch.cat((current, velocity, latent), dim=-1))
+        )
+
+    @torch.jit.export
+    def reset(self) -> None:
+        """Reset recurrent export state（HIM feedforward，无 recurrence）。"""
+        pass
 
 
 class HIMPolicy(nn.Module):
@@ -165,6 +217,14 @@ class HIMPolicy(nn.Module):
     def update_normalization(self, obs: TensorDict) -> None:
         """HIM actor 不做 running normalization（见模块 docstring）。"""
         del obs
+
+    def as_jit(self) -> nn.Module:
+        """RSL-RL runner.export_policy_to_jit() 使用的导出包装（deterministic actor）。
+
+        TorchScript deployment contract：input float32 [B, H×F] canonical history
+        （newest → oldest frame-major），output [B, action_dim]。
+        """
+        return _HimActorJit(self)
 
     @property
     def output_mean(self) -> torch.Tensor:
