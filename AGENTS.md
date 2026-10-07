@@ -1008,15 +1008,14 @@ git diff
 
 不要覆盖用户已有未提交修改。
 
-不要自动：
+**用户已批准的自动提交约定（2026-10 起）：**每完成一个任务（本地验证通过后），
+agent 应**自动提交**本次 production 改动：
 
-```text
-git commit
-git push
-git add tests/
-```
-
-除非任务明确要求。
+- 遵循 Conventional Commits（见全局 skill commit-style）；描述中文、动词开头；
+- 一次任务一组 commit；与任务无关的改动不混入；
+- `tests/` 下的 migration verification 工具不提交、不 `git add`；
+- `git push` 仍需用户明确要求；
+- 如工作区存在与本次任务无关的未提交修改，先报告再处理，不得静默混入。
 
 不要修改无关文件来获得“干净 diff”。
 
