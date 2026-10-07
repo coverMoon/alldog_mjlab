@@ -51,11 +51,74 @@ class ObservationParams:
 
 
 @dataclass(frozen=True)
+class CommandCurriculumParams:
+    """Black forward-speed command curriculum 冻结参数。
+
+    语义来源：super-dog Black 后期 ``update_command_curriculum()``（buffer / EMA /
+    pass streak 状态机），不是 official HIMLoco 的直接映射。评价样本是每个完成
+    episode 的线性速度 tracking ratio；全部阈值与统计参数在这里集中冻结，
+    不散落在 curriculum term 实现内。
+    """
+
+    # play 模式下 curriculum 完全不运行（不采样、不评估、不扩 range）。
+    enabled: bool = True
+    # 初始范围沿用 CommandParams.lin_vel_x；这里显式列出便于切换默认值。
+    initial_lin_vel_x: tuple[float, float] = (-1.0, 1.0)
+    # 目标范围上界：vx_min >= -max_abs_vx、vx_max <= +max_abs_vx，永不越界。
+    max_abs_vx: float = 2.0
+    # 每次推进双边同时扩展 step：vx_min -= step、vx_max += step。
+    step: float = 0.1
+    # low-speed 组（0.2 < |vx| <= 0.6V）的 tracking ratio EMA 需超过该阈值。
+    threshold_low: float = 0.70
+    # high-speed 组阈值 = threshold_low - threshold_offset（super-dog：0.70 - 0.10）。
+    threshold_offset: float = 0.10
+    # EMA 平滑系数：ema = (1-alpha)*old + alpha*new_mean。
+    ema_alpha: float = 0.20
+    # 连续这么多次成功 evaluation（EMA 双双过线）才扩一次 range。
+    required_passes: int = 2
+    # buffer 累计这么多个有效 episode sample 才触发一次 low/high 评估。
+    buffer_min: int = 256
+    # 组计数下限：评估要求 low 与 high 样本各自至少这么多个；不足时保留 buffer
+    # 继续（不清空），EMA / pass streak 也不更新，等待更多 episode 样本。
+    min_low_count: int = 8
+    min_high_count: int = 4
+    # 组划分下限：|vx| <= low_speed_min 的样本（含 standing / 极小指令）不属于任何
+    # 组，只保留在 buffer 里占位；low/high 上限分界 = low_high_split_ratio * V。
+    low_speed_min: float = 0.2
+    low_high_split_ratio: float = 0.6
+
+    def threshold_high(self) -> float:
+        """high-speed 组阈值 = low 阈值 - 阈值偏移（super-dog 语义：0.70 - 0.10）。"""
+        return self.threshold_low - self.threshold_offset
+
+    def validate(self) -> None:
+        if not (0.0 < self.ema_alpha < 1.0):
+            raise ValueError("command curriculum ema_alpha must be in (0, 1)")
+        if self.required_passes < 1:
+            raise ValueError("command curriculum required_passes must be >= 1")
+        if self.buffer_min < 1:
+            raise ValueError("command curriculum buffer_min must be >= 1")
+        if self.step <= 0.0 or self.max_abs_vx <= 0.0:
+            raise ValueError("command curriculum step / max_abs_vx must be positive")
+        if self.threshold_high() <= 0.0:
+            raise ValueError(
+                "command curriculum high threshold must be positive: "
+                f"{self.threshold_low} - {self.threshold_offset}"
+            )
+        if self.min_low_count < 1 or self.min_high_count < 1:
+            raise ValueError("command curriculum group counts must be >= 1")
+
+
+@dataclass(frozen=True)
 class CommandParams:
-    """Black flat v1 的最终 command contract（训练全程固定，无 curriculum）。
+    """Black command contract：初始 vx 范围 + native sampler + forward-speed 课程。
 
     生成器为 MjLab v1.6 `UniformVelocityCommand`：body-frame 速度指令，按
     `resampling_time` 重采样。行/角速度单位为 m/s 与 rad/s。
+
+    ``lin_vel_x`` 是 ​​**课程起点**：训练中由 command curriculum 按策略 tracking
+    表现逐步扩展到 ±max_abs_vx（见 CommandCurriculumParams）；``lin_vel_y`` 与
+    ``ang_vel_z`` 训练全程固定。play 模式不运行 curriculum（使用 initial 范围）。
     """
 
     resampling_time: tuple[float, float] = (10.0, 10.0)
@@ -66,10 +129,17 @@ class CommandParams:
 
     # native sampler 比例：standing env 指令置 0；forward-only env 取 vx >= 0.3
     # 且 vy = ang_vel_z = 0；world-frame env 与 reset 初速度随机均未启用。
+    # 课程学习只改 ranges.lin_vel_x，sampler 比例训练全程不变。
     standing_fraction: float = 0.1
     forward_fraction: float = 0.2
     world_fraction: float = 0.0
     init_velocity_prob: float = 0.0
+
+    # 性能驱动的 forward-speed command curriculum（super-dog Black 后期语义）。
+    # lin_vel_y / ang_vel_z 不参与课程学习；唯一被改写的量是 lin_vel_x。
+    command_curriculum: CommandCurriculumParams = field(
+        default_factory=CommandCurriculumParams
+    )
 
 
 # =============================================================================

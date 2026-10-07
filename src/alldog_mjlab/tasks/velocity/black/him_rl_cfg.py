@@ -87,6 +87,10 @@ class HimRslRlOnPolicyRunnerCfg(RslRlOnPolicyRunnerCfg):
     him: HimRunnerParams = field(default_factory=_default_him_params)
     warm_start: bool = False
     warm_start_supported: bool = True
+    # 与 PPO 相同语义（见 rl_cfg.BlackRslRlOnPolicyRunnerCfg）：
+    # auto 默认同 stage resume -> full，跨 stage resume（flat HIM→rough HIM）-> range。
+    # PPO→HIM warm start 不走该字段：resume 恢复固定 mode='range'（him_runner.py）。
+    command_curriculum_restore: str = "auto"
 
 
 def black_him_runner_cfg(stage: Literal["flat", "rough"]) -> HimRslRlOnPolicyRunnerCfg:

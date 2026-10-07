@@ -30,6 +30,8 @@ Black HIM runner integration / checkpoint / resume: COMPLETE（§22）
 black-flat-him registration + PPO→HIM warm start: COMPLETE（§23）
 black-rough-him registration + flat→rough HIM full resume: COMPLETE（§24）
 Black rough stairs terrain（up / down）: COMPLETE（§13.5）
+Black performance-based forward-speed command curriculum
++ checkpoint/resume state: COMPLETE（§4.3 / §4.4）
 Hardware effort/current ceiling: UNCONFIRMED（实机前确认）
 ```
 
@@ -58,8 +60,9 @@ BlackW migration
 ```text
 Black sim2real training/deployment contract: COMPLETE
 quadruped_control RealRobotIO/runtime implementation: HANDOFF TO quadruped_control PROJECT
-alldog_mjlab next candidate: Black HIM training validation（§24 / §25 item 16）;
-                   black-rough-him 注册与 flat→rough HIM full resume 已完成（§24）
+alldog_mjlab next candidate: Black command curriculum training validation
+                   （§25 item 17 之后的首选；观察 vx_max progression / EMA low+high /
+                   tracking ratio）; Black HIM training validation（item 16）仍排队。
 ```
 
 ------
@@ -111,6 +114,13 @@ env_cfgs.py
 rewards.py
     Black 专用 reward math
 
+curriculums.py
+    Black 专用 stateful curriculum term（ForwardSpeedCommandCurriculum，§4.3）
+
+curriculum_checkpoint.py
+    算法无关的 command curriculum checkpoint 序列化 / restore-mode 公共层
+    （同时服务 VelocityOnPolicyRunner 与 BlackHimOnPolicyRunner，§4.4）
+
 terminations.py
     Black 专用 stateful termination math
 ```
@@ -136,7 +146,11 @@ MjLab v1.6 原生 train 创建 `<timestamp>_<run_name>`，不新增 train/resume
 
 Full resume 保持 MjLab / RSL-RL 默认语义：actor、critic、normalizer、optimizer、
 checkpoint learning rate、iteration 完整恢复；MjLab 额外仅恢复
-`env_state.common_step_counter`。rough 环境重新构造，flat simulator、terrain levels
+`env_state.common_step_counter`。command curriculum runtime state
+（`env_state.command_curriculum`）由本仓库的公共层 `curriculum_checkpoint.py`
+按 §4.4 restore mode 恢复（同 stage full / 跨 stage range / 旧 checkpoint none+warning；
+PPO runner 为 `BlackVelocityOnPolicyRunner(mixin, VelocityOnPolicyRunner)`，
+ONNX export 行为不变）。rough 环境重新构造，flat simulator、terrain levels
 和其他 runtime state 不复制。native rough curriculum 仅在 counter=0 的首次 reset
 跳过升级/降级；wrapper 在 load 前完成首次 reset，load 后 counter 原样恢复，后续
 curriculum 仍按 target rough env 的行走距离与 command 计算，不重置 counter。
@@ -275,17 +289,18 @@ Action contract 不依赖 actuator/model natural order。
 
 ## 4. Frozen Command Contract
 
-Black flat v1 的 command 是**固定范围 + MjLab native sampler**，训练全程不变。
+Black 的 command 是「**初始范围 + MjLab native sampler + performance-based
+forward-speed 课程**」：
 
 ```text
 generator:
     MjLab v1.6 UniformVelocityCommand
     （body-frame 速度指令，按 resampling 重采样）
 
-range:
+initial range（课程起点 = BLACK_CONFIG.command.lin_vel_x）:
     vx   [-1, 1] m/s
-    vy   [-1, 1] m/s
-    wz   [-π, π] rad/s
+    vy   [-1, 1] m/s          （训练全程固定，不参与课程）
+    wz   [-π, π] rad/s        （训练全程固定，不参与课程）
 
 resampling:
     10 s（固定，不随机）
@@ -299,45 +314,169 @@ native sampler 比例:
     world-frame   0%
     reset 初速度  0%
 
-curriculum:
-    disabled（terrain curriculum 与 command curriculum 均已移除）
+curriculum（train）:
+    command   = ForwardSpeedCommandCurriculum（performance-based，见 §4.3）
+    terrain   = 仅 black-rough / black-rough-him training（§13.3）
+    play      = 无任何 curriculum（command range 固定在 initial [-1, 1]）
 ```
 
-因此 `BLACK_CONFIG.command.*` 是**最终训练 contract**，不是「curriculum 前的初始范围」；
-`cfg.curriculum == {}`。
+`BLACK_CONFIG.command.lin_vel_x` 现在是**课程起点**而不是终值：训练中由 command
+curriculum 按策略 tracking 表现逐步扩展到 ±2 m/s（§4.3）；`lin_vel_y` / `ang_vel_z`
+与 native sampler 配置训练全程不变。
 
-### 4.1 What was intentionally not migrated
+Deployment contract note（本轮不修改部署侧）：observation layout / command 观测缩放
+（×2.0 / ×2.0 / ×0.25）/ action / joint order / control dt 全部不变；唯一的行为变化是
+**训练支持的 vx 域从初始 ±1 m/s 变得 curriculum-dependent，训练收敛后最大支持 ±2 m/s**。
+部署 runtime 无需任何修改；如未来需要在部署侧显式检查 vx 上限，应读取检查点内
+课程 state，而不是把 ±2 写死为机器人固有参数。
+
+### 4.3 Performance-based forward-speed command curriculum（frozen）
+
+语义来源：super-dog Black 后期 ``update_command_curriculum()``（已重读源码移植）；
+official HIMLoco 只作概念 authority（其 env-index bucket sampler 不迁移）。
+实现为 task 层 stateful class-based CurriculumTerm：
+
+```text
+文件          src/alldog_mjlab/tasks/velocity/black/curriculums.py
+              class ForwardSpeedCommandCurriculum(ManagerTermBase)
+注册名        cfg.curriculum["command"] → 日志前缀 Curriculum/command/*
+参数唯一来源  BLACK_CONFIG.command.command_curriculum（CommandCurriculumParams）
+```
+
+冻结参数：
+
+```text
+enabled                = True（play 不注册；enabled=False 时不注册自然回退旧行为）
+initial vx             = [-1.0, 1.0]
+max abs vx             = 2.0（clip：vx_min >= -2.0、vx_max <= +2.0，永不越界）
+step                   = 0.1（每次推进双边同时扩：vx_min -= 0.1、vx_max += 0.1）
+tracking threshold     = 0.70（low-speed 组 EMA 阈值）
+high threshold         = 0.60（= 0.70 - 0.10 offset）
+EMA alpha              = 0.20（ema = 0.8 × old + 0.2 × group mean）
+required passes        = 2（连续 2 次成功 evaluation 才扩一次 range）
+buffer minimum         = 256（episode sample 数，不足不评估）
+low-speed min samples  = 8
+high-speed min samples = 4
+low-speed lower bound  = 0.2（|vx| <= 0.2 的样本不进组，只占 buffer）
+low/high split ratio   = 0.6（分界 = 0.6 × V，V = max(|vx_min|, |vx_max|)）
+```
+
+performance metric（super-dog Black 后期语义）：
+
+```text
+tracking_ratio_i = episode_tracking_reward_sum_i
+                 / (episode_length_steps_i × env.step_dt × |tracking_reward_weight|)
+
+- raw = exp(-||v_cmd_xy - v_xy||² / sigma)，理论 max 1.0；
+- Episode sum 是 MjLab v1.6.0 RewardManager 保存的 raw × weight × step_dt 累计；
+- weight 用 reward_manager.get_term_cfg("track_linear_velocity").weight 实时读取，
+  不硬编码；
+- episode sum 的读取使用 reward_manager._episode_sums —— MjLab v1.6.0 pinned
+  private API（v1.6.0 无公开 episode-sum accessor，升级需核对）；
+- 样本 = reset env 对应刚结束 episode 的 (|vx command|, tracking_ratio)；
+  过滤 non-finite；standing/极小 vx 可进 buffer 但不进 low/high 组。
+```
+
+evaluation / 状态机（super-dog 语义）：
+
+```text
+1. buffer < 256                     → 不评估（EMA/streak/范围不动）
+2. buffer >= 256 但 low/high 任一
+   组样本数不足（< 8 / < 4）        → 不更新 EMA、pass_streak = 0、
+                                      **buffer 保留**（不清空，继续等待样本）
+3. 组数足够                          → 更新 EMA → pass rule：
+                                      ema_low > 0.70 且 ema_high > 0.60
+                                      → streak + 1；否则 streak = 0
+4. streak >= 2                       → range 双边扩 0.1（clip ±2.0），
+                                      streak = 0，progressed = 1（范围实际变化时）
+5. 完成一次真正的 low/high evaluation → 清空本轮 buffer
+6. 达到 [-2, 2] 后                   → 继续统计 telemetry，但不再修改 range
+```
+
+runtime state（authoritative，属于 curriculum term 实例）：
+
+```text
+vx_min / vx_max      初始 = config 初始范围
+ema_low / ema_high   初始 = 0（super-dog 语义，不为加速课程改初始化）
+pass_streak          初始 = 0
+buffer_cmd_x / buffer_tracking_ratio   CPU float（CUDA 训练无 device mismatch）
+
+telemetry cache（非 authoritative）：last low/high count、last low/high ratio、
+evaluated / progressed 标志。TensorBoard 无 NaN：未评估时值为明确初始化值。
+```
+
+日志（CurriculumManager 自动记录，不修改 runner logging loop）：
+
+```text
+Curriculum/command/vx_min, vx_max, ema_low, ema_high, pass_streak,
+buffer_count, low_count, high_count, low_ratio, high_ratio,
+evaluated, progressed
+```
+
+首次 reset（``common_step_counter == 0``）：不采样、不更新 EMA、不增 streak、
+不扩范围；initial range 保持 [-1, 1]。
+
+command range 写回：直接改运行中的 ``UniformVelocityCommandCfg.ranges.lin_vel_x``
+（下一次 resampling 生效；已采样的 command 不变）。``lin_vel_y`` / ``ang_vel_z``、
+standing / forward-only / world-frame 比例、resampling 间隔、heading 配置
+**永不**被 curriculum term 修改。
+
+### 4.4 Checkpoint persistence 与 restore mode（frozen）
+
+curriculum state 存入现有 ``.pt`` checkpoint（不写独立 JSON，模型与课程状态永不错位）：
+
+```text
+infos.env_state.common_step_counter          （MjLab 原生，语义不变）
+infos.env_state.command_curriculum           （本单元新增）
+    = {version, stage(flat|rough), vx_min, vx_max, ema_low, ema_high,
+       pass_streak, buffer_cmd_x, buffer_tracking_ratio}
+```
+
+序列化 / 恢复公共层（同时服务 PPO 与 HIM，算法无关）：
+
+```text
+src/alldog_mjlab/tasks/velocity/black/curriculum_checkpoint.py
+    CommandCurriculumCheckpointMixin（save 持久化 + load 恢复）
+    BlackVelocityOnPolicyRunner(mixin, VelocityOnPolicyRunner)   ← black-flat / black-rough
+    BlackHimOnPolicyRunner(Mixin, MjlabOnPolicyRunner)           ← black-flat-him / rough-him
+    stage_from_run_name()     冻结 run-name contract -> flat | rough
+                              （flat_him/rough_him 只差算法后缀；集中一个 helper）
+    save 主干与 MjLab v1.6.0 MjlabOnPolicyRunner.save 逐行一致（pinned 复制；其父类
+    会整体重建 infos["env_state"]，不复制无法扩展该字段）
+```
+
+restore mode（``command_curriculum_restore`` config，默认 ``auto``）：
+
+```text
+none  —— 不恢复：初始 range [-1,1]、EMA / streak / buffer fresh
+range —— 只恢复 vx range，统计 fresh（跨 stage / 跨训练条件）
+full  —— 逐值恢复 range + EMA + streak + buffer（同一训练条件精确续训）
+
+auto（默认）决策表：
+    new training（无 load）            fresh（无需恢复）
+    same-stage resume                  full（flat→flat / rough→rough / flat_him→flat_him / rough_him→rough_him）
+    cross-stage resume                 range（flat→rough、flat-him→rough-him）
+    stage 未知（手工 state）            range（保守：范围保留，统计重新开始）
+    旧 checkpoint（无 curriculum state）none + 一次明确 warning（config 初始范围起步）
+
+    PPO→HIM warm start（不走 resume load）：
+        source 有 curriculum state → range（vx range 拷贝，EMA/streak/buffer fresh）
+        source 无 curriculum state → warning + config 初始 [-1,1]，warm start 不失败
+```
+
+stage 判定不使用 tensor shape / 算法类型 / 模糊 regex：save 时写 ``stage``
+（env cfg builder 显式给出 flat | rough），load 时与目标 stage 比较；仅 run-name
+到 terrain stage 的映射使用项目冻结的 run-name contract（集中在 stage_from_run_name）。
+
+### 4.5 What remains intentionally not migrated
 
 ```text
 official HIMLoco:
-    performance-based lin_vel_x curriculum（tracking > 0.8 扩 ±0.2 / max ±2）
-    + 与之耦合的 high/low speed env command sampler
+    env-index high/low speed command bucket sampler（与 curriculum 耦合的那部分）
 
-super-dog（68f1c1c 及后期）:
-    buffer / EMA / pass streak / required_passes / max_curriculum
-    low/high command bucket
+super-dog:
     terrain_probe / stand_probe / stop_probe
 ```
-
-这些都是 historical optional training strategy，可在 super-dog 查看；本项目 v1 不复刻。
-
-### 4.2 Framework difference
-
-```text
-This is not an exact HIMLoco command migration.
-```
-
-official HIMLoco 的 curriculum 与其 command sampler 耦合，不能只取更新公式；
-super-dog 的 curriculum 又依赖 buffer/EMA/streak 状态机与三类 probe env。
-
-Black flat v1 有意简化为：
-
-```text
-固定范围 + MjLab native standing / forward-only sampling
-```
-
-保留 10% standing 覆盖以训练零指令行为，保留 20% forward-only 覆盖以增加前进样本；
-standing / forward 的判定与采样完全复用 framework。
 
 ------
 ## 5. Frozen Actor Observation Contract
@@ -1187,10 +1326,11 @@ stair step height = 0.05 + 0.18 d （up / down 同式，见 §13.5）
 ### 13.3 Terrain curriculum
 
 ```text
-cfg.curriculum.keys() == {"terrain_levels"}
+cfg.curriculum.keys() == {"terrain_levels", "command"}
 func = mjlab.tasks.velocity.mdp.terrain_levels_vel（native）
 params.command_name = "twist"
-command_vel 已移除（command contract 与 flat 相同）
+command_vel 已移除；"command" 是本单元新增的 forward-speed curriculum（§4.3），
+与 terrain_levels 共存、互不覆盖（command 只改 ranges.lin_vel_x）。
 ```
 
 推进 / 回退公式由 native 实现，与 legacy `_update_terrain_curriculum()` 一致：
@@ -1332,6 +1472,7 @@ Black HIM runner integration / checkpoint / resume: COMPLETE（§22 / §17.14）
 black-flat-him registration + PPO→HIM warm start: COMPLETE（§23 / §17.15）
 black-rough-him registration + flat→rough HIM full resume: COMPLETE（§24 / §17.16）
 Black rough stairs terrain（up / down, native box）: COMPLETE（§13.5）
+Black forward-speed command curriculum + checkpoint state: COMPLETE（§4.3 / §4.4）
 ```
 
 command 已冻结为固定范围 + native sampler，且不再有任何 curriculum（§4）。
@@ -1349,8 +1490,11 @@ convergence 结论。
 next decision：
 
 ```text
+Black command curriculum training validation（§4.3 已实现未长训验证）—
+    先跑 black-flat（PPO 或 HIM）观察 vx_max progression / Curriculum/command/ema_low
+    / ema_high / tracking ratio / 训练稳定性；随后 black-rough range-resume continuation。
 Black HIM training validation — flat HIM 收敛 + flat→rough HIM 训练行为
-（registration / resume 机制已全部完成；"算法能跑" ≠ "算法训练有效"）
+（registration / resume 机制已全部完成；"算法能跑" ≠ "算法训练有效"，排在课程验证之后）
 ```
 
 Black real robot backend / sim2real contract 仍等待用户决定，不自动开始实现。
@@ -1394,15 +1538,10 @@ restitution
 
 ### Command Curriculum
 
-Black flat v1 有意不迁任何 command curriculum（见 §4）：范围固定，standalone 由
-§4 的 native sampler 提供 standing / forward-only 覆盖。
-
-```text
-状态: not migrated by design（不是 deferred 的 TODO）
-```
-
-官方 HIMLoco 的 performance-based curriculum 与 super-dog 的 buffer/EMA/probe 机制
-如需启用，应作为新的 behavior unit 提出，并先说明要解决的训练问题。
+Black 的 performance-based forward-speed command curriculum 已随本单元迁移并冻结
+（§4.3 / §4.4）：super-dog Black 后期 buffer / EMA / pass streak 状态机 + 10 类
+telemetry 日志 + checkpoint restore（none/range/full）。official HIMLoco 的 env-index
+bucket sampler 仍不迁移（§4.5）。
 
 ------
 
@@ -1421,6 +1560,7 @@ terrain height scan（共 259 维，见 §13.4）；flat plane 也保留 raycast
 以下均未开始，不得提前宣称支持：
 
 ```text
+Black command curriculum training validation（§4.3 已实现，未做长训练效果验证）
 Black HIM 长训练收敛验证（flat HIM 收敛 + flat→rough HIM 训练有效性）
 
 Black real robot backend / sim2real
@@ -1452,16 +1592,17 @@ tests/check_black_him.py         HIM task-side contract（Unit 1）
 tests/check_black_him_algo.py    HIM 算法（Unit 2）
 tests/check_black_him_runner.py  HIM runner / checkpoint（Unit 3）
 tests/check_black_him_warm_start.py  flat HIM 注册 + warm start（Unit 4）
+tests/check_black_command_curriculum.py  forward-speed command curriculum（§4.3 / §4.4）
 tests/render_black_rough.py      rough terrain 的可视化渲染（人工检查用）
 ```
 
 作为 migration verification tool。
 
-`tests/check_black_rough.py` 覆盖（见 §13 / §13.4 / §13.5）：flat 仍为 plane / 空 curriculum，
-与 rough 共用 terrain_scan 和 critic layout；rough generator 的 size / num_rows /
-difficulty_range / border / max_init / 7 类 sub-terrain（含 native box stairs up/down 的
-step_height_range / step_width / platform）与 proportion；curriculum 只含
-terrain_levels；逐行难度
+`tests/check_black_rough.py` 覆盖（见 §13 / §13.4 / §13.5）：flat 仍为 plane / 仅
+command curriculum，与 rough 共用 terrain_scan 和 critic layout；rough generator 的
+size / num_rows / difficulty_range / border / max_init / 7 类 sub-terrain（含 native box
+stairs up/down 的 step_height_range / step_width / platform）与 proportion；curriculum
+含 terrain_levels + command；逐行难度
 0.0 → 0.9；slope = 0.7d、rough noise ±(0.015 + 0.1d) / step 0.005 / downsample 0.2、
 obstacle height 0.06 + 0.2d；50 个 spawn origin 的 ray-cast 落面检查；terrain_scan
 sensor 唯一性与 frame / alignment / grid 187 rays / max_distance；actor 45-D 与
@@ -1494,7 +1635,8 @@ effort limit
 
 action dimension/order/mapping
 
-command contract（固定范围 / native sampler 比例 / 无 curriculum 且 step counter 推进后仍不变）
+command contract（初始范围 / native sampler 比例 / performance-based command curriculum
+（§4.3）；旧 time-based curriculum 移除的 regression：step counter 推到旧 stage 后 range 不变）
 
 45-D actor observation
 
@@ -3547,8 +3689,9 @@ inference（HIMPolicy.forward）只用 source encoder + actor MLP；target encod
 ### 22.5 Checkpoint contract
 
 `HIMPPO.save()` = `PPO.save()`（actor_state_dict / critic_state_dict /
-optimizer_state_dict）+ `estimator_optimizer_state_dict`；`MjlabOnPolicyRunner.save()`
-再补 `iter` 与 `infos.env_state.common_step_counter`。
+optimizer_state_dict）+ `estimator_optimizer_state_dict`；runner save 再补 `iter`、
+`infos.env_state.common_step_counter` 与 `infos.env_state.command_curriculum`
+（§4.4；由 curriculum_checkpoint 共公共层写入，PPO / HIM 同语义）。
 
 保存 / 恢复：
 
@@ -3562,6 +3705,7 @@ estimator optimizer state（Adam step/exp_avg/exp_avg_sq）    ✔
 current learning rate                                        ✔（PPO optimizer param_groups[0]["lr"]）
 training iteration                                           ✔
 MjLab common_step_counter（training metadata）                ✔
+command curriculum state（range / EMA / streak / buffer）     ✔（§4.4，HIM checkpoint 同样包含）
 ```
 
 ### 22.6 Resume 语义边界
@@ -3654,6 +3798,9 @@ estimator optimizer            no
 iteration                      no（0）
 common_step_counter            no（新 env state）
 simulator state / RNG          no
+command curriculum             range only（source PPO 有 curriculum state 时拷贝 vx range；
+                               EMA / streak / buffer fresh；旧 PPO checkpoint 无 state 时
+                               warning + config 初始 [-1,1]，warm start 不失败）（§4.4）
 ```
 
 ### 23.4 Actor migration
@@ -3780,7 +3927,8 @@ rough env:         terrain generator + terrain_levels curriculum + OOB truncatio
                    nconmax 128 均存在；terrain levels 属于新 rough env
 terrain curriculum: term 实际执行（episode 推进后 level 状态合法；极短 smoke 不伪造
                    level 数值变化的 PASS）
-command:           flat HIM == rough HIM（固定范围、无 command curriculum）
+command:           flat HIM == rough HIM（同一 initial 范围 + §4.3 command curriculum；
+                   flat HIM→rough HIM resume 时 range restore、statistics fresh）
 CLI:               flat HIM checkpoint → black-rough-him full resume（CPU + CUDA）PASS
 ```
 
@@ -3804,7 +3952,7 @@ Black flat/rough 与训练侧 sim2real contract 已完成；部署代码由独�
 1. stuck termination                     （完成）
 2. reward migration                      （完成：Black flat v1 baseline = 10 项，见 §11）
 3. domain randomization                  （完成：6 项，见 §12）
-4. command baseline                      （完成：固定范围 + native sampler，无 curriculum，见 §4）
+4. command baseline                      （完成：初始范围 + native sampler + §4.3 课程，见 §4）
 5. Black flat final PPO verification     （完成：500-iteration run + 独立进程 reload + 8-command play/eval，见 §17.1）
 6. Black rough PPO
    （已完成前置：rough terrain generator + terrain curriculum，见 §13；
@@ -3851,9 +3999,17 @@ Black flat/rough 与训练侧 sim2real contract 已完成；部署代码由独�
      terrain curriculum / height_scan / OOB / reward contract 不变；
      CPU + CUDA PASS。）
 16. Black HIM training validation — flat convergence + flat→rough training behavior
-    （下一单元：先真实确认 Black HIM 能在 flat 上稳定学习（随机初始化直训为首选，
+    （先真实确认 Black HIM 能在 flat 上稳定学习（随机初始化直训为首选，
      官方 HIMLoco 标准路线），再 full resume 到 rough 完成合理续训；
      "算法能跑" ≠ "算法训练有效"。不直接开始 exporter。）
+17. Black performance-based forward-speed command curriculum + checkpoint state
+    （完成：§4.3 / §4.4。super-dog Black 后期 update_command_curriculum 的移植：
+     buffer 256 / EMA 0.2 / streak 2 / low 8 + high 4 / ±0.1 clip ±2.0；
+     10 类 Curriculum/command/* telemetry；checkpoint infos.env_state.command_curriculum
+     + none/range/full restore（same-stage full / cross-stage range / PPO→HIM range /
+     旧 checkpoint none+warning）；经 §4.4 公共层同时服务 PPO/HIM；
+     vy/wz/sampler 不变；play 无 curriculum。CPU + CUDA PASS。
+     下一单元：Black command curriculum training validation（§1 next candidate）。）
 ```
 
 已插入完成的非 behavior 任务：

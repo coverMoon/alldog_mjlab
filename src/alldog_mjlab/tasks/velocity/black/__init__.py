@@ -1,8 +1,8 @@
 """Register the validated Black velocity tasks."""
 
 from mjlab.tasks.registry import register_mjlab_task
-from mjlab.tasks.velocity.rl import VelocityOnPolicyRunner
 
+from .curriculum_checkpoint import BlackVelocityOnPolicyRunner
 from .env_cfgs import (
     black_flat_env_cfg,
     black_flat_him_env_cfg,
@@ -19,7 +19,7 @@ register_mjlab_task(
     env_cfg=black_flat_env_cfg(),
     play_env_cfg=black_flat_env_cfg(play=True),
     rl_cfg=black_ppo_runner_cfg(stage="flat"),
-    runner_cls=VelocityOnPolicyRunner,
+    runner_cls=BlackVelocityOnPolicyRunner,
 )
 
 # black-rough 已完成功能迁移和约 500 iteration 的 PPO baseline；
@@ -29,7 +29,7 @@ register_mjlab_task(
     env_cfg=black_rough_env_cfg(),
     play_env_cfg=black_rough_env_cfg(play=True),
     rl_cfg=black_ppo_runner_cfg(stage="rough"),
-    runner_cls=VelocityOnPolicyRunner,
+    runner_cls=BlackVelocityOnPolicyRunner,
 )
 
 # black-flat-him = black-flat + HIM observation/history/terminal contract + HIMPPO。

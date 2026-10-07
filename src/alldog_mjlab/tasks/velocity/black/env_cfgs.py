@@ -40,6 +40,10 @@ from alldog_mjlab.robots.black.black_constants import (
     BLACK_JOINT_NAMES,
 )
 from alldog_mjlab.tasks.velocity.black.black_config import BLACK_CONFIG
+from alldog_mjlab.tasks.velocity.black.curriculums import (
+    CURRICULUM_TERM_NAME,
+    ForwardSpeedCommandCurriculum,
+)
 from alldog_mjlab.tasks.velocity.black.him import (
     configure_him_observations,
     configure_him_terminal_targets,
@@ -101,6 +105,9 @@ BLACK_ILLEGAL_CONTACT_SENSOR = "illegal_ground_contact"
 # Command term 名称属于 task wiring：reward / termination / observation 都按名字取它。
 BLACK_COMMAND_NAME = "twist"
 
+# Tracking 线性速度 reward term 名：command curriculum 的 performance 采样来源。
+BLACK_TRACKING_VELOCITY_REWARD_TERM = "track_linear_velocity"
+
 # Black flat / rough 共用 critic（privileged）observation 顺序 contract：
 # MjLab velocity baseline 的 72 维之后追加 terrain height scan（+187 = 259 维）。
 # 显式重建顺序，不依赖 native `critic_terms = {**actor_terms, ...}` 的 dict 顺序。
@@ -137,14 +144,17 @@ BLACK_TERRAIN_SCAN_MAX_DISTANCE = 5.0
 
 
 def _configure_command(cfg: ManagerBasedRlEnvCfg) -> None:
-    """Black flat v1 command contract：固定范围 + MjLab native sampler。
+    """Black command contract：初始 vx 范围 + MjLab native sampler + 课程起点。
 
-    - 范围与重采样间隔来自 BLACK_CONFIG.command，训练全程固定（不迁移任何 command
-      curriculum，`command_vel` 在本函数里移除）；
+    - 初始范围与重采样间隔来自 BLACK_CONFIG.command；`lin_vel_x` 是课程起点
+      （train 下由 ForwardSpeedCommandCurriculum 按 tracking 表现扩展，见
+      curriculums.py；play 下固定在初始范围），`lin_vel_y` / `ang_vel_z` 训练
+      全程固定；
     - heading command 关闭（v1.6.0 要求 heading_command=False 时 ranges.heading 必须
       为 None，否则构建环境时报错）；`rel_heading_envs` 在 heading 关闭时不生效，
       显式写 0 以免被误读为启用；
-    - standing / forward-only / world-frame 比例为 native sampler 契约，显式冻结。
+    - standing / forward-only / world-frame 比例为 native sampler 契约，显式冻结；
+      command curriculum 只改 ranges.lin_vel_x，不触碰任何 sampler 配置。
     """
     twist_command = cfg.commands[BLACK_COMMAND_NAME]
     assert isinstance(twist_command, UniformVelocityCommandCfg)
@@ -159,8 +169,8 @@ def _configure_command(cfg: ManagerBasedRlEnvCfg) -> None:
     twist_command.rel_forward_envs = BLACK_CONFIG.command.forward_fraction
     twist_command.rel_world_envs = BLACK_CONFIG.command.world_fraction
     twist_command.init_velocity_prob = BLACK_CONFIG.command.init_velocity_prob
-    # MjLab velocity baseline 自带 staged velocity curriculum；Black flat v1 不迁移
-    # 任何 command curriculum，范围从训练开始到结束保持不变。
+    # MjLab velocity baseline 自带 staged（time-based）velocity curriculum；Black
+    # 有意不采用：本项目的扩展是性能驱动（tracking EMA），不是 step counter 阶段。
     cfg.curriculum.pop("command_vel", None)
 
 
@@ -544,12 +554,34 @@ def _configure_privileged_height_observation(cfg: ManagerBasedRlEnvCfg) -> None:
     assert tuple(critic_terms) == BLACK_CRITIC_TERM_ORDER, tuple(critic_terms)
 
 
+def _configure_command_curriculum(cfg: ManagerBasedRlEnvCfg, stage: str) -> None:
+    """性能驱动 forward-speed command curriculum（仅 train；stage = flat | rough）。
+
+    task 层 stateful CurriculumTerm（curriculums.py）：按完成 episode 的线性速度
+    tracking 表现逐步扩展 `UniformVelocityCommandCfg.ranges.lin_vel_x`；
+    `lin_vel_y` / `ang_vel_z` 与 native sampler 配置永不触碰。数值全部来自
+    BLACK_CONFIG.command.command_curriculum；`enabled=False` 不注册。play 模式由
+    `_configure_play()` 清空 curriculum，天然 inactive。
+    """
+    cc = BLACK_CONFIG.command.command_curriculum
+    cc.validate()
+    if cc.enabled:
+        cfg.curriculum[CURRICULUM_TERM_NAME] = CurriculumTermCfg(
+            func=ForwardSpeedCommandCurriculum,
+            params={
+                "command_name": BLACK_COMMAND_NAME,
+                "reward_term_name": BLACK_TRACKING_VELOCITY_REWARD_TERM,
+                "stage": stage,
+            },
+        )
+
+
 def _configure_terrain_curriculum(cfg: ManagerBasedRlEnvCfg) -> None:
-    """rough v1 只启用 terrain curriculum（native `terrain_levels_vel`）。
+    """rough v1 启用 terrain curriculum（native `terrain_levels_vel`）。
 
     难度推进 / 回退公式由 MjLab native 实现（walked distance 与 command x
     max_episode_length_s x 0.5 对比），与 legacy `_update_terrain_curriculum()` 一致；
-    command curriculum 仍关闭（见 `_configure_command()`）。
+    command curriculum 由 `_configure_command_curriculum()` 在其上追加（不覆盖）。
     """
     cfg.curriculum = {
         "terrain_levels": CurriculumTermCfg(
@@ -709,7 +741,8 @@ def _build_black_env_cfg(play: bool, rough: bool) -> ManagerBasedRlEnvCfg:
     顺序：command / scene+sensors / actions / events / rewards（rough 再覆盖 base_height
     与 sim contact capacity）→ flat 或 rough terrain → 公共 terrain scan / observations
     → terminations（rough 追加 out_of_terrain_bounds）/ common runtime
-    → terrain curriculum（仅 rough 训练）→ play。
+    → curriculum（rough train：terrain_levels + command；flat train：command；
+    play：两者都没有）→ play。
 
     flat / rough 均保留 native `terrain_scan` sensor，使用相同 critic layout；
     actor、reward、reset、termination、DR、command 的现有装配保持不变。
@@ -734,8 +767,13 @@ def _build_black_env_cfg(play: bool, rough: bool) -> ManagerBasedRlEnvCfg:
     if rough:
         _configure_rough_terminations(cfg)
     _configure_common_runtime(cfg, play=play)
+    stage = "rough" if rough else "flat"
     if rough and not play:
         _configure_terrain_curriculum(cfg)
+    # command curriculum（仅 train）：flat / rough 训练都注册；不能覆盖 rough 已有的
+    # terrain_levels（§18）。play 由 `_configure_play()` 清空，天然 inactive。
+    if not play:
+        _configure_command_curriculum(cfg, stage)
     if play:
         _configure_play(cfg)
 

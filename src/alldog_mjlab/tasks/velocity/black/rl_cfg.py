@@ -5,6 +5,7 @@
 避免 HIM 复制一套 PPO 超参数。
 """
 
+from dataclasses import dataclass
 from typing import Literal
 
 from mjlab.rl import (
@@ -55,13 +56,31 @@ def black_actor_distribution_cfg() -> dict:
     }
 
 
-def black_ppo_runner_cfg(stage: Literal["flat", "rough"]) -> RslRlOnPolicyRunnerCfg:
+@dataclass
+class BlackRslRlOnPolicyRunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Black PPO runner cfg：新增 command curriculum checkpoint 恢复模式。
+
+    ``command_curriculum_restore``（见 curriculum_checkpoint.resolve_restore_mode）：
+
+    ```text
+    auto  （默认）：同 stage resume -> full；跨 stage resume -> range；
+                  旧 checkpoint（无 curriculum state） -> none + warning
+    full  ：逐值恢复 range / EMA / streak / buffer（同 stage 精确续训）
+    range ：只恢复 vx range，统计 fresh（跨 stage / 跨训练条件 continuation）
+    none  ：不恢复，保持 config 初始范围
+    ```
+    """
+
+    command_curriculum_restore: str = "auto"
+
+
+def black_ppo_runner_cfg(stage: Literal["flat", "rough"]) -> BlackRslRlOnPolicyRunnerCfg:
     policy = BLACK_CONFIG.policy
     runner = BLACK_CONFIG.runner
     if stage not in ("flat", "rough"):
         raise ValueError(f"unknown Black training stage: {stage}")
     stage_runner = getattr(runner, stage)
-    return RslRlOnPolicyRunnerCfg(
+    return BlackRslRlOnPolicyRunnerCfg(
         actor=RslRlModelCfg(
             hidden_dims=policy.actor_hidden_dims,
             activation=policy.activation,

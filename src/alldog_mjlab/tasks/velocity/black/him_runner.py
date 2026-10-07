@@ -32,12 +32,19 @@ from mjlab.rl import MjlabOnPolicyRunner
 from mjlab.utils.os import get_checkpoint_path
 
 from alldog_mjlab.algorithms.him.warm_start import warm_start_from_ppo_actor
+from alldog_mjlab.tasks.velocity.black.curriculum_checkpoint import (
+    CommandCurriculumCheckpointMixin,
+    apply_command_curriculum_state,
+)
 
 WARM_START_SOURCE_TASK = "black-flat"
 
 
-class BlackHimOnPolicyRunner(MjlabOnPolicyRunner):
-    """``MjlabOnPolicyRunner`` + 可选 PPO → HIM warm start。"""
+class BlackHimOnPolicyRunner(
+    CommandCurriculumCheckpointMixin, MjlabOnPolicyRunner
+):
+    """``MjlabOnPolicyRunner`` + 可选 PPO → HIM warm start + curriculum
+    checkpoint 状态（经公共 mixin，与 PPO 路径同语义，无第二份实现）。"""
 
     def __init__(self, env, train_cfg, log_dir=None, device="cpu", **kwargs):
         if train_cfg.get("warm_start") and train_cfg.get("resume"):
@@ -78,6 +85,23 @@ class BlackHimOnPolicyRunner(MjlabOnPolicyRunner):
             checkpoint,
             self.alg.spec,
         )
+        # PPO→HIM warm start 的 command curriculum 语义：只拷贝 vx range（EMA /
+        # streak / buffer fresh，§30）；旧 PPO checkpoint 没有 curriculum state 时
+        # 打印 warning 并保持 config 初始范围，不让 warm start 失败。
+        curriculum_state = (checkpoint.get("infos") or {}).get("env_state", {}).get(
+            "command_curriculum"
+        )
+        curriculum_restored: str | None
+        if curriculum_state is not None:
+            curriculum_restored = apply_command_curriculum_state(
+                self.env.unwrapped, curriculum_state, "range"
+            )
+        else:
+            curriculum_restored = None
+            print(
+                "[WARN] PPO→HIM warm start: source checkpoint 没有 command "
+                "curriculum state；command range 保持 config 初始 [-1, 1]。"
+            )
         print(
             f"[INFO] PPO→HIM warm start: source={source_path} "
             f"actor_input {report.source_actor_input_dim}→{report.target_actor_input_dim} "
@@ -88,6 +112,7 @@ class BlackHimOnPolicyRunner(MjlabOnPolicyRunner):
         return {
             "source_task": WARM_START_SOURCE_TASK,
             "source_checkpoint": str(source_path),
+            "command_curriculum_restored": curriculum_restored,
             **asdict(report),
         }
 
