@@ -704,6 +704,10 @@ def _configure_common_runtime(cfg: ManagerBasedRlEnvCfg, *, play: bool) -> None:
     cfg.episode_length_s = BLACK_CONFIG.env.episode_length_s
     cfg.decimation = BLACK_CONFIG.control.decimation
     cfg.sim.mujoco.timestep = BLACK_CONFIG.control.physics_dt
+    # MJWarp per-world constraint capacity：Black task 层统一 njmax（capacity
+    # tuning，依据与下限见 black_config.SimulationParams.njmax 注释）。与 PPO/HIM
+    # 无关，flat / rough / HIM 四个 task 共用；不碰 solver / nconmax。
+    cfg.sim.njmax = BLACK_CONFIG.simulation.njmax
     cfg.viewer.body_name = "trunk"
     cfg.viewer.distance = 1.5
     cfg.viewer.elevation = -10.0

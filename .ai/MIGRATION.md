@@ -974,7 +974,33 @@ capacity-related CUDA runtime fault。固定 bad simulator state 下，`nconmax 
   rough 的 config 与改动前逐字段一致，flat（train / play）完全不变；
 - **不是** upstream MJWarp 根因修复，也不声称 128 是理论最小正确值；
 - 证据（固定 state 复现、sanitizer、长 rollout）见 §17.2；
-- 不要把该值传播到 flat，也不要顺手改动 `njmax` 等其它 sim capacity。
+- 不要把该值传播到 flat。
+
+### MJWarp constraint capacity（njmax）
+
+```text
+MjLab v1.6 velocity baseline:  cfg.sim.njmax = 1500
+Black 统一候选（flat / rough / PPO / HIM 共用）: 256
+```
+
+依据：black-rough-him 实测（check_black_sim_capacity，3000 env / 800 physics
+substeps / 2.4M world-substep samples）：max nefc = 80、p99.9 = 52，overflow = NO。
+
+结构性下限（MuJoCo-Warp 3.11 put_data 硬性要求 njmax >= 模板 spawn state 的
+mjd.nefc）：flat seed = 144、rough seed = 220（约 12 friction_dof + 4 joint limit +
+spawn pose contact 的 pyramidal rows；Black nv=18<=32 → dense，tile 16 对齐）。
+原候选 128 < 144，无法构建任何 Black env，已否决。256 = seed floor ~1.16x、
+实测 runtime max ~3.2x。
+
+状态：**capacity candidate implemented；long stress / VRAM / training validation
+pending（用户手动验证；验证口径 = overflow bit 观察为 NO + 训练不收敛崩溃）**。
+不要在验证完成前把 256 写成最终冻结值。
+
+```
+check_black_sim_capacity.py（tests/，不提交）用于测量；本轮同时修复该工具的
+CONTACTS / WORLD mean 统计 bug：histogram.sum() 是 (world, substep) 样本数而非
+contacts 数，mean 改用直接求和累计器；修复前出现 mean=1.000 / p50=2 的矛盾输出。
+```
 
 ------
 

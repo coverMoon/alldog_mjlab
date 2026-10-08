@@ -421,6 +421,21 @@ class TerrainParams:
 
 @dataclass(frozen=True)
 class SimulationParams:
+    # MJWarp per-world constraint capacity（njmax）。
+    #
+    # 旧 MjLab velocity baseline = 1500。下限由 MJWarp put_data 对模板 spawn state 的
+    # 硬性要求决定（njmax >= mjd.nefc）：flat seed = 144 / rough seed = 220（约成：
+    # 12 friction_dof + 4 joint limit + spawn contact 的 pyramidal rows；Black nv=18<=32
+    # → dense，tile 16 对齐）。
+    #
+    # Black rough 实测（check_black_sim_capacity，3000 env / 2.4M world-substep samples）：
+    # max nefc = 80、p99.9 = 52，overflow = NO。
+    #
+    # 当前候选 = 256：seed floor 的 ~1.16x、实测 runtime max 的 3.2x；
+    # 这是 capacity tuning（减少 constraint arrays / solver workspace 预分配），
+    # 不改变正常 constraint solver 数学行为；前提是运行过程中 nefc 不超过容量
+    # （overflow bit = YES 即失效，需回退）。
+    njmax: int = 256
     # MJWarp GPU contact-capacity workaround；不是 legacy Black 行为。flat 保持 native 35。
     rough_nconmax: int = 128
 
