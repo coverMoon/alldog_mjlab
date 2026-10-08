@@ -1,338 +1,235 @@
 # AllDog MjLab
 
-AllDog MjLab 是 XJTUROBOCON 四足机器人强化学习训练仓库，基于 MjLab + RSL-RL，
-从旧 Isaac Gym / legged_gym / super-dog 工程逐步迁移。当前目标架构以 MjLab 为准，
-机器人与任务通过原生 Entity、Manager 和配置机制组织。
+AllDog MjLab 是一个基于 [MjLab](https://github.com/mujocolab/mjlab) 和 [RSL-RL](https://github.com/leggedrobotics/rsl_rl) 的四足机器人强化学习训练工程，涵盖机器人模型配置、运动任务构建、PPO / HIM 策略训练、平地到复杂地形的续训，以及 TorchScript 策略导出。
 
-本仓库负责机器人任务、训练、策略导出和显式 deployment policy contract。
-实机 runtime / backend 在独立 deployment project 中维护，通过策略契约与训练侧对接。
+项目将机器人资产、训练任务和强化学习算法分层组织，并通过明确的 observation / action contract 与部署程序对接。当前主要支持 Black 四足机器人的速度跟踪训练；其他机器人平台正在逐步接入。
 
-## Current Status
+## Features
 
-| 能力 | 状态 |
-|---|---|
-| Black flat PPO | Available |
-| Black rough PPO | Available / baseline verified；长期收敛与定量评估尚未完成 |
-| TorchScript actor export | Available |
-| Black deployment policy contract | Verified；observation/action trace 与 sim2sim 已验证 |
-| Black HIM（flat-him / rough-him） | Available；注册 + warm start + flat→rough full resume 已验证，长训练收敛未验证 |
-| BlackW | Not yet migrated |
-| Real robot backend | 在独立 deployment project 中维护，尚未实现 |
+- **MjLab 原生训练流程**：基于 Entity、Manager、Actuator 和 Sensor 配置任务，使用统一的 `train` / `play` 命令。
+- **Black locomotion**：提供 flat 和 rough 两类任务；rough 包含斜坡、离散障碍、上下台阶及地形课程学习。
+- **PPO 与 HIM**：支持普通 PPO、HIM 历史观测与估计器，以及对应的 checkpoint 恢复流程。
+- **阶段式训练**：支持同任务续训、flat → rough 完整续训，以及 PPO → HIM warm start。
+- **策略回放与导出**：通过 MuJoCo native / Viser 查看策略，并导出可独立加载的 TorchScript actor。
 
-## Quick Start
+**当前范围：** 已注册的训练任务为 `black-flat`、`black-rough`、`black-flat-him` 和 `black-rough-him`。Black rough / HIM 的长训练收敛与定量评估仍在推进中。Wolf 目前仅有待完善的 MJCF 描述，尚未注册训练任务；BlackW 也尚未迁移。
 
-完成下方安装后，在仓库根目录依次执行主流程。
+## Getting Started
 
-训练 flat：
+### 1. 安装
 
-```bash
+需要 Python 3.12+、[uv](https://docs.astral.sh/uv/)；正式 GPU 并行训练需要与 MjLab 兼容的 NVIDIA CUDA 环境。仓库通过 `uv.lock` 固定依赖，当前使用 **MjLab v1.6.0** 和 **RSL-RL 5.4.2**。
+
+~~~bash
+git clone https://github.com/coverMoon/alldog_mjlab.git
+cd alldog_mjlab
+uv sync --frozen
+~~~
+
+后续命令均在仓库根目录运行，通过 `uv run` 自动使用项目虚拟环境，无需单独创建 `train.py` 或 `play.py`。
+
+### 2. 训练 Black flat
+
+从随机初始化开始训练平地 PPO：
+
+~~~bash
 uv run train black-flat
-```
+~~~
 
-从最新 flat checkpoint 继续训练 rough：
+训练日志和 checkpoint 默认保存在：
 
-```bash
+~~~text
+logs/rsl_rl/black_velocity/
+└── <timestamp>_flat/
+    ├── model_*.pt
+    └── ...
+~~~
+
+如果 GPU 显存不足，可以先降低并行环境数量，例如：
+
+~~~bash
+uv run train black-flat --env.scene.num-envs 1024
+~~~
+
+### 3. 从 flat 续训到 rough
+
+推荐先训练出可以稳定运动的 flat 策略，再基于其 checkpoint 进入复杂地形：
+
+~~~bash
 uv run train black-rough \
     --agent.resume True \
     --agent.load-run '.*_flat$'
-```
+~~~
 
-播放本地 rough checkpoint（桌面环境默认开 MuJoCo native 窗口，网页版用 `--viewer viser`，
-详见下文 Playing a Policy）：
+这条命令会查找匹配的最新 flat run，并使用其中最新的 checkpoint。rough 训练会恢复 actor、critic、optimizer 等训练状态，同时新建 rough 地形环境。输出保存在新的 `<timestamp>_rough` run 中。
 
-```bash
-uv run play black-rough \
-    --checkpoint-file 'logs/rsl_rl/black_velocity/<rough-run>/model_500.pt' \
-    --viewer viser
-```
+如需从指定 checkpoint 开始：
 
-导出最新 rough actor：
-
-```bash
-uv run export --task-id black-rough
-```
-
-示例中的 `<rough-run>`、`<flat-run>`、`<run>` 和 checkpoint 文件名需替换为实际值。
-
-## Installation
-
-需要先安装 [uv](https://docs.astral.sh/uv/)。Python 要求为 **>= 3.12**，
-仓库 `.python-version` 使用 3.12；当前 `uv.lock` 锁定 **MjLab 1.6.0 / RSL-RL 5.4.2**。
-常规并行训练使用 NVIDIA GPU，框架要求见 [MjLab v1.6.0](https://github.com/mujocolab/mjlab/tree/v1.6.0)。
-
-```bash
-git clone https://github.com/coverMoon/alldog_mjlab.git
-cd alldog_mjlab
-uv sync
-```
-
-项目当前开发与验证基于 MjLab v1.6.0，请优先使用仓库提供的 `uv.lock` 保持环境一致，
-不建议自行升级 MjLab 后直接假定兼容。安装后 `uv run` 会使用项目环境；
-`train` / `play` 来自 MjLab，`export` 是本项目提供的入口。
-
-## Training Workflow
-
-`black_velocity` 是 checkpoint-compatible policy family，flat / rough 是两个训练阶段。
-二者共享 actor、critic 和 PPO 配置，stage 决定环境、run 后缀和默认续训来源。
-日志默认组织为：
-
-```text
-logs/rsl_rl/black_velocity/
-├── <timestamp>_flat/
-└── <timestamp>_rough/
-```
-
-| Workflow | Command |
-|---|---|
-| Fresh flat | `uv run train black-flat` |
-| Flat → Flat | `uv run train black-flat --agent.resume True` |
-| Fresh rough | `uv run train black-rough` |
-| Rough → Rough | `uv run train black-rough --agent.resume True` |
-| Flat → Rough | `uv run train black-rough --agent.resume True --agent.load-run '.*_flat$'` |
-
-### 常用 CLI 覆盖参数
-
-```bash
---env.scene.num-envs 2048          # 环境数量（默认 BLACK_CONFIG.env.train_num_envs = 4096）
---agent.max-iterations 500         # 追加 iteration 数（resume 时是“再训多少”，非绝对上限）
---agent.seed 43
---agent.save-interval 100          # checkpoint 保存间隔（另：最后一个 iteration 总是保存）
---agent.logger tensorboard
---agent.run-name mytag             # run 目录后缀 → <timestamp>_mytag
---agent.load-run / --agent.load-checkpoint
-```
-
-环境数量不影响 checkpoint 兼容性：不同 env 数训练的 run 可以互相 resume。
-显式 CLI 参数优先于 `black_config.py` 中的 task 默认值。
-
-同 stage resume 默认选最新匹配的 `*_flat` / `*_rough` run，再选最新 `model_*.pt`。
-指定某个 flat run 和 checkpoint：
-
-```bash
+~~~bash
 uv run train black-rough \
     --agent.resume True \
     --agent.load-run '<flat-run>' \
     --agent.load-checkpoint 'model_500.pt'
-```
+~~~
 
-Flat → Rough 是 **full resume**，继续恢复 actor / critic / optimizer / normalization /
-training iteration 等训练状态，包括 checkpoint 的学习率。rough environment 会重新构造，
-不会整体搬运 flat 的 simulator state 或 terrain runtime state。
+### 4. 回放策略
 
-**MjLab / RSL-RL resume 时，`max_iterations` 表示 checkpoint 之后额外训练的 iteration 数，
-不是最终 iteration 编号。** 例如从 iter 1000 resume，`max_iterations=5000` 会再训练约
-5000 iterations；对应 CLI 参数为 `--agent.max-iterations 5000`。
+指定训练 checkpoint，启动 MuJoCo 回放：
 
-## Playing a Policy
-
-使用本地训练 checkpoint 播放 flat 或 rough：
-
-```bash
-uv run play black-flat \
-    --checkpoint-file 'logs/rsl_rl/black_velocity/<flat-run>/model_500.pt'
-
+~~~bash
 uv run play black-rough \
     --checkpoint-file 'logs/rsl_rl/black_velocity/<rough-run>/model_500.pt'
-```
+~~~
 
-HIM task 同样可播（推理只读 actor history，不读 estimator target）：
+默认 `--viewer auto`：有桌面显示环境时使用 native viewer，否则使用 Viser。若想在浏览器中调整速度指令并查看运行信息，可显式指定：
 
-```bash
-uv run play black-flat-him \
-    --checkpoint-file 'logs/rsl_rl/black_velocity/<flat-him-run>/model_*.pt'
-uv run play black-rough-him \
-    --checkpoint-file 'logs/rsl_rl/black_velocity/<rough-him-run>/model_*.pt'
-```
+~~~bash
+uv run play black-rough \
+    --checkpoint-file 'logs/rsl_rl/black_velocity/<rough-run>/model_500.pt' \
+    --viewer viser
+~~~
 
-### Viewer 选择
+将示例中的 `<flat-run>`、`<rough-run>` 和 checkpoint 编号替换成实际目录或文件名。需要播放 flat 或 HIM 策略时，将 task ID 和 checkpoint 路径换成对应任务即可。
 
-```bash
---viewer viser     # 浏览器网页 UI（viser，默认 http://localhost:8080；
-                   #   command 滑条 / reward 面板 / checkpoint 热切换）
---viewer native    # MuJoCo 桌面窗口（无 command 控件）
---viewer auto      # 默认：检测到桌面显示环境 → native，否则 → viser
-```
+### 5. 导出 TorchScript 策略
 
-`auto` 在桌面会话下落到 native，因此想用网页控制速度必须显式传 `--viewer viser`。
+从最新的 rough checkpoint 导出 actor：
 
-### Play 参数
-
-```bash
---num-envs 4                       # 环境/机器人数量（默认单 env）
---agent zero|random|trained        # policy 模式（zero/random 可做 ad-hoc 检查）
---checkpoint-file '<path>'         # 直接指定 checkpoint 文件
-```
-
-play 使用对应 task 的 play configuration，默认关闭 training DR 与 actor observation
-corruption；reset events 保留。rough play 保留 terrain generator，关闭 curriculum 和
-terrain 越界 truncation。推理仅加载 actor，不使用 critic。
-
-## Inspection / Visualization
-
-只看地形（不训练、不 play、无机器人）：
-
-```bash
-# 交互式 MuJoCo 窗口（需 DISPLAY；鼠标左键旋转 / 右键平移 / 滚轮缩放）
-uv run python tests/render_black_rough.py --viewer
-uv run python tests/render_black_rough.py --viewer --row 9 --col 5   # 聚焦最难的上台阶
-
-# headless 输出图片（俯视全图 + 每列斜视图 + rough slope 三档难度）
-uv run python tests/render_black_rough.py --out /tmp/render
-```
-
-网格为 10 行（难度 0.0 → 0.9）x 7 列（terrain 类型）：
-`flat / smooth_slope_up / smooth_slope_down / rough_slope / discrete_obstacles /
-stairs_up / stairs_down`。`tests/` 下的脚本仅用于本地检查，不提交 Git。
-
-## Exporting a Policy
-
-标准导出入口：
-
-```bash
-uv run export --task-id black-flat
+~~~bash
 uv run export --task-id black-rough
-```
+~~~
 
-默认解析流程为 **task stage → latest matching stage run → latest `model_*.pt`
-→ `<run>/exported/policy.pt`**，导出默认在 CPU 上执行。
+默认输出路径为：
 
-指定来源 checkpoint：
+~~~text
+logs/rsl_rl/black_velocity/<rough-run>/exported/policy.pt
+~~~
 
-```bash
-uv run export \
-    --task-id black-rough \
-    --load-run '<run>' \
-    --checkpoint model_500.pt
-```
+也可以明确指定来源和输出目录：
 
-自定义输出目录：
+~~~bash
+uv run export --task-id black-rough \
+    --load-run '<rough-run>' \
+    --checkpoint model_500.pt \
+    --output-dir ./exported
+~~~
 
-```bash
-uv run export \
-    --task-id black-rough \
-    --output-dir ~/models/black
-```
+导出程序会重新加载 TorchScript 产物进行数值校验。训练使用的 `model_*.pt` 保存训练状态；`policy.pt` 是面向推理的 actor，两者不能直接互换。
 
-| Artifact contract | 值 |
-|---|---|
-| Format | TorchScript，actor only |
-| Input | `float32 [1, 45]` |
-| Output | `float32 [1, 12]`，raw policy action |
-| Filename | `policy.pt` |
+## Training Workflows
 
-Exporter 使用锁定版本的原生 runner 加载和导出，并重新加载产物验证数值等价。
-训练 checkpoint `model_*.pt` 与部署 TorchScript `policy.pt` 用途不同，不能直接互换。
+普通 PPO 的常见训练方式如下：
 
-## Configuration
+| 目标 | 命令 |
+| --- | --- |
+| 新训练 flat | `uv run train black-flat` |
+| 继续 flat | `uv run train black-flat --agent.resume True` |
+| 新训练 rough | `uv run train black-rough` |
+| 继续 rough | `uv run train black-rough --agent.resume True` |
+| flat → rough | `uv run train black-rough --agent.resume True --agent.load-run '.*_flat$'` |
 
-[`src/alldog_mjlab/tasks/velocity/black/black_config.py`](src/alldog_mjlab/tasks/velocity/black/black_config.py)
-是当前 Black flat/rough 的主要人工训练配置入口，集中管理 environment、control、commands、
-observation scales/noise、reset、termination、rewards、domain randomization、terrain、
-simulation、policy network、PPO 和 runner 数值。
+不显式指定 `--agent.load-run` 时，同阶段续训默认查找对应后缀的最新 run（`_flat` 或 `_rough`）。可用 `--agent.load-checkpoint` 指定具体 checkpoint。
 
-`env_cfgs.py` / `rl_cfg.py` 将这些数值组装成原生 MjLab / RSL-RL 配置。
-Policy joint order、action order、observation layout、manager term order、sensor identity
-和 entity selectors 属于 contract / wiring，不应作为普通超参数随意修改。
-Observation scales、control dt 和 action scale 也影响部署契约，修改后需要重新验证兼容性。
+常用覆盖参数：
 
-[`src/alldog_mjlab/robots/black/`](src/alldog_mjlab/robots/black/) 负责 robot asset、default pose、
-actuator、joint identity 和 robot intrinsic parameters；任务训练参数归 tasks 管理。
+~~~bash
+--env.scene.num-envs 2048       # 并行环境数量
+--agent.max-iterations 1000     # 本次训练轮数；resume 时表示额外增加的轮数
+--agent.save-interval 100       # checkpoint 保存间隔
+--agent.seed 43                 # 随机种子
+--agent.run-name experiment     # 自定义 run 后缀
+~~~
+
+这些参数附加在 `uv run train <task-id>` 后面。默认训练参数在 `src/alldog_mjlab/tasks/velocity/black/black_config.py` 中维护，CLI 显式参数优先。
+
+**注意：** resume 时 `--agent.max-iterations` 表示从 checkpoint 继续训练多少轮，并非最终累计 iteration 编号。
+
+### HIM 训练
+
+HIM 使用历史观测与估计器，训练 task 为 `black-flat-him` 和 `black-rough-him`。可以从头训练 flat HIM，也可以先用 flat PPO checkpoint 初始化：
+
+~~~bash
+# 从随机初始化训练 flat HIM
+uv run train black-flat-him
+
+# 使用已训练的 flat PPO 初始化 flat HIM（warm start）
+uv run train black-flat-him \
+    --agent.warm-start True \
+    --agent.load-run '.*_flat$'
+
+# 从 flat HIM 完整续训 rough HIM
+uv run train black-rough-him \
+    --agent.resume True \
+    --agent.load-run '.*_flat_him$'
+~~~
+
+`warm-start` 用于初始化新 HIM run，不恢复原 PPO 的 optimizer 与 iteration；`resume` 用于恢复现有 HIM 训练状态，两者不可同时使用。rough HIM 不支持直接从 rough PPO warm start。
+
+HIM 同样支持 `play` 和 TorchScript 导出：
+
+~~~bash
+uv run export --task-id black-flat-him
+uv run export --task-id black-rough-him
+~~~
 
 ## Tasks
 
-### `black-flat`
+| Task ID | 算法 | 场景 | 状态 |
+| --- | --- | --- | --- |
+| `black-flat` | PPO | 平地速度跟踪 | 已实现并完成基线验证 |
+| `black-rough` | PPO | 复杂地形及地形课程 | 已实现，长期训练评估持续进行 |
+| `black-flat-him` | HIM / PPO | 平地、历史观测与环境估计 | 训练链路已实现，长期效果待评估 |
+| `black-rough-him` | HIM / PPO | 复杂地形、历史观测与环境估计 | 续训链路已实现，长期效果待评估 |
 
-Flat-ground Black PPO locomotion task，使用 plane terrain。
-Actor 为单帧 **45-D**，privileged critic 为 **259-D**，包含 terrain height scan。
+四个任务共享 Black 的机器人模型和底层控制配置。flat 与 rough 的主要差异在地形、地形课程和相应奖励/终止设置；普通 PPO 与 HIM 使用不同的 actor 输入契约。
 
-### `black-rough`
+## Configuration
 
-在 flat 契约上加入 rough terrain generator、terrain curriculum、terrain-relative
-base-height reward 和 training 下的 rough terrain safety truncation。
-Terrain 为 7 类 curriculum generator（含 native box 台阶 stairs up/down，
-step_height = 0.05 + 0.18 × difficulty；spawn 权重取 super-dog HEAD lineage：
-flat 0.10 / slopes 0.05+0.05 / rough 0.10 / obstacles 0.20 / stairs 0.25+0.25）。
-Actor contract 与 flat 一致（45-D），critic layout 也与 flat 一致（259-D）。
-约 500 iteration 的 PPO baseline 已验证，长期收敛与定量评估仍待完成。
+项目代码按职责组织：
 
-### `black-flat-him`
+~~~text
+src/alldog_mjlab/
+├── robots/               MJCF、关节、执行器和默认姿态
+│   ├── black/
+│   └── wolf/             MJCF 准备中，尚未注册训练任务
+├── tasks/
+│   └── velocity/
+│       └── black/        环境组装、奖励、观测、动作、地形与训练配置
+├── algorithms/
+│   └── him/              HIM estimator、policy、storage 与 PPO 更新
+└── utils/                策略导出等工具
+~~~
 
-`black-flat` + HIM observation contract：actor 输入为 6 帧 history `[B, 6, 45]`，
-推理另需 source encoder（history → velocity 估计 + latent）；训练额外使用
-estimator velocity target 与 terminal successor recorder，算法为 HIMPPO。
-支持 `--agent.warm-start True` 从 black-flat PPO checkpoint 初始化。
+调节 Black 训练参数，通常从以下文件开始：
 
-### `black-rough-him`
+- [`black_config.py`](src/alldog_mjlab/tasks/velocity/black/black_config.py)：环境数量、控制周期、PD 相关 task 参数、速度指令、奖励权重、reset、随机化、地形和训练超参数。
+- [`env_cfgs.py`](src/alldog_mjlab/tasks/velocity/black/env_cfgs.py)：将机器人、Manager terms、action / observation / reward 等组装为 MjLab task。
+- [`black_constants.py`](src/alldog_mjlab/robots/black/black_constants.py)：机器人资产、关节顺序、默认姿态和 actuator 配置。
 
-`black-rough` + HIM contract（同 flat-him 与 rough 的关系，环境 contract 不因 HIM 改变）。
-不支持 PPO→HIM warm start；训练入口是 flat HIM checkpoint 的 full resume：
-`--agent.resume True --agent.load-run '.*_flat_him$'`。
-长训练收敛未验证。
+普通训练参数可以按需调整；joint order、observation layout、action semantics、控制频率及 scaling 属于部署接口契约，修改时需要同步验证训练与部署端的一致性。
 
-Task 层组织与进一步说明见 [`src/alldog_mjlab/tasks/README.md`](src/alldog_mjlab/tasks/README.md)。
+## Policy Export Contract
 
-## Project Structure
+当前 Black 策略均输出 12-D raw action，按 **FL → FR → RL → RR**、每腿 **hip → thigh → calf** 排列。部署侧必须显式完成模型关节顺序到策略顺序的映射。
 
-```text
-alldog_mjlab/
-├── src/alldog_mjlab/
-│   ├── robots/
-│   ├── tasks/
-│   ├── algorithms/
-│   └── utils/
-├── archive/
-├── .ai/
-├── pyproject.toml
-└── uv.lock
-```
+| 策略 | TorchScript 输入 | TorchScript 输出 |
+| --- | --- | --- |
+| PPO | `float32 [1, 45]`，单帧 actor observation | `float32 [1, 12]` |
+| HIM | `float32 [1, 270]`，6 × 45 历史帧展平，newest → oldest | `float32 [1, 12]` |
 
-| 目录 | 职责 |
-|---|---|
-| `robots/` | Asset、joint、actuator、default pose 与机器人固有参数 |
-| `tasks/` | Observation、action、command、reward、termination、event/reset、DR、terrain 与 sensors |
-| `algorithms/` | Algorithm-specific learning logic；当前 production Black 使用标准 PPO |
-| `utils/` | 策略导出与项目级工具 |
-| `archive/` | 历史原型，不参与 production task discovery |
-| `.ai/` | 迁移状态、contract 与内部开发记录 |
+Black 当前的腿部位置目标和控制周期为：
 
-## Black Policy Contract
-
-Policy joint order 固定为 **FL → FR → RL → RR**，每腿 **hip → thigh → calf**。
-Actor 使用单帧 45-D observation，无 history，actor running normalization 关闭；action 为 12-D。
-Observation 依次为 command、base angular velocity、projected gravity、相对 default pose 的
-joint position、joint velocity 和 previous action，使用任务定义的 scales。
-
-```text
-q_policy = q_default + 0.25 * raw_action
+~~~text
+q_target = q_default + 0.25 * raw_action
 physics dt = 0.005 s
-decimation = 4
-policy dt = 0.02 s
-policy frequency = 50 Hz
-```
+policy dt  = 0.020 s (50 Hz)
+~~~
 
-**MuJoCo model natural order != policy order**：当前模型腿顺序为 FL → FR → RR → RL。
-Deployment observation/action 必须显式按 policy order 映射，不能直接沿用模型自然顺序。
+导出的策略只定义 policy inference；观测构造、关节映射、动作执行以及实机安全限位由部署端负责。训练与部署通过显式 policy I/O contract 对接，不要求依赖特定部署工程的内部实现。
 
-`alldog_mjlab` 负责 training、observation/action contract、policy export 与 policy semantics。
-Deployment framework 从 simulation/hardware state 构造 observation，把 policy action
-映射为低层 command，并负责 runtime safety 与 hardware backend。
-当前 deployment runtime 是 [coverMoon/quadruped_control](https://github.com/coverMoon/quadruped_control)；
-双方通过显式契约对接，本仓库不依赖其内部代码。
+## References
 
-## Roadmap
-
-当前 production 已提供 Black flat/rough PPO、Black HIM（flat-him / rough-him）训练链路
-（warm start + full resume 已验证）、stage-aware resume、TorchScript actor-only export
-和已验证的 deployment policy contract。近期继续 HIM 长训练收敛验证、训练调参与评估；
-后续计划包括 HIM exporter、BlackW flat/rough，以及更晚的任务扩展。
-HIM TorchScript/ONNX exporter、BlackW 和实机 backend 当前均未在本仓库实现。
-
-## Related Projects
-
-| 项目 | 用途 |
-|---|---|
-| [mujocolab/mjlab](https://github.com/mujocolab/mjlab) | Framework authority，当前使用 v1.6.0 |
-| [coverMoon/super-dog](https://github.com/coverMoon/super-dog) | 历史 Black / BlackW behavior 与工程参考 |
-| [InternRobotics/HIMLoco](https://github.com/InternRobotics/HIMLoco) | 后续 HIM integration 的算法权威来源 |
-| [coverMoon/rl_sar-for-super-dog](https://github.com/coverMoon/rl_sar-for-super-dog) | Legacy deployment compatibility 参考 |
-| [coverMoon/quadruped_control](https://github.com/coverMoon/quadruped_control) | 当前 deployment runtime |
+- [MjLab](https://github.com/mujocolab/mjlab) — 仿真与任务管理框架（本仓库锁定 v1.6.0）
+- [RSL-RL](https://github.com/leggedrobotics/rsl_rl) — PPO 训练框架
+- [HIMLoco](https://github.com/InternRobotics/HIMLoco) — HIM 算法参考
+- [quadruped_control](https://github.com/coverMoon/quadruped_control) — 与本仓库策略契约对接的运动控制工程
