@@ -42,10 +42,10 @@
   <worldbody>
     <body name="base_link" pos="0 0 0">
       <freejoint/>
-      <inertial pos="5.7679e-8 -0.025143 -0.0042488" mass="9.9614" fullinertia="0.03108 0.025591 0.043798 -4.8159e-7 3.987e-19 -3.4836e-21"/>
-      <geom pos="0 0 0" group="1" contype="0" conaffinity="0" mass="0" material="base_link_mat" type="mesh" mesh="base_link_simplified" />
-      <geom pos="0 0 0" rgba="0.9372549019607843 0.26666666666666666 0.26666666666666666 1" group="3" contype="1" conaffinity="1" type="box" size="0.135 0.215 0.06" />
-      <body name="FL_Link1" pos="-0.09 0.2225 0" quat="0.7071054825112363 -0.7071080798594735 0 0">
+      <inertial pos="-0.025143 -5.7679e-8 -0.0042488" mass="9.9614" fullinertia="0.025591 0.03108 0.043798 4.8159e-7 -3.4836e-21 -3.987e-19"/>
+      <geom pos="0 0 0" quat="0.7071067811865476 0 0 -0.7071067811865475" group="1" contype="0" conaffinity="0" mass="0" material="base_link_mat" type="mesh" mesh="base_link_simplified" />
+      <geom pos="0 0 0" rgba="0.9372549019607843 0.26666666666666666 0.26666666666666666 1" group="3" contype="1" conaffinity="1" type="box" size="0.215 0.135 0.06" />
+      <body name="FL_Link1" pos="0.2225 0.09 0" quat="0.4999990816978809 -0.5000009183004326 0.5000009183004325 -0.4999990816978808">
         <joint name="FL_hip" type="hinge" axis="0 0 1" limited="true" range="-0.6 0.8" damping="0" frictionloss="0"/>
         <inertial pos="-0.025322 0.000012207 0.068696" mass="1.4729" fullinertia="0.0020636 0.0011648 0.0010522 -9.4769e-7 0.0000024326 0.0000019093"/>
         <geom pos="0 0 0" group="1" contype="0" conaffinity="0" mass="0" material="FL_Link1_mat" type="mesh" mesh="FL_Link1" />
@@ -73,7 +73,7 @@
           </body>
         </body>
       </body>
-      <body name="FR_Link1" pos="0.09 0.2225 0" quat="0.7071054825112363 -0.7071080798594735 0 0">
+      <body name="FR_Link1" pos="0.2225 -0.09 0" quat="0.4999990816978809 -0.5000009183004326 0.5000009183004325 -0.4999990816978808">
         <joint name="FR_hip" type="hinge" axis="0 0 1" limited="true" range="-0.8 0.6" damping="0" frictionloss="0"/>
         <inertial pos="0.025322 -0.000012207 0.068696" mass="1.4729" fullinertia="0.0020636 0.0011648 0.0010522 -9.4769e-7 -0.0000024326 -0.0000019093"/>
         <geom pos="0 0 0" group="1" contype="0" conaffinity="0" mass="0" material="FR_Link1_mat" type="mesh" mesh="FR_Link1" />
@@ -101,7 +101,7 @@
           </body>
         </body>
       </body>
-      <body name="RL_Link1" pos="-0.09 -0.2225 0" quat="0.7071054825112363 0.7071080798594735 0 0">
+      <body name="RL_Link1" pos="-0.2225 0.09 0" quat="0.4999990816978809 0.5000009183004326 -0.5000009183004325 -0.4999990816978808">
         <joint name="RL_hip" type="hinge" axis="0 0 1" limited="true" range="-0.8 0.6" damping="0" frictionloss="0"/>
         <inertial pos="-0.025322 0.000012207 0.068696" mass="1.4729" fullinertia="0.0020636 0.0011648 0.0010522 -9.4769e-7 0.0000024326 0.0000019093"/>
         <geom pos="0 0 0" group="1" contype="0" conaffinity="0" mass="0" material="RL_Link1_mat" type="mesh" mesh="RL_Link1" />
@@ -129,8 +129,8 @@
           </body>
         </body>
       </body>
-      <body name="RR_Link1" pos="0.09 -0.2225 0" quat="0.7071054825112363 0.7071080798594735 0 0">
-        <joint name="RR-hip" type="hinge" axis="0 0 1" limited="true" range="-0.6 0.8" damping="0" frictionloss="0"/>
+      <body name="RR_Link1" pos="-0.2225 -0.09 0" quat="0.4999990816978809 0.5000009183004326 -0.5000009183004325 -0.4999990816978808">
+        <joint name="RR_hip" type="hinge" axis="0 0 1" limited="true" range="-0.6 0.8" damping="0" frictionloss="0"/>
         <inertial pos="0.025322 -0.000012207 0.068696" mass="1.4729" fullinertia="0.0020636 0.0011648 0.0010522 -9.4769e-7 -0.0000024326 -0.0000019093"/>
         <geom pos="0 0 0" group="1" contype="0" conaffinity="0" mass="0" material="RR_Link1_mat" type="mesh" mesh="RR_Link1" />
         <geom pos="0.0276749993208796 0.00234011933207512 0.071352763324976" quat="0.7071067811865476 0 0.7071067811865475 0" rgba="0.9372549019607843 0.26666666666666666 0.26666666666666666 1" group="3" contype="1" conaffinity="1" type="cylinder" size="0.05052599018711037 0.035" />
@@ -175,7 +175,7 @@
     <motor name="RL_thigh_motor" joint="RL_thigh" gear="1" ctrllimited="true" ctrlrange="-60 60" />
     <motor name="RL_calf_motor" joint="RL_calf" gear="1" ctrllimited="true" ctrlrange="-60 60" />
     <motor name="RL_foot_motor" joint="RL_foot" gear="1" ctrllimited="true" ctrlrange="-17 17" />
-    <motor name="RR-hip_motor" joint="RR-hip" gear="1" ctrllimited="true" ctrlrange="-60 60" />
+    <motor name="RR_hip_motor" joint="RR_hip" gear="1" ctrllimited="true" ctrlrange="-60 60" />
     <motor name="RR_thigh_motor" joint="RR_thigh" gear="1" ctrllimited="true" ctrlrange="-60 60" />
     <motor name="RR_calf_motor" joint="RR_calf" gear="1" ctrllimited="true" ctrlrange="-60 60" />
     <motor name="RR_foot_motor" joint="RR_foot" gear="1" ctrllimited="true" ctrlrange="-17 17" />
