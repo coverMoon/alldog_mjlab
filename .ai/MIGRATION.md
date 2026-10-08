@@ -32,6 +32,7 @@ black-rough-him registration + flat→rough HIM full resume: COMPLETE（§24）
 Black rough stairs terrain（up / down）: COMPLETE（§13.5）
 Black performance-based forward-speed command curriculum
 + checkpoint/resume state: COMPLETE（§4.3 / §4.4）
+Wolf robot asset / joint order / actuator contract (stage 1): COMPLETE（§27）
 Hardware effort/current ceiling: UNCONFIRMED（实机前确认）
 ```
 
@@ -1506,6 +1507,7 @@ black-flat-him registration + PPO→HIM warm start: COMPLETE（§23 / §17.15）
 black-rough-him registration + flat→rough HIM full resume: COMPLETE（§24 / §17.16）
 Black rough stairs terrain（up / down, native box）: COMPLETE（§13.5）
 Black forward-speed command curriculum + checkpoint state: COMPLETE（§4.3 / §4.4）
+Wolf robot asset / joint order / actuator contract (stage 1): COMPLETE（§27）
 ```
 
 command 已冻结为固定范围 + native sampler，且不再有任何 curriculum（§4）。
@@ -4054,6 +4056,11 @@ Black flat/rough 与训练侧 sim2real contract 已完成；部署代码由独�
      旧 checkpoint none+warning）；经 §4.4 公共层同时服务 PPO/HIM；
      vy/wz/sampler 不变；play 无 curriculum。CPU + CUDA PASS。
      下一单元：Black command curriculum training validation（§1 next candidate）。）
+18. Wolf robot asset / joint order / actuator contract（stage 1）
+    （完成：§27。collision-only 与 full-visual 双模式 get_spec；16 IdealPd actuator
+     （腿 60/2/60、轮 0/1/17）；显式 WOLF_POLICY_JOINT_NAMES 与轮符号 contract；
+     FK 实测几何接触 root z = 0.4489、PD 受控站立稳态 0.396；
+     CPU + CUDA smoke PASS。wolf-flat task / RL 全部未开始。）
 ```
 
 已插入完成的非 behavior 任务：
@@ -4068,6 +4075,93 @@ Black training configuration consolidation v2    （完成，behavior-neutral）
 不要同时推进多个 behavior unit。
 
 ------
+
+------
+
+## 27. Wolf Robot Asset / Joint / Actuator Contract（stage 1）
+
+阶段状态：
+
+```text
+Wolf 机器人资产 + 默认姿态 + 关节顺序 + 执行器控制契约: COMPLETE（CPU + CUDA smoke）
+进一步接口 / 具体配置                                        未完成
+```
+
+### 27.1 资产与 MJCF
+
+`src/alldog_mjlab/robots/wolf/xmls/wolf.xml` 为模型权威来源：
+
+```text
+修改   删除原 <actuator>（16 <motor>）—— 执行器改由 MjLab IdealPdActuatorCfg 创建
+       四个轮子碰撞圆柱 geom 命名：FL_wheel_collision / FR / RL / RR（只命名，不改几何）
+保留   16 hinge joint + root freejoint、axis / range / body transform、
+       显式 inertial、碰撞几何 / 摩擦 / 视觉 mesh 引用、joint 命名（不重命名）
+nq/nv/nu = 23/22/16（freejoint 7 + 16 hinge / 6+16 dof / 16 actuator）
+总质量   33.6686 kg（exture 显式 inertial 总和 = 模型 body_mass 逐位一致）
+```
+
+私有 STL 兼容（`get_spec()`）：
+- STL 完整且可加载 → 完整视觉模型（`MjSpec.from_file`）；
+- STL 缺失或损坏（当前 `imu_Link.STL` 为损坏文件，仅 84 字节）→ ElementTree 从权威
+  XML 结构化派生 collision-only MJCF（删除 <mesh> asset 与 <geom type="mesh">，
+  保留惯性 / 碰撞 / 关节 / 刚体结构），`MjSpec.from_string` 加载（无字符串正则）；
+- 加载模式（full / collision-only）显式打印，不静默。
+
+### 27.2 显式 joint / policy contract（wolf_constants.py，唯一 coverage-source）
+
+```text
+腿顺序      FL → FR → RL → RR；每腿 hip → thigh → calf → foot（foot=驱动轮）
+16 joints   WOLF_POLICY_JOINT_NAMES（显式 tuple；编译 natural order 恰好一致是
+            巧合而非依赖——测试记录了该事实，但 contract 不依赖它）
+wheel       WOLF_WHEEL_JOINT_NAMES / WOLF_WHEEL_COLLISION_GEOM_NAMES
+符号        WOLF_WHEEL_FORWARD_SIGN = FL:+1, FR:-1, RL:+1, RR:-1
+            策略正轮速 = 机身 +x 前进；已用默认姿态 FK 验证（FL/RL 轮轴 +y、
+            FR/RR 轮轴 -y；a×ẑ=+x̂ ⇒ 前进）+ 地面闭环滚动 +x PASS
+```
+
+### 27.3 默认姿态与站立（MuJoCo 实测）
+
+```text
+joint 默认姿态（rad）:
+    hip   全 0；thigh FL/RR +0.82 / FR/RL -0.82；calf FL/RR +1.52 / FR/RL -1.52；
+    foot（轮）全 0。关节速度全 0；root 单位四元数。
+几何接触 root z（MuJoCo FK 实测） = 0.4489 ≈ 既有估算 0.449 ✓
+    （轮心相对 base_link z = -0.3489，轮半径 0.1）
+INIT_STATE pos z = 0.45：轮最低点 +0.0011 ≈ 0（1 mm 余量），原候选 0.45 可用。
+稳态受控站立（PD 闭环，2.5 s）:
+    root z 0.45 → 0.3961（PD 静力沉降 ≈ 5 cm，thigh 静力矩 ≈ 11 N·m / Kp=60 →
+    稳态误差 ≈ 0.23 rad）；轮最低点 ≈ 0（仍触地），roll/pitch≈0，
+    4 个轮地接触（cylinder-plane 各 2 点收敛为 1... 观测 4 contacts）、
+    max leg τ=13.9 N·m（远低于 60 限幅），无震荡发散 / 穿模爆裂。
+    结论：候选 Kp=60 可站立但沉降明显；提高 Kp 或改 tan damper 提高沉降精度的
+    需求记为风险项，不在本轮调。
+```
+
+### 27.4 执行器 contract
+
+```text
+全部 MjLab v1.6.0 原生 IdealPdActuatorCfg，逐关节 16 个（sort_actuators=True）：
+    hip/thigh/calf  position PD  Kp=60, Kd=2.0,  effort_limit=60 N·m（首版仿真候选，
+                                                            非实机电机规格）
+    foot（轮）       velocity PD  Kp=0,  Kd=1.0,  effort_limit=17 N·m
+控制语义 = mjlaw τ = clamp(Kp(pos_t−q)+Kd(vel_t−dq)+effort, ±limit)：
+    轮部 Kp=0 ⇒ τ = clamp(Kd(dq_t−dq), ±17)，静止位置误差不产生轮矩（probe PASS）；
+    正负 velocity target 的力矩方向、±17 限幅均经 mjlaw 数值参数验证 PASS。
+    编译后 actuator/ctrl 顺序（当前恰好 = policy order）与 policy action order
+    是两个概念；joint mapping 供下一阶段 action term 显式使用。
+车轮半径 0.1 m（XML 冻结），vel scale 10 rad/s 属 task 层，不入机器人 PD。
+```
+
+### 27.5 验证记录（tests/check_wolf_robot.py，不提交）
+
+```text
+CPU  PASS（静态 / 控制 law 探针 / 4-wheel rolling 闭环 +x / 站立 / init-state 0.45）
+CUDA PASS（MJWarp Simulation 构建 + 默认姿态 20 步 finite）
+full visual 模式：imu STL 损坏 → 本机自动回退 collision-only，质量/运动学
+    对比无法与 full 分支进行（full 分支本身加载失败）；STL 修复后需重验。
+未验证 / 有意不实现：real 力矩规格、粗糙地形、action manager、任何 RL task、
+    BlackW 命名对齐（Wolf 关节名保持原有 "_foot" 轮名）。
+```
 
 ## 26. Update Rule
 

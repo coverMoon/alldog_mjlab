@@ -68,7 +68,7 @@
               <joint name="FL_foot" type="hinge" axis="0 0 1" damping="0" frictionloss="0"/>
               <inertial pos="2.7756e-16 0 0.030708" mass="1.5305" fullinertia="0.0036061 0.0036061 0.0069124 3.3386e-19 1.6978e-19 2.2333e-19"/>
               <geom pos="0 0 0" group="1" contype="0" conaffinity="0" mass="0" material="FL_Link4_mat" type="mesh" mesh="FL_Link4" />
-              <geom pos="0 0 0.032" rgba="0.9372549019607843 0.26666666666666666 0.26666666666666666 1" group="3" contype="1" conaffinity="1" type="cylinder" size="0.1 0.0225" />
+              <geom name="FL_wheel_collision" pos="0 0 0.032" rgba="0.9372549019607843 0.26666666666666666 0.26666666666666666 1" group="3" contype="1" conaffinity="1" type="cylinder" size="0.1 0.0225" />
             </body>
           </body>
         </body>
@@ -96,7 +96,7 @@
               <joint name="FR_foot" type="hinge" axis="0 0 1" damping="0" frictionloss="0"/>
               <inertial pos="-2.2204e-16 0 0.030708" mass="1.5305" fullinertia="0.0036061 0.0036061 0.0069124 5.2092e-20 1.2726e-19 1.2864e-20"/>
               <geom pos="0 0 0" group="1" contype="0" conaffinity="0" mass="0" material="FR_Link4_mat" type="mesh" mesh="FR_Link4" />
-              <geom pos="0 0 0.032" rgba="0.9372549019607843 0.26666666666666666 0.26666666666666666 1" group="3" contype="1" conaffinity="1" type="cylinder" size="0.1 0.0225" />
+              <geom name="FR_wheel_collision" pos="0 0 0.032" rgba="0.9372549019607843 0.26666666666666666 0.26666666666666666 1" group="3" contype="1" conaffinity="1" type="cylinder" size="0.1 0.0225" />
             </body>
           </body>
         </body>
@@ -124,7 +124,7 @@
               <joint name="RL_foot" type="hinge" axis="0 0 1" damping="0" frictionloss="0"/>
               <inertial pos="1.1102e-16 -1.1102e-16 0.030708" mass="1.5305" fullinertia="0.0036061 0.0036061 0.0069124 -3.0749e-19 -2.5461e-19 1.3246e-19"/>
               <geom pos="0 0 0" group="1" contype="0" conaffinity="0" mass="0" material="RL_Link4_mat" type="mesh" mesh="RL_Link4" />
-              <geom pos="0 0 0.032" rgba="0.9372549019607843 0.26666666666666666 0.26666666666666666 1" group="3" contype="1" conaffinity="1" type="cylinder" size="0.1 0.0225" />
+              <geom name="RL_wheel_collision" pos="0 0 0.032" rgba="0.9372549019607843 0.26666666666666666 0.26666666666666666 1" group="3" contype="1" conaffinity="1" type="cylinder" size="0.1 0.0225" />
             </body>
           </body>
         </body>
@@ -152,7 +152,7 @@
               <joint name="RR_foot" type="hinge" axis="0 0 1" damping="0" frictionloss="0"/>
               <inertial pos="-7.2164e-16 -1.3323e-15 0.030708" mass="1.5305" fullinertia="0.0036061 0.0036061 0.0069124 5.1632e-20 1.2842e-19 2.7795e-20"/>
               <geom pos="0 0 0" group="1" contype="0" conaffinity="0" mass="0" material="RR_Link4_mat" type="mesh" mesh="RR_Link4" />
-              <geom pos="0 0 0.032" rgba="0.9372549019607843 0.26666666666666666 0.26666666666666666 1" group="3" contype="1" conaffinity="1" type="cylinder" size="0.1 0.0225" />
+              <geom name="RR_wheel_collision" pos="0 0 0.032" rgba="0.9372549019607843 0.26666666666666666 0.26666666666666666 1" group="3" contype="1" conaffinity="1" type="cylinder" size="0.1 0.0225" />
             </body>
           </body>
         </body>
@@ -162,22 +162,4 @@
       </body>
     </body>
   </worldbody>
-  <actuator>
-    <motor name="FL_hip_motor" joint="FL_hip" gear="1" ctrllimited="true" ctrlrange="-60 60" />
-    <motor name="FL_thigh_motor" joint="FL_thigh" gear="1" ctrllimited="true" ctrlrange="-60 60" />
-    <motor name="FL_calf_motor" joint="FL_calf" gear="1" ctrllimited="true" ctrlrange="-60 60" />
-    <motor name="FL_foot_motor" joint="FL_foot" gear="1" ctrllimited="true" ctrlrange="-17 17" />
-    <motor name="FR_hip_motor" joint="FR_hip" gear="1" ctrllimited="true" ctrlrange="-60 60" />
-    <motor name="FR_thigh_motor" joint="FR_thigh" gear="1" ctrllimited="true" ctrlrange="-60 60" />
-    <motor name="FR_calf_motor" joint="FR_calf" gear="1" ctrllimited="true" ctrlrange="-60 60" />
-    <motor name="FR_foot_motor" joint="FR_foot" gear="1" ctrllimited="true" ctrlrange="-17 17" />
-    <motor name="RL_hip_motor" joint="RL_hip" gear="1" ctrllimited="true" ctrlrange="-60 60" />
-    <motor name="RL_thigh_motor" joint="RL_thigh" gear="1" ctrllimited="true" ctrlrange="-60 60" />
-    <motor name="RL_calf_motor" joint="RL_calf" gear="1" ctrllimited="true" ctrlrange="-60 60" />
-    <motor name="RL_foot_motor" joint="RL_foot" gear="1" ctrllimited="true" ctrlrange="-17 17" />
-    <motor name="RR_hip_motor" joint="RR_hip" gear="1" ctrllimited="true" ctrlrange="-60 60" />
-    <motor name="RR_thigh_motor" joint="RR_thigh" gear="1" ctrllimited="true" ctrlrange="-60 60" />
-    <motor name="RR_calf_motor" joint="RR_calf" gear="1" ctrllimited="true" ctrlrange="-60 60" />
-    <motor name="RR_foot_motor" joint="RR_foot" gear="1" ctrllimited="true" ctrlrange="-17 17" />
-  </actuator>
 </mujoco>
