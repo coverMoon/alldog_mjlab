@@ -4103,7 +4103,8 @@ wolf-flat task / RL task 接入:                              NOT STARTED（下�
        碰撞/摩擦/接触参数、视觉 mesh、轮安装方式与半径
 模型    nq/nv/nu = 23/22/16；ngeom 50（17 visual mesh + 33 collision）；
        总质量 33.6686 kg（= XML 显式 inertial 累加，逐位一致）
-wheel   碰撞圆柱 radius 0.10 m / half-width 0.0225 m；半轮距（轮心 y）= ±0.213 m
+wheel   碰撞圆柱 radius 0.08 m / half-width 0.0225 m（2026-10 轮径 200→160mm，
+        依据 URDF/mujoco/wolf 更新版 XML；轮 Link4 STL 已同步）；半轮距 = ±0.213 m
 ```
 
 ### 27.2 显式 joint / policy contract（wolf_constants.py，唯一 contract 来源）
@@ -4124,10 +4125,11 @@ wheel       WOLF_WHEEL_JOINT_NAMES / WOLF_WHEEL_COLLISION_GEOM_NAMES
 joint 默认姿态（rad）:
     hip 0；thigh FL/RR +0.82 / FR/RL -0.82；calf FL/RR +1.52 / FR/RL -1.52；
     foot 0。关节速度 0；root 单位四元数；root pos (0,0,0.45)。
-几何接触 root z（MuJoCo FK 实测）= 0.4489（≈ 静态估算 0.449 ✓）
-INIT_STATE pos z = 0.45：轮最低点 ≈ 0（亚 mm 级余量），可直接站立。
+几何接触 root z（MuJoCo FK 实测）= 0.4289 = 轮心偏移 0.3489 + 轮半径 0.08
+    （轮径更新后按上轮值直接算出，FK 复核一致）。
+INIT_STATE pos z = 0.4289：轮最低点 ≈ 0（亚 mm 级余量），可直接站立。
 受控站立（腿部位返 PD 至 default + 轮部速度 PD 0，2.5 s）:
-    root z 0.45 → 稳态 0.3961；静力沉降 ≈ 5 cm（thigh 静力矩 ≈ 11 N·m /
+    root z 0.4289 → 稳态 0.3773；静力沉降 ≈ 5.2 cm（thigh 静力矩 ≈ 11 N·m /
     Kp=60 → 稳态误差 ≈ 0.23 rad）；roll/pitch ≈ 0；4 轮接地（cylinder-plane
     收敛后 4 contacts）；max contact force ≈ 85 N；max leg τ 13.9 N·m ≪ 60
     （无力矩饱和）；无自碰撞 / 弹飞 / 持续塌陷 / 数值发散。

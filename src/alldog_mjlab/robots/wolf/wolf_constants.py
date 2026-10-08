@@ -69,7 +69,8 @@ WOLF_WHEEL_FORWARD_SIGN = {
 }
 
 # 轮几何（XML 冻结值；测试用于 lowest-point / rolling 验证）。
-WOLF_WHEEL_RADIUS = 0.1
+# 2026-10 更新：轮直径 200mm → 160mm（碰撞圆柱 size 0.1 0.0225 → 0.08 0.0225）。
+WOLF_WHEEL_RADIUS = 0.08
 WOLF_WHEEL_HALF_WIDTH = 0.0225
 
 #
@@ -135,7 +136,7 @@ WOLF_ARTICULATION = EntityArticulationInfoCfg(
 # Initial state（root z=0.45 为暂定值，待仿真确认；单位 quat）
 #
 
-WOLF_DEFAULT_ROOT_Z = 0.45
+WOLF_DEFAULT_ROOT_Z = 0.4289  # 轮心偏移 0.3489 + 轮半径 0.08（几何接触高度；待仿真确认）
 
 # 默认关节姿态（此前确认的 Wolf 值，单位 rad）。
 # 注：thigh 与 calf 共用同一腿间符号映射（FL/RR 为正、FR/RL 为负）。
