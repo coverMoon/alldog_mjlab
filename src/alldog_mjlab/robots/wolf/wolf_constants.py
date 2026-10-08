@@ -164,62 +164,19 @@ def _mesh_assets_complete() -> bool:
     return bool(files) and all((WOLF_ASSETS_DIR / f).is_file() for f in files)
 
 
-def _collision_only_spec_text() -> str:
-    """从权威 wolf.xml 派生 collision-only MJCF 文本。
-
-    规则（ElementTree 结构化处理，不做字符串正则替换）：
-    - 删除全部 <mesh> asset 与 <geom type="mesh">（视觉 mesh geom 与其 asset）；
-    - 保留 uninertial 标签、碰撞 geom（group=3 的 box / cylinder）、joint、
-      材质定义与刚体结构；
-    - 兼容 STL 缺失 / 损坏：无 mesh 引用后不再触发文件读取。
-
-    imu body 无 joint 且无显式 inertial；collision-only 下该 body 为零质量焊死体，
-    MuJoCo 允许（不产生 dof）。
-    """
-    import xml.etree.ElementTree as ET
-
-    tree = ET.parse(WOLF_XML)
-    root = tree.getroot()
-
-    for asset in root.findall("./asset"):
-        for mesh in list(asset.findall("mesh")):
-            asset.remove(mesh)
-    parent_map = {child: parent for parent in root.iter() for child in parent}
-    mesh_geoms = [geom for geom in parent_map if _tag_is_geom(geom) and geom.get("type") == "mesh"]
-    for geom in mesh_geoms:
-        parent_map[geom].remove(geom)
-    ET.indent(tree)
-    return ET.tostring(root, encoding="unicode")
-
-
-def _tag_is_geom(element) -> bool:
-    import xml.etree.ElementTree as ET
-
-    # strip 命名空间后比对 raw tag
-    return element.tag.rsplit("}", 1)[-1] == "geom"
-
-
 def get_spec() -> mujoco.MjSpec:
-    """返回 Wolf 的 MJCF spec；优先完整视觉模型，STL 缺失/损坏时退化 collision-only。
+    """返回 Wolf 的完整 MJCF spec（本地 STL 资产已完整，单模式加载）。
 
-    加载模式（full / collision-only）明确打印，便于诊断动力学一致性来源。
+    STL 文件在本地完整存在但被 .gitignore 排除 Git 跟踪（已知且有意的资产管
+    理方式）；不做双模式 / collision-only 回退。资源引用缺失时直接报错，
+    不静默绕过。
     """
-    if _mesh_assets_complete():
-        try:
-            spec = mujoco.MjSpec.from_file(str(WOLF_XML))
-            spec.compile()  # STL 解码失败（如损坏 ASCII）在此暴露
-            print("[INFO] Wolf spec mode: full visual model（STL 完整）")
-            return spec
-        except Exception as exc:  # noqa: BLE001  明确退化并记录原因
-            reason = str(exc).splitlines()[0]
-            print(
-                f"[WARN] Wolf spec mode: collision-only（full visual 加载失败: {reason}）"
-            )
-        spec = mujoco.MjSpec.from_string(_collision_only_spec_text())
-        return spec
     missing = [f for f in _mesh_files() if not (WOLF_ASSETS_DIR / f).is_file()]
-    print(f"[INFO] Wolf spec mode: collision-only（mesh 缺失: {missing or 'n/a'}）")
-    return mujoco.MjSpec.from_string(_collision_only_spec_text())
+    if missing:
+        raise FileNotFoundError(
+            f"Wolf mesh assets missing: {missing}（meshdir={WOLF_ASSETS_DIR}）"
+        )
+    return mujoco.MjSpec.from_file(str(WOLF_XML))
 
 
 def get_wolf_robot_cfg() -> EntityCfg:

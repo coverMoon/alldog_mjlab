@@ -18,7 +18,6 @@
     <mesh name="RR_Link2" file="RR_Link2.STL" />
     <mesh name="RR_Link3" file="RR_Link3.STL" />
     <mesh name="RR_Link4" file="RR_Link4.STL" />
-    <mesh name="imu_Link" file="imu_Link.STL" />
     <material name="base_link_mat" rgba="1 1 1 1" specular="0" />
     <material name="FL_Link1_mat" rgba="1 1 1 1" specular="0" />
     <material name="FL_Link2_mat" rgba="1 1 1 1" specular="0" />
@@ -158,7 +157,6 @@
         </body>
       </body>
       <body name="imu_Link" pos="0 0 0.05975">
-        <geom pos="0 0 0" group="1" contype="0" conaffinity="0" material="imu_Link_mat" type="mesh" mesh="imu_Link" />
       </body>
     </body>
   </worldbody>

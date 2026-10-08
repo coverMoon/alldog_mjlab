@@ -1009,7 +1009,8 @@ git diff
 不要覆盖用户已有未提交修改。
 
 **用户已批准的自动提交约定（2026-10 起）：**每完成一个任务（本地验证通过后），
-agent 应**自动提交**本次 production 改动：
+agent 应**自动提交**本次 production 改动。**大规模任务（新增机器人/行为单元/
+多文件 contract 变更等）完成后必须自动提交**，无需等用户再次要求：
 
 - 遵循 Conventional Commits（见全局 skill commit-style）；描述中文、动词开头；
 - 一次任务一组 commit；与任务无关的改动不混入；
