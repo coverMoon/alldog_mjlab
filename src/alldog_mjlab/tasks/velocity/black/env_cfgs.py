@@ -572,6 +572,8 @@ def _configure_command_curriculum(cfg: ManagerBasedRlEnvCfg, stage: str) -> None
                 "command_name": BLACK_COMMAND_NAME,
                 "reward_term_name": BLACK_TRACKING_VELOCITY_REWARD_TERM,
                 "stage": stage,
+                "robot": "black",
+                "curriculum_params": cc,
             },
         )
 

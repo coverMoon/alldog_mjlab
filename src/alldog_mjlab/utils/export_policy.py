@@ -1,15 +1,14 @@
-"""从 MjLab / RSL-RL checkpoint 导出 Black actor 的 actor-only TorchScript。
+"""从 MjLab / RSL-RL checkpoint 导出 actor 的 actor-only TorchScript（task-aware）。
 
-同时支持普通 PPO 与 HIM 两条 policy（按 checkpoint 加载后的 actor 类型分支）：
+同时支持普通 PPO 与 HIM 两条 policy（按 checkpoint 加载后的 actor 类型分支）；
+输入 / 输出维度来自当前 task 的 env 与 policy 对象（不硬编码 Black 的 45/12），
+并与 policy 网络结构交叉校验：
 
 ```text
-PPO deployment contract（.ai/MIGRATION.md §19.3，冻结）：
-    input  : float32 [1, 45]    actor 单帧 observation
-    output : float32 [1, 12]    policy action
-
-HIM deployment contract（§20.1 canonical history，冻结）：
-    input  : float32 [1, 270]   canonical history（frame-major，newest → oldest）
-    output : float32 [1, 12]    policy action
+Black PPO deployment contract（§19.3）：   input [1, 45]  / output [1, 12]
+Black HIM deployment contract（§20.1）：   input [1, 270] / output [1, 12]
+Wolf PPO deployment contract（§28）：      input [1, 53]  / output [1, 16]
+Wolf HIM deployment contract（§28）：      input [1, 318] / output [1, 16]
 ```
 
 实现不重建网络、不手工解析 checkpoint：
@@ -55,11 +54,6 @@ from mjlab.utils.os import get_checkpoint_path
 from alldog_mjlab.algorithms.him.policy import HIMPolicy
 from alldog_mjlab.algorithms.him.spec import canonical_history
 
-# Black actor / action contract（冻结值，见 .ai/MIGRATION.md §5 / §19.1）。
-# frame / action 维度对 PPO 与 HIM 相同；HIM 的 history 长度 / canonical 维度
-# 运行时从 HIMSpec 读取。
-ACTOR_FRAME_DIM = 45
-ACTION_DIM = 12
 # 数值等价容差。
 ATOL = 1e-6
 RTOL = 1e-5
@@ -93,25 +87,77 @@ def resolve_export_paths(
     return experiment_name, checkpoint, export_dir / "policy.pt"
 
 
-def resolve_actor_layout(policy: torch.nn.Module) -> tuple[int, int]:
-    """从 policy 对象确定 (frame_dim, history_length)。
+def resolve_env_layout(wrapped: RslRlVecEnvWrapper) -> tuple[int, int, int]:
+    """从当前 task 的 env 读取 (frame_dim, history_length, action_dim)。
 
-    PPO（MLPModel）为单帧（history_length = 1）；HIM（HIMPolicy）为
-    ``spec.single_frame_dim`` / ``spec.history_length``。不硬编码 6 / 270。
+    actor group 的 ``group_obs_dim`` 是 task 唯一权威：单帧任务为 ``(D,)``，
+    HIM history 任务为 ``(H, D)``；action 维度来自 ActionManager。不硬编码
+    Black 的 45/12/270。
+    """
+    manager = wrapped.unwrapped
+    actor_dim = manager.observation_manager.group_obs_dim["actor"]
+    if isinstance(actor_dim, tuple) and len(actor_dim) == 2:
+        history_length, frame_dim = int(actor_dim[0]), int(actor_dim[1])
+    else:
+        # 单帧 group 的 group_obs_dim 为 (D,)（或 D）。
+        frame_dim = int(actor_dim[0]) if isinstance(actor_dim, tuple) else int(actor_dim)
+        history_length = 1
+    action_dim = int(manager.action_manager.total_action_dim)
+    return frame_dim, history_length, action_dim
+
+
+def resolve_actor_layout(
+    policy: torch.nn.Module,
+    env_frame_dim: int,
+    env_history_length: int,
+) -> tuple[int, int]:
+    """从 policy 对象确定 (frame_dim, history_length) 并与 env 交叉校验。
+
+    PPO（MLPModel）为单帧（history_length = 1），第一层权重输入维度必须等于
+    env 的 frame_dim；HIM（HIMPolicy）用 ``spec.single_frame_dim`` /
+    ``spec.history_length`` 并与 env 维度交叉校验。task contract 判定不靠
+    shape 猜测、也不靠魔数。
     """
     if isinstance(policy, HIMPolicy):
         spec = policy.spec
         frame_dim = int(spec.single_frame_dim)
         history_length = int(spec.history_length)
-        if frame_dim != ACTOR_FRAME_DIM:
-            raise ValueError(f"HIM single frame dim = {frame_dim} != {ACTOR_FRAME_DIM}")
+        if frame_dim != env_frame_dim:
+            raise ValueError(
+                f"HIM spec single_frame_dim = {frame_dim} != env frame dim {env_frame_dim}"
+            )
+        if history_length != env_history_length:
+            raise ValueError(
+                f"HIM spec history_length = {history_length} != env history {env_history_length}"
+            )
     else:
-        frame_dim = ACTOR_FRAME_DIM
+        frame_dim = env_frame_dim
         history_length = 1
+        input_dim = _policy_input_dim(policy)
+        if input_dim != frame_dim:
+            raise ValueError(
+                f"PPO actor 第一层输入维度 {input_dim} != env frame dim {frame_dim}；"
+                "checkpoint 与 task 不匹配"
+            )
     return frame_dim, history_length
 
 
-def check_env_contract(wrapped: RslRlVecEnvWrapper, frame_dim: int, history_length: int) -> list[str]:
+def _policy_input_dim(policy: torch.nn.Module) -> int:
+    """读取 MLP actor 的第一层输入维度（不含 obs normalizer 时也一样成立）。"""
+    for module in policy.modules():
+        if isinstance(module, torch.nn.Linear):
+            first_weight = module.weight
+            if first_weight.ndim == 2:
+                return int(first_weight.shape[1])
+    raise ValueError("policy 中找不到 Linear 层，无法校验输入维度")
+
+
+def check_env_contract(
+    wrapped: RslRlVecEnvWrapper,
+    frame_dim: int,
+    history_length: int,
+    action_dim: int,
+) -> list[str]:
     """校验 actor observation / action 维度来自当前 task 的 env（不来自 checkpoint）。"""
     actor_obs = wrapped.get_observations()["actor"]
     expected_shape = (
@@ -122,14 +168,19 @@ def check_env_contract(wrapped: RslRlVecEnvWrapper, frame_dim: int, history_leng
             f"actor observation shape = {tuple(actor_obs.shape)}, expected {expected_shape}"
         )
     manager = wrapped.unwrapped.action_manager
-    action_dim = int(manager.total_action_dim)
-    if action_dim != ACTION_DIM:
-        raise ValueError(f"action dim = {action_dim} != {ACTION_DIM}")
+    if int(manager.total_action_dim) != action_dim:
+        raise ValueError(
+            f"action dim = {manager.total_action_dim} != derived {action_dim}"
+        )
     return list(manager.active_terms)
 
 
 def collect_probes(
-    wrapped: RslRlVecEnvWrapper, device: str, frame_dim: int, history_length: int
+    wrapped: RslRlVecEnvWrapper,
+    device: str,
+    frame_dim: int,
+    history_length: int,
+    action_dim: int,
 ) -> tuple[list[tuple[str, torch.Tensor, torch.Tensor]], TensorDict]:
     """三类 deterministic probe：play 环境真实一帧 / 全零 / 固定 linspace。
 
@@ -141,7 +192,7 @@ def collect_probes(
     linspace probe 的每帧乘以不同缩放（0.90 → 1.00），保证各帧数值不同，
     可以暴露 frame 顺序错误。
     """
-    probe_action = torch.linspace(-1.0, 1.0, ACTION_DIM, device=device).repeat(NUM_ENVS, 1)
+    probe_action = torch.linspace(-1.0, 1.0, action_dim, device=device).repeat(NUM_ENVS, 1)
     obs = wrapped.step(probe_action)[0]
     real_history = obs["actor"].detach().clone()
     zeros_history = torch.zeros(
@@ -179,9 +230,11 @@ def deterministic_output(
         return policy(TensorDict(values, batch_size=[NUM_ENVS])).detach().clone()
 
 
-def check_probe_shapes(label: str, jit_input: torch.Tensor, output: torch.Tensor) -> None:
-    """断言 TorchScript 输出满足部署 contract：[1, 12] 且为 float32。"""
-    if tuple(output.shape) != (NUM_ENVS, ACTION_DIM):
+def check_probe_shapes(
+    label: str, jit_input: torch.Tensor, output: torch.Tensor, action_dim: int
+) -> None:
+    """断言 TorchScript 输出满足部署 contract：[1, action_dim] 且为 float32。"""
+    if tuple(output.shape) != (NUM_ENVS, action_dim):
         raise ValueError(f"[{label}] output shape = {tuple(output.shape)}")
     if jit_input.dtype != torch.float32 or output.dtype != torch.float32:
         raise ValueError(f"[{label}] dtype = {jit_input.dtype} / {output.dtype}")
@@ -199,6 +252,7 @@ def verify_export(
     probes: list[tuple[str, torch.Tensor, torch.Tensor]],
     reference: dict[str, torch.Tensor],
     input_dim: int,
+    action_dim: int,
 ) -> dict:
     """重新 torch.jit.load 导出的 .pt，与 checkpoint actor 逐 probe 比较数值等价。"""
     module = load_torchscript(output, device)
@@ -210,7 +264,7 @@ def verify_export(
             )
         with torch.inference_mode():
             exported = module(jit_input).detach().clone()
-        check_probe_shapes(label, jit_input, exported)
+        check_probe_shapes(label, jit_input, exported, action_dim)
         expected = reference[label]
         max_abs_diff = float((expected - exported).abs().max().item())
         allclose = bool(torch.allclose(expected, exported, atol=ATOL, rtol=RTOL))
@@ -240,7 +294,7 @@ def verify_export(
     zeros = torch.zeros(NUM_ENVS, input_dim, dtype=torch.float32)
     with torch.inference_mode():
         standalone_out = standalone(zeros).detach().clone()
-    if tuple(standalone_out.shape) != (NUM_ENVS, ACTION_DIM):
+    if tuple(standalone_out.shape) != (NUM_ENVS, action_dim):
         raise ValueError(f"standalone output shape = {tuple(standalone_out.shape)}")
     if not bool(torch.isfinite(standalone_out).all()):
         raise AssertionError("standalone TorchScript output 含非有限值")
@@ -270,13 +324,19 @@ def run_export(task_id: str, checkpoint: Path, output: Path, device: str) -> dic
         )
         policy = runner.get_inference_policy(device=device)
 
-        # PPO（MLPModel，单帧 [1,45]）与 HIM（HIMPolicy，history [1,H,F] → canonical
-        # [1, H×F]）共用同一验证骨架；history 长度 / canonical 维度来自 HIMSpec。
-        frame_dim, history_length = resolve_actor_layout(policy)
+        # PPO（MLPModel，单帧）与 HIM（HIMPolicy，history [1,H,F] → canonical
+        # [1, H×F]）共用同一验证骨架；维度全部来自当前 task 的 env + policy
+        # 网络结构交叉校验（Black 导出仍应产生 45/12，Wolf 产生 53/16）。
+        env_frame_dim, env_history_length, action_dim = resolve_env_layout(wrapped)
+        frame_dim, history_length = resolve_actor_layout(
+            policy, env_frame_dim, env_history_length
+        )
         input_dim = frame_dim * history_length
 
-        action_terms = check_env_contract(wrapped, frame_dim, history_length)
-        probes, obs = collect_probes(wrapped, device, frame_dim, history_length)
+        action_terms = check_env_contract(wrapped, frame_dim, history_length, action_dim)
+        probes, obs = collect_probes(
+            wrapped, device, frame_dim, history_length, action_dim
+        )
         reference = {
             label: deterministic_output(policy, obs, probe)
             for label, probe, _ in probes
@@ -286,7 +346,9 @@ def run_export(task_id: str, checkpoint: Path, output: Path, device: str) -> dic
         if not output.is_file():
             raise RuntimeError(f"TorchScript export 未产生文件: {output}")
 
-        report = verify_export(output, device, probes, reference, input_dim)
+        report = verify_export(
+            output, device, probes, reference, input_dim, action_dim
+        )
         report.update(
             {
                 "task_id": task_id,
@@ -297,7 +359,7 @@ def run_export(task_id: str, checkpoint: Path, output: Path, device: str) -> dic
                 "actor_frame_dim": frame_dim,
                 "actor_history_length": history_length,
                 "input_dim": input_dim,
-                "action_dim": ACTION_DIM,
+                "action_dim": action_dim,
                 "action_terms": action_terms,
                 "obs_normalization": bool(agent_cfg.actor.obs_normalization),
             }

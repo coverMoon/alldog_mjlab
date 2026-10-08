@@ -44,7 +44,14 @@ class BlackHimOnPolicyRunner(
     CommandCurriculumCheckpointMixin, MjlabOnPolicyRunner
 ):
     """``MjlabOnPolicyRunner`` + 可选 PPO → HIM warm start + curriculum
-    checkpoint 状态（经公共 mixin，与 PPO 路径同语义，无第二份实现）。"""
+    checkpoint 状态（经公共 mixin，与 PPO 路径同语义，无第二份实现）。
+
+    ``WARM_START_SOURCE_TASK`` / ``ROBOT`` 是类级 task 标识：Wolf 等 task
+    子类只需 override 两个属性即可复用全部 warm-start / checkpoint 逻辑。
+    """
+
+    WARM_START_SOURCE_TASK: str = WARM_START_SOURCE_TASK
+    ROBOT: str = "black"
 
     def __init__(self, env, train_cfg, log_dir=None, device="cpu", **kwargs):
         if train_cfg.get("warm_start") and train_cfg.get("resume"):
@@ -88,13 +95,14 @@ class BlackHimOnPolicyRunner(
         # PPO→HIM warm start 的 command curriculum 语义：只拷贝 vx range（EMA /
         # streak / buffer fresh，§30）；旧 PPO checkpoint 没有 curriculum state 时
         # 打印 warning 并保持 config 初始范围，不让 warm start 失败。
+        # ``robot`` provenance 检查拒绝跨机器人 warm start（如 Black→Wolf）。
         curriculum_state = (checkpoint.get("infos") or {}).get("env_state", {}).get(
             "command_curriculum"
         )
         curriculum_restored: str | None
         if curriculum_state is not None:
             curriculum_restored = apply_command_curriculum_state(
-                self.env.unwrapped, curriculum_state, "range"
+                self.env.unwrapped, curriculum_state, "range", robot=self.ROBOT
             )
         else:
             curriculum_restored = None
@@ -110,7 +118,7 @@ class BlackHimOnPolicyRunner(
             "optimizer / iteration / env state 未继承。"
         )
         return {
-            "source_task": WARM_START_SOURCE_TASK,
+            "source_task": self.WARM_START_SOURCE_TASK,
             "source_checkpoint": str(source_path),
             "command_curriculum_restored": curriculum_restored,
             **asdict(report),

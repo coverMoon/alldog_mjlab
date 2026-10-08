@@ -16,10 +16,14 @@ from mjlab.rl import (
 
 from .black_config import BLACK_CONFIG
 
+# task config 注入参数：默认 None → BLACK_CONFIG（Black 历史行为）。
+#Wolf 等 task 传入自己的 config 对象，数值从各自入口读取。
+_AnyConfigTyping = object  # 仅文档用途；实际类型是 BlackConfig / WolfConfig。
 
-def black_ppo_algorithm_kwargs() -> dict:
-    """PPO 算法超参数映射（普通 PPO 与 HIMPPO 唯一来源：BLACK_CONFIG.algorithm）。"""
-    algorithm = BLACK_CONFIG.algorithm
+
+def black_ppo_algorithm_kwargs(config=None) -> dict:
+    """PPO 算法超参数映射（普通 PPO 与 HIMPPO；config 可注入 task config）。"""
+    algorithm = config.algorithm if config is not None else BLACK_CONFIG.algorithm
     return {
         "value_loss_coef": algorithm.value_loss_coef,
         "use_clipped_value_loss": algorithm.use_clipped_value_loss,
@@ -36,9 +40,9 @@ def black_ppo_algorithm_kwargs() -> dict:
     }
 
 
-def black_critic_model_cfg() -> RslRlModelCfg:
-    """critic model cfg（普通 PPO 与 HIMPPO 共用）。"""
-    policy = BLACK_CONFIG.policy
+def black_critic_model_cfg(config=None) -> RslRlModelCfg:
+    """critic model cfg（普通 PPO 与 HIMPPO 共用；config 可注入 task config）。"""
+    policy = config.policy if config is not None else BLACK_CONFIG.policy
     return RslRlModelCfg(
         hidden_dims=policy.critic_hidden_dims,
         activation=policy.activation,
@@ -46,9 +50,9 @@ def black_critic_model_cfg() -> RslRlModelCfg:
     )
 
 
-def black_actor_distribution_cfg() -> dict:
-    """actor Gaussian distribution cfg（普通 PPO 与 HIMPPO 共用）。"""
-    policy = BLACK_CONFIG.policy
+def black_actor_distribution_cfg(config=None) -> dict:
+    """actor Gaussian distribution cfg（普通 PPO 与 HIMPPO 共用；config 可注入）。"""
+    policy = config.policy if config is not None else BLACK_CONFIG.policy
     return {
         "class_name": "GaussianDistribution",
         "init_std": policy.initial_std,

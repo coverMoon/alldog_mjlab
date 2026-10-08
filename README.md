@@ -172,6 +172,36 @@ uv run export --task-id black-flat-him
 uv run export --task-id black-rough-him
 ~~~
 
+### Wolf 训练
+
+Wolf 轮足机器人（16 执行器：12 腿关节 + 4 轮）已注册平地任务：
+
+~~~bash
+# 从随机初始化训练 wolf flat PPO
+uv run train wolf-flat
+
+# 从随机初始化训练 wolf flat HIM
+uv run train wolf-flat-him
+
+# 用 wolf-flat PPO checkpoint 初始化 wolf HIM（warm start，仅接受 wolf 源）
+uv run train wolf-flat-him \
+    --agent.warm-start True \
+    --agent.load-run '.*_wolf_flat$'
+
+# 继续 wolf flat PPO / HIM
+uv run train wolf-flat --agent.resume True
+
+# 导出（PPO：[1,53]→[1,16]；HIM：[1,318]→[1,16]）
+uv run export --task-id wolf-flat
+uv run export --task-id wolf-flat-him
+~~~
+
+动作契约：16-D raw action，每腿交错 `[hip thigh calf wheel]`；腿
+`q_target = q_default + 0.20*raw`，轮 `dq_target = sign*10*raw`
+（符号 FL +1 / FR -1 / RL +1 / RR -1，正值 = 机身前进）。HIM actor 输入为
+6 × 53 历史（部署侧 newest→oldest 展平 318 维）。速度指令由性能驱动课程从
+±1 m/s 扩展到 ±4 m/s。长期训练收敛评估尚未进行。
+
 ## Tasks
 
 | Task ID | 算法 | 场景 | 状态 |
@@ -180,8 +210,10 @@ uv run export --task-id black-rough-him
 | `black-rough` | PPO | 复杂地形及地形课程 | 已实现，长期训练评估持续进行 |
 | `black-flat-him` | HIM / PPO | 平地、历史观测与环境估计 | 训练链路已实现，长期效果待评估 |
 | `black-rough-him` | HIM / PPO | 复杂地形、历史观测与环境估计 | 续训链路已实现，长期效果待评估 |
+| `wolf-flat` | PPO | 平地速度跟踪（轮足） | 训练链路已实现，长期效果待评估 |
+| `wolf-flat-him` | HIM / PPO | 平地速度跟踪（轮足、历史观测与环境估计） | 训练链路已实现，长期效果待评估 |
 
-四个任务共享 Black 的机器人模型和底层控制配置。flat 与 rough 的主要差异在地形、地形课程和相应奖励/终止设置；普通 PPO 与 HIM 使用不同的 actor 输入契约。
+Black 四个任务共享 Black 的机器人模型和底层控制配置。flat 与 rough 的主要差异在地形、地形课程和相应奖励/终止设置；普通 PPO 与 HIM 使用不同的 actor 输入契约。Wolf 两个任务共享 Wolf 的机器人资产（IMU 原生观测）与轮足执行器契约，速度指令范围与 Black 独立。
 
 ## Configuration
 
@@ -191,10 +223,11 @@ uv run export --task-id black-rough-him
 src/alldog_mjlab/
 ├── robots/               MJCF、关节、执行器和默认姿态
 │   ├── black/
-│   └── wolf/             MJCF 准备中，尚未注册训练任务
+│   └── wolf/
 ├── tasks/
 │   └── velocity/
-│       └── black/        环境组装、奖励、观测、动作、地形与训练配置
+│       ├── black/        环境组装、奖励、观测、动作、地形与训练配置
+│       └── wolf/         轮足机器人平地任务（wolf_config.py 为参数入口）
 ├── algorithms/
 │   └── him/              HIM estimator、policy、storage 与 PPO 更新
 └── utils/                策略导出等工具
@@ -210,12 +243,16 @@ src/alldog_mjlab/
 
 ## Policy Export Contract
 
-当前 Black 策略均输出 12-D raw action，按 **FL → FR → RL → RR**、每腿 **hip → thigh → calf** 排列。部署侧必须显式完成模型关节顺序到策略顺序的映射。
+Black 策略输出 12-D raw action，按 **FL → FR → RL → RR**、每腿 **hip → thigh → calf** 排列；wolf 策略输出 16-D raw action，每腿 **hip → thigh → calf → wheel** 交错。部署侧必须显式完成模型关节顺序到策略顺序的映射。
 
 | 策略 | TorchScript 输入 | TorchScript 输出 |
 | --- | --- | --- |
-| PPO | `float32 [1, 45]`，单帧 actor observation | `float32 [1, 12]` |
-| HIM | `float32 [1, 270]`，6 × 45 历史帧展平，newest → oldest | `float32 [1, 12]` |
+| black PPO | `float32 [1, 45]`，单帧 actor observation | `float32 [1, 12]` |
+| black HIM | `float32 [1, 270]`，6 × 45 历史帧展平，newest → oldest | `float32 [1, 12]` |
+| black-rough PPO | `float32 [1, 45]`，同上 | `float32 [1, 12]` |
+| black-rough HIM | `float32 [1, 270]`，同上 | `float32 [1, 12]` |
+| wolf-flat | `float32 [1, 53]`，单帧 actor observation（IMU 原生） | `float32 [1, 16]` |
+| wolf-flat-him | `float32 [1, 318]`，6 × 53 历史帧展平，newest → oldest | `float32 [1, 16]` |
 
 Black 当前的腿部位置目标和控制周期为：
 

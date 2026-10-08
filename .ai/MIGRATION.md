@@ -33,6 +33,8 @@ Black rough stairs terrain（up / down）: COMPLETE（§13.5）
 Black performance-based forward-speed command curriculum
 + checkpoint/resume state: COMPLETE（§4.3 / §4.4）
 Wolf robot asset / joint order / actuator contract (stage 1): COMPLETE（§27）
+Wolf IMU observation contract: COMPLETE（§27.5）
+Wolf flat PPO / HIM / command curriculum integration: COMPLETE（§28）
 Hardware effort/current ceiling: UNCONFIRMED（实机前确认）
 ```
 
@@ -4057,10 +4059,17 @@ Black flat/rough 与训练侧 sim2real contract 已完成；部署代码由独�
      vy/wz/sampler 不变；play 无 curriculum。CPU + CUDA PASS。
      下一单元：Black command curriculum training validation（§1 next candidate）。）
 18. Wolf robot asset / joint order / actuator contract（stage 1）
-    （完成：§27。collision-only 与 full-visual 双模式 get_spec；16 IdealPd actuator
-     （腿 60/2/60、轮 0/1/17）；显式 WOLF_POLICY_JOINT_NAMES 与轮符号 contract；
-     FK 实测几何接触 root z = 0.4489、PD 受控站立稳态 0.396；
-     CPU + CUDA smoke PASS。wolf-flat task / RL 全部未开始。）
+    （完成：§27。单模式完整 STL MjSpec.from_file（无 collision-only 双模式；
+     该旧描述被 §27 覆盖）；16 IdealPd actuator（腿 60/2/60、轮 0/1/17）；
+     显式 WOLF_POLICY_JOINT_NAMES 与轮符号 contract；损坏 imu_Link.STL 删除；
+     轮径 200→160mm 后 FK 实测几何接触 root z = 0.4289、受控站立稳态 0.3773；
+     CPU + CUDA smoke PASS。）
+19. Wolf flat PPO / HIM / command curriculum integration
+    （完成：§28。wolf-flat + wolf-flat-him 注册；actor 53-D / critic 56-D /
+     action 16-D 交错 action contract；IMU 原生观测；性能驱动课程复用
+     （max ±4.0 m/s，robot provenance）；PPO→HIM warm start 53→72；
+     TorchScript 导出 [1,53]→[1,16] / [1,318]→[1,16]；CPU + CUDA PASS；
+     长训收敛、DR、rough、sim2real 未开始。）
 ```
 
 已插入完成的非 behavior 任务：
@@ -4209,9 +4218,141 @@ IMU（check_wolf_imu.py）: 静态 / 静止读数 / 5 组倾斜 / 非零角速�
 
 ```text
 待确认   腿部 60/2/60 与轮部 17 N·m 的实机电机规格；实机 IMU 安装位置
-下一单元 wolf-flat task 接入（actor 53-D / critic 56-D 候选 / action 16-D、
-         policy 50 Hz、vx [-1,1]→课程 [-4,4]、wheel scale 10 / leg scale 0.20
-         均为已讨论候选值，尚未实现；高速允许轮腿混合、不默认固定站姿）
+下一单元：Wolf flat 长训验证（真实收敛评估，"能跑" ≠ "训练有效"）；
+         DR（旧 BlackW 20+ 项，逐项开关）与 rough / sim2real 之后的阶段未开始。
+```
+
+## 28. Wolf Flat PPO / HIM / Command Curriculum Task（本轮集成，COMPLETE）
+
+一次性集成单元：wolf-flat（普通 PPO）与 wolf-flat-him（HIM）注册为完整训练任务，
+复用 Black 已验证的基础设施（HIM 算法层零修改、PPO/HIM 算法零修改）。长训收敛、
+DR、rough、sim2real 未开始，不得声称完成。
+
+### 28.1 注册与实现布局
+
+```text
+src/alldog_mjlab/tasks/velocity/wolf/
+    __init__.py           任务注册（wolf-flat / wolf-flat-him）
+    wolf_config.py        单一人工训练参数入口（镜像 black_config 风格）
+    env_cfgs.py           term 顺序 contract / selector 绑定 / sensor 装配
+    observations.py       signed wheel velocity（forward sign）
+    rewards.py            leg / wheel action rate 分组（16-D contract）
+    rl_cfg.py             wolf_ppo_runner_cfg / wolf_him_runner_cfg（数值来自 WOLF_CONFIG）
+    him_runner.py         WolfHimOnPolicyRunner（仅 override task 标识）
+
+复用（未复制的 Black 公共件）：
+    black/rewards.py      tracking / 罚项公式（机器人无关）
+    black/curriculums.py  ForwardSpeedCommandCurriculum（参数注入化）
+    black/curriculum_checkpoint.py  checkpoint 状态与 restore 模式
+    black/him.py          HIM observation/history/terminal contract（group 名 = 算法接口）
+    black/rl_cfg.py 助手   PPO/HIM cfg 构造（config 注入参数化）
+    black/him_runner.py   HIM runner（task 标识类属性化）
+
+runner_cls：
+    wolf-flat      VelocityCommandCurriculumRunner（原 BlackVelocityOnPolicyRunner
+                   改名，robot-agnostic；旧名保留为兼容别名）
+    wolf-flat-him  WolfHimOnPolicyRunner（BlackHimOnPolicyRunner 子类 +
+                   WARM_START_SOURCE_TASK = "wolf-flat"、ROBOT = "wolf"）
+```
+
+### 28.2 Frozen contracts
+
+```text
+action 16-D（8 个原生 action term 交错，FL→FR→RL→RR 每腿 3+1）:
+    [FL_hip FL_thigh FL_calf FL_wheel | FR ... | RL ... | RR ...]
+    leg  = JointPositionActionCfg  q_target = q_default + 0.20 * raw
+    wheel= JointVelocityActionCfg  dq_target = sign * 10.0 * raw
+          sign = FL +1 / FR -1 / RL +1 / RR -1（robots/wolf 冻结值）
+    无默认 [-1,1] clip（Gaussian init std 1.0）
+
+actor 53-D（单帧）:
+    command 3 − base_ang_vel 3（robot/imu_ang_vel）− projected_gravity 3
+    （robot/imu_upvector = -upvector）− leg_joint_pos_rel 12（policy 顺序，
+    不 biased）− leg_joint_vel 12 − signed_wheel_vel 4（乘 forward sign）−
+    last_raw_action 16
+    scale: command (2,2,0.25) / ang_vel 0.25 / gravity 1.0 / joint_pos 1.0 /
+    joint_vel 0.05 / wheel_vel 0.05 / last_action 1.0
+    noise（raw）：ang_vel ±0.3 / gravity ±0.05 / joint_pos ±0.08 /
+    joint_vel ±2.0（wheel 同档）；command / last_action 无噪声
+
+critic 56-D = actor 53-D 同布局无噪声 + 末尾 3-D 真实 body-frame base_lin_vel
+    （scale 1.0；obs_normalization True）
+
+HIM：
+    actor history [B, 6, 53]（MjLab 原生 oldest→newest）
+    source encoder input 318 / target encoder input 53（frame 去 command + scaled
+    base_lin_vel ×2.0）/ estimated velocity 3 / latent 16 / actor input 72 /
+    action 16 / critic 56
+    部署 canonical history = newest→oldest flatten（复用 canonical_history()）
+
+command：
+    vx 初始 [-1,1] / 课程 max ±4.0（仅 vx 扩展，步长 0.1）
+    vy [-0.15,0.15] / yaw [-0.6,0.6] / resample 10 s
+    standing 0.1 / forward-only 0.2 / world 0 / heading 关闭
+
+reward（8 项，dict 顺序 = logging 顺序）:
+    track_linear +1.0 / track_angular +0.5 / lin_vel_z -1.0 /
+    body_ang_vel -0.05 / upright -0.5 / base_height -2.0（target 0.40 m）/
+    leg_action_rate -0.01 / wheel_action_rate -0.002；sigma 0.25
+    leg / wheel action rate 按 16-D contract 显式分组（leg = 12 位置通道、
+    wheel = 3/7/11/15），不整条 16 维求和
+
+termination：time_out（20 s，time_out=True）+ illegal_contact
+    （base_link 对 terrain，力阈值 1.0 N，history 4 substeps）；
+    无倾角终止、无 stuck、无 OOB。play 下 illegal_contact 移除。
+
+reset：root pose 不随机（default 站立 z=0.4289）；root 速度六轴小幅扰动；
+    hip/thigh/calf 小幅 offset（±0.3 内，thigh/calf 非零）；轮子零位零速。
+    无 DR 事件（nominal dynamics）。
+
+simulation：timestep 0.005 × decimation 4 = policy 50 Hz；
+    nconmax 128（spawn 自接触 ~124）/ njmax 512（spawn nefc 下限 496 tile 对齐；
+    运行时实测 nefc ≈ 8–36，overflow 未出现，容量候选可后续收窄）
+```
+
+### 28.3 Command curriculum（复用 + provenance）
+
+ForwardSpeedCommandCurriculum（§4.3 状态机不变）参数化改造：CurriculumTermCfg.params
+新增 `curriculum_params`（Wolf 传 WOLF_CONFIG，Black 仍默认读 BLACK_CONFIG）与
+`robot` provenance；checkpoint state 追加 `robot` 字段（旧 v1 checkpoint 无该字段
+时仅 warning）。恢复拒绝跨机器人（black ↔ wolf 双向 fail-loud）；PPO→HIM warm
+start 固定 range；同 stage resume auto→full。Black 数值 / checkpoint 格式不变
+（Black builder 显式传 robot="black"，行为等价）。
+
+### 28.4 Warm start / resume / export
+
+```text
+wolf-flat-him:
+    随机初始化直接训练              PASS（CPU + CUDA 真实参数更新）
+    --agent.warm-start True         PASS（wolf-flat PPO → HIM：53→72，
+          拷贝 53 列 / 补零 19 列；critic / distribution 迁移；estimator 独立初化）
+    --agent.resume True             PASS（full restore + curriculum state 日志）
+    Black → Wolf warm start         fail-loud（双保险：45 != 53 维度 + robot provenance）
+    Wolf → Black（black-flat 载入 wolf checkpoint）  fail-loud（robot mismatch）
+
+export（RSL-RL 原生 as_jit + reload 数值等价，max_abs_diff = 0.0）:
+    wolf-flat      input [1, 53]   output [1, 16]
+    wolf-flat-him  input [1, 318]  output [1, 16]
+    Black 回归：[1,45]→[1,12] / [1,270]→[1,12] 不变（export 自身已有 Black 检查）
+    exporter 已 task-aware 化：frame / history / action 维度从 env
+    observation_manager.group_obs_dim + action_manager 推导，并与 policy 网络结构
+    交叉校验（不硬编码 45/12；Black contract 值仍由 env 推导得 45/12 验证）。
+    默认输出 <run>/exported/policy.pt；--task-id / --load-run / --checkpoint /
+    --output-dir 全部保留。
+```
+
+### 28.5 验证记录（tests/check_wolf_task.py，不提交）
+
+```text
+CPU  PASS（cfg static × task × play / action→target 数值映射（FPS+wheel sign）/
+     IMU sensor 数据 / signed wheel velocity 对照 / rollout 有限性 /
+     provenance fail-loud / CLI：3+2 iter 真实更新、resume full、warm start 53→72、
+     export 0.0e+00）
+CUDA PASS（runtime 段 GPU 重跑 + 1024 env × 3 iter 真实训练 mean_reward
+     上升；wolf-flat / wolf-flat-him 均通过）
+Black 回归：check_black_flat（CPU+CUDA）/ rough（CPU+CUDA）/ rough_him /
+     command_curriculum / him / him_algo / him_runner / him_warm_start 全部 PASS。
+未验证：长训收敛 / 高速（±4）行为 / DR / rough / sim2real —— 均未开始。
 ```
 
 ## 26. Update Rule

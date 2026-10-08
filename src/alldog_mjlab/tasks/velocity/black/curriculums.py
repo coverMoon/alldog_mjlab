@@ -70,14 +70,23 @@ class ForwardSpeedCommandCurriculum(ManagerTermBase):
 
     def __init__(self, cfg: CurriculumTermCfg, env: ManagerBasedRlEnv) -> None:
         super().__init__(env)
-        self._params: CommandCurriculumParams = BLACK_CONFIG.command.command_curriculum
+        # 参数注入：默认读 BLACK_CONFIG（Black task 历史行为）；Wolf 等 task 通过
+        # cfg.params["curriculum_params"] 显式传入自己的参数对象，不读 BLACK_CONFIG。
+        params_override = cfg.params.get("curriculum_params")
+        self._params: CommandCurriculumParams = (
+            params_override
+            if params_override is not None
+            else BLACK_CONFIG.command.command_curriculum
+        )
         self._params.validate()
         self._command_name: str = cfg.params["command_name"]
-        # reward term 名固定为 Black tracking reward；通过 params 传入避免散落。
+        # reward term 名（task 层 tracking reward）；通过 params 传入避免散落。
         self._reward_term_name: str = cfg.params["reward_term_name"]
         # 阶段元数据（flat | rough），来自 env cfg builder，用于 checkpoint
         # restore mode 判定；不由 run name / tensor shape 推测。
         self._stage: str = cfg.params["stage"]
+        # robot provenance（checkpoint 防跨机器人恢复；Black task 显式传 "black"）。
+        self._robot: str = cfg.params.get("robot", "black")
         # authoritative runtime state。
         self._vx_min: float = self._params.initial_lin_vel_x[0]
         self._vx_max: float = self._params.initial_lin_vel_x[1]
@@ -131,6 +140,7 @@ class ForwardSpeedCommandCurriculum(ManagerTermBase):
         return {
             "version": CURRICULUM_STATE_VERSION,
             "stage": self._stage,
+            "robot": self._robot,
             "vx_min": self._vx_min,
             "vx_max": self._vx_max,
             "ema_low": self._ema_low,

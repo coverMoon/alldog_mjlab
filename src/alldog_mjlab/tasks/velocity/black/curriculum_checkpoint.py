@@ -31,13 +31,16 @@ if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
     from mjlab.rl import RslRlVecEnvWrapper
 
-# 项目冻结的 run-name contract（black_config.RunnerParams）：run_name 后缀
-# "_him" 只区分算法，terrain stage 由前缀决定。集中在这里，不散落字符串判断。
+# 项目冻结的 run-name contract（各 task RunnerParams）：run_name 后缀
+# "_him" 只区分算法，robot owner 由前缀区分，terrain stage 由名字映射。集中
+# 在这里，不散落字符串判断。Wolf 复用同一映射（stage 仅 flat）。
 _RUN_NAME_STAGES = {
     "flat": "flat",
     "rough": "rough",
     "flat_him": "flat",
     "rough_him": "rough",
+    "wolf_flat": "flat",
+    "wolf_flat_him": "flat",
 }
 
 
@@ -97,17 +100,34 @@ def apply_command_curriculum_state(
     env: ManagerBasedRlEnv,
     state: dict[str, Any] | None,
     restore_mode: RestoreMode,
+    robot: str | None = None,
 ) -> RestoreMode | None:
     """把 checkpoint 中的 curriculum state 按模式恢复到 env 的 curriculum term。
 
     - env 无 curriculum term（play / export）：静默忽略；
     - state 为 None（旧 checkpoint）：mode 为 ``none`` 时保持初始范围并打印一次
-      明确 warning；显式 range/full 模式下因缺少数据无法恢复，fail-loud。
+      明确 warning；显式 range/full 模式下因缺少数据无法恢复，fail-loud；
+    - ``robot`` provenance 检查（可选）：checkpoint state 携带的 robot 与当前
+      task 的 robot 不同 → fail-loud（跨机器人恢复禁止）；旧 checkpoint 无该
+      字段时仅打印 warning（版本 1 迁移期）。
     返回实际使用的 mode（state None 或 term 缺失时为 None）。
     """
     term = get_command_curriculum_term(env)
     if term is None:
         return None
+    if robot is not None and state is not None:
+        state_robot = state.get("robot")
+        if state_robot is not None and state_robot != robot:
+            raise ValueError(
+                "command curriculum state robot mismatch: checkpoint "
+                f"{state_robot!r} != current task {robot!r}；禁止跨机器人恢复"
+                "（curriculum only restores the same robot's vx range semantics）。"
+            )
+        if state_robot is None:
+            print(
+                f"[WARN] checkpoint 中无 curriculum robot 字段（旧 checkpoint，版本 1）；"
+                f"无法验证来源是否为 {robot!r}，按同 robot 继续处理。"
+            )
     if state is None:
         if restore_mode == "none":
             print(
@@ -142,7 +162,12 @@ class CommandCurriculumCheckpointMixin:
 
     MRO 约定：必须排在 ``MjlabOnPolicyRunner``（或 ``VelocityOnPolicyRunner``）
     之前，ensure save() 先于父类 / 兄弟类执行、load() 后于父类执行。
+
+    ``ROBOT``：checkpoint provenance（跨机器人恢复 fail-loud）；子类 / 用户侧
+    按 task 显式设置。
     """
+
+    ROBOT: str = "black"
 
     env: RslRlVecEnvWrapper
     cfg: dict
@@ -195,10 +220,24 @@ class CommandCurriculumCheckpointMixin:
         explicit = self.cfg.get("command_curriculum_restore", "auto")
         if state is None and explicit == "auto":
             # PPO / HIM 均可能来自旧 checkpoint；none 模式 + warning（一次 / per load）。
-            apply_command_curriculum_state(self.env.unwrapped, None, "none")
+            apply_command_curriculum_state(
+                self.env.unwrapped, None, "none", robot=self.ROBOT
+            )
             return
-        apply_command_curriculum_state(self.env.unwrapped, state, explicit)
+        apply_command_curriculum_state(
+            self.env.unwrapped, state, explicit, robot=self.ROBOT
+        )
 
 
-class BlackVelocityOnPolicyRunner(CommandCurriculumCheckpointMixin, VelocityOnPolicyRunner):
-    """Black 普通 PPO 的 runner：VelocityOnPolicyRunner + checkpoint env state。"""
+class VelocityCommandCurriculumRunner(CommandCurriculumCheckpointMixin, VelocityOnPolicyRunner):
+    """普通 PPO 的通用 runner：VelocityOnPolicyRunner + checkpoint env state。
+
+    robot-agnostic（curriculum term 通过公开接口发现；state 序列化与恢复模式
+    全部由 mixin 处理）。Black / Wolf 各 task 直接用本类作为 runner_cls。
+    """
+
+    ROBOT = "black"
+
+
+# 兼容别名：历史上该类的名字；Wolf 等新 task 使用中性名。
+BlackVelocityOnPolicyRunner = VelocityCommandCurriculumRunner
