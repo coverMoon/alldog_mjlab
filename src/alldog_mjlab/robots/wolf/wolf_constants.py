@@ -136,15 +136,15 @@ WOLF_ARTICULATION = EntityArticulationInfoCfg(
 # Initial state（root z=0.45 为暂定值，待仿真确认；单位 quat）
 #
 
-WOLF_DEFAULT_ROOT_Z = 0.4289  # 轮心偏移 0.3489 + 轮半径 0.08（几何接触高度；待仿真确认）
+WOLF_DEFAULT_ROOT_Z = 0.4432  # 轮心偏移 0.3632 + 轮半径 0.08（calf=1.43 姿态 FK 实测几何接触高度）
 
 # 默认关节姿态（此前确认的 Wolf 值，单位 rad）。
 # 注：thigh 与 calf 共用同一腿间符号映射（FL/RR 为正、FR/RL 为负）。
 WOLF_DEFAULT_JOINT_POS = {
-    "FL": (0.0, 0.82, 1.52, 0.0),
-    "FR": (0.0, -0.82, -1.52, 0.0),
-    "RL": (0.0, -0.82, -1.52, 0.0),
-    "RR": (0.0, 0.82, 1.52, 0.0),
+    "FL": (0.0, 0.82, 1.43, 0.0),
+    "FR": (0.0, -0.82, -1.43, 0.0),
+    "RL": (0.0, -0.82, -1.43, 0.0),
+    "RR": (0.0, 0.82, 1.43, 0.0),
 }
 
 INIT_STATE = EntityCfg.InitialStateCfg(
