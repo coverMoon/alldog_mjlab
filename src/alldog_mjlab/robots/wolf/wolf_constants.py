@@ -72,6 +72,19 @@ WOLF_WHEEL_FORWARD_SIGN = {
 WOLF_WHEEL_RADIUS = 0.1
 WOLF_WHEEL_HALF_WIDTH = 0.0225
 
+#
+# IMU（imu_Link body 内原生 site + XML sensor；scene 中按 "<entity>/imu_*" 访问）
+#
+
+WOLF_IMU_BODY_NAME = "imu_Link"
+WOLF_IMU_SITE_NAME = "imu_site"
+# XML sensor 名（scene 访问时带实体名前缀，例如 "robot/imu_ang_vel"）。
+WOLF_IMU_ANG_VEL_SENSOR = "imu_ang_vel"
+WOLF_IMU_UPVECTOR_SENSOR = "imu_upvector"
+# IMU 相对 base_link 的安装位置偏移（MJCF 冻结值；轴向当前与 base 平行，
+# 实机安装方向待核对）。
+WOLF_IMU_BODY_OFFSET = (0.0, 0.0, 0.05975)
+
 
 # ---------------------------------------------------------------------------
 # 显式 actuator / PD contract

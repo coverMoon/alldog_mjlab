@@ -4150,16 +4150,60 @@ INIT_STATE pos z = 0.45：轮最低点 ≈ 0（亚 mm 级余量），可直接�
     （wheel scale 10 rad/s）负责显式 mapping，本轮未实现。
 ```
 
-### 27.5 验证记录（tests/check_wolf_robot.py，不提交）
+### 27.5 Wolf IMU observation contract（本单元冻结）
+
+`imu_Link` 正式作为 IMU 安装坐标系（body 保留在 base_link 下，pos (0,0,0.05975)、
+单位四元数、无 joint / actuator / inertial；本负载 IMU 外观在 base_link.STL 中，
+损坏的 imu_Link.STL 已删除）。
+
+```text
+site      imu_site（pos 0,0,0 / quat 单位，与 imu_Link 原点重合；尺寸 0.005）
+sensor    imu_ang_vel（gyro @ imu_site，IMU 局部系角速度，rad/s）
+          imu_upvector（framezaxis objtype=body objname=world reftype=site；
+          世界 ẑ 在 IMU 系的表达）
+访问      scene["robot/imu_ang_vel"] / scene["robot/imu_upvector"]
+          （MjLab v1.6 Scene 自动把 XML 原生 sensor 包为 BuiltinSensor，
+          不重复注册 BuiltinSensorCfg）
+```
+
+冻结的 wolf-flat Actor observation 语义（term 实现留到 task 单元）：
+
+```text
+base_ang_vel       = mdp.builtin_sensor(robot/imu_ang_vel)          [3] rad/s
+projected_gravity  = mdp.projected_gravity_from_sensor(robot/imu_upvector)
+                   = -imu_upvector = R_world_imu.T @ (0,0,-1)      [3] 单位向量
+```
+
+```text
+实测（完整模型，MuJoCo/MJWarp）:
+    静止水平           gyro=0、projected_gravity=(0,0,-1)         PASS
+    5 组 roll/pitch/yaw 倾斜    framezaxis == R.T ẑ（独立坐标变换对照，
+                      误差 <1e-9）                              PASS
+    非零角速度        MuJoCo freejoint qvel[3:6] 为 body-local 语义（实测确定），
+                      gyro == qvel[3:6]（site 与 base 平行）      PASS
+    root-based 对照   site 轴与 base 平行 ⇒ gyro ==
+                      root_link_ang_vel_b、-upvector ==
+                      projected_gravity_b（max err = 0.0）        PASS
+    Scene 端到端      CPU + CUDA 均通过（含 projected_gravity_from_sensor
+                      的 -upvector 符号）                        PASS
+不变量    nq/nv/nu、总质量 33.6686、base 惯性未被修改；Actor 仍为 53-D，
+          无新增 observation 维度。
+待确认    XML 当前假定 IMU 三轴与 base 平行；实机安装朝向核对前不能视为
+          硬件验证完成。今后若调整安装朝向，Actor 仍消费 IMU 坐标系测量值。
+```
+
+### 27.6 验证记录（tests/check_wolf_robot.py、tests/check_wolf_imu.py，不提交）
 
 ```text
 CPU  PASS（静态 / 编译 / joint+actuator mapping / PD law 探针 /
      wheel forward direction FK + 闭环 / 受控站立 / INIT 0.45 站立）
 CUDA PASS（MJWarp Simulation 构建 + 默认姿态 20 步 finite）
 git diff --check: clean
+IMU（check_wolf_imu.py）: 静态 / 静止读数 / 5 组倾斜 / 非零角速度 /
+    root-based 对照（err=0.0）/ Scene 端到端 CPU + CUDA 全部 PASS
 ```
 
-### 27.6 待确认硬件参数与下一单元
+### 27.7 待确认硬件参数与下一单元
 
 ```text
 待确认   腿部 60/2/60 与轮部 17 N·m 的实机电机规格；实机 IMU 安装位置

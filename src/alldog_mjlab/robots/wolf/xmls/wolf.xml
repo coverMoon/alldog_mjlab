@@ -157,7 +157,17 @@
         </body>
       </body>
       <body name="imu_Link" pos="0 0 0.05975">
+        <site name="imu_site" pos="0 0 0"
+              quat="1 0 0 0" size="0.005"/>
       </body>
     </body>
   </worldbody>
+  <sensor>
+    <gyro name="imu_ang_vel" site="imu_site"/>
+    <framezaxis name="imu_upvector"
+                objtype="body"
+                objname="world"
+                reftype="site"
+                refname="imu_site"/>
+  </sensor>
 </mujoco>
