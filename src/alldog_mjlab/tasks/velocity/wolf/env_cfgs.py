@@ -13,9 +13,11 @@ sign / 16-D action 分组逻辑在本任务的 observations.py / rewards.py。
 """
 
 from dataclasses import replace
+from typing import TYPE_CHECKING
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs import mdp as envs_mdp
+from mjlab.envs.mdp import dr as mdp_dr
 from mjlab.envs.mdp.actions import JointPositionActionCfg, JointVelocityActionCfg
 from mjlab.envs.mdp.events import reset_joints_by_offset
 from mjlab.managers import (
@@ -34,10 +36,14 @@ from mjlab.utils.noise import UniformNoiseCfg
 
 from alldog_mjlab.robots.wolf import get_wolf_robot_cfg
 from alldog_mjlab.robots.wolf.wolf_constants import (
+    WOLF_DEFAULT_ROOT_Z,
     WOLF_LEG_JOINT_NAMES,
     WOLF_LEG_ORDER,
     WOLF_POLICY_JOINT_NAMES,
+    WOLF_WHEEL_COLLISION_GEOM_NAMES,
     WOLF_WHEEL_FORWARD_SIGN,
+    WOLF_WHEEL_JOINT_NAMES,
+    WOLF_WHEEL_RADIUS,
 )
 from alldog_mjlab.tasks.velocity.black.curriculums import (
     CURRICULUM_TERM_NAME,
@@ -54,12 +60,29 @@ from alldog_mjlab.tasks.velocity.black.rewards import (
     track_linear_velocity_xy,
     vertical_linear_velocity_l2,
 )
+from alldog_mjlab.tasks.velocity.wolf.randomization import (
+    CalfBacklashPositionActionCfg,
+    ScaledBiasedWheelVelocityActionCfg,
+    BiasedSignedWheelVelocity,
+    randomize_body_inertia_scale,
+    randomize_leg_pd_gains_strength,
+    randomize_wheel_friction_multiplier,
+    randomize_wheel_motor_strength,
+    randomize_wheel_radius_with_height,
+    reset_joints_by_default_scale,
+)
 from alldog_mjlab.tasks.velocity.wolf.observations import signed_wheel_velocity
 from alldog_mjlab.tasks.velocity.wolf.rewards import (
     leg_action_rate_l2,
     wheel_action_rate_l2,
 )
-from alldog_mjlab.tasks.velocity.wolf.wolf_config import WOLF_CONFIG
+from alldog_mjlab.tasks.velocity.wolf.wolf_config import (
+    WOLF_CONFIG,
+    DomainRandomizationParams,
+)
+
+if TYPE_CHECKING:
+    from mjlab.entity import EntityCfg
 
 # ---------------------------------------------------------------------------
 # Interface contracts（不属于训练调参，勿当作超参数阅读）
@@ -171,13 +194,50 @@ def _configure_command(cfg: ManagerBasedRlEnvCfg) -> None:
     cfg.curriculum.pop("command_vel", None)
 
 
-def _configure_scene_and_sensors(cfg: ManagerBasedRlEnvCfg) -> None:
+def _wolf_robot_cfg(dr: DomainRandomizationParams) -> "EntityCfg":
+    """构造 Wolf robot cfg；DR 开启时给对应 actuator 注入原生 actuator delay。
+
+    delay 单位换算：legacy 的 3/4 policy step → ×decimation physics step。
+    lag 在 [0, max] 内每 update_period（= 1 policy step）重采样一次；与旧版
+    per-episode 固定 lag 的差异在 MIGRATION.md §29 标注为有意改变。
+    关闭时不设置 delay（无 buffer，无残余延迟）。
+    """
+    import copy
+
+    robot_cfg = get_wolf_robot_cfg()
+    if not (dr.leg_delay_enabled or dr.wheel_delay_enabled):
+        return robot_cfg
+    robot_cfg = copy.deepcopy(robot_cfg)
+    decimation = WOLF_CONFIG.control.decimation
+    for act in robot_cfg.articulation.actuators:
+        joint_name = act.target_names_expr[0]
+        if joint_name in WOLF_WHEEL_JOINT_NAMES:
+            if dr.wheel_delay_enabled:
+                max_lag = dr.wheel_max_delay_steps * decimation
+                act.delay_min_lag = 0
+                act.delay_max_lag = max_lag
+                act.delay_update_period = decimation
+                act.delay_per_env_phase = False
+        else:
+            if dr.leg_delay_enabled:
+                max_lag = dr.leg_max_delay_steps * decimation
+                act.delay_min_lag = 0
+                act.delay_max_lag = max_lag
+                act.delay_update_period = decimation
+                act.delay_per_env_phase = False
+    return robot_cfg
+
+
+def _configure_scene_and_sensors(
+    cfg: ManagerBasedRlEnvCfg, dr: DomainRandomizationParams
+) -> None:
     """robot entity 与非法接触 sensor 装配；移除 baseline 的 terrain / foot 传感器。
 
     Wolf 用不到 foot site / height scan：轮足结构没有足端摆动相概念，flat plane 的
     base height reward 直接读 world z，critic 也不需要 terrain height。
+    DR 的 actuator delay 在 robot cfg 层注入（见 _wolf_robot_cfg）。
     """
-    cfg.scene.entities = {"robot": get_wolf_robot_cfg()}
+    cfg.scene.entities = {"robot": _wolf_robot_cfg(dr)}
     cfg.scene.sensors = tuple(
         sensor
         for sensor in (cfg.scene.sensors or ())
@@ -203,17 +263,21 @@ def _configure_scene_and_sensors(cfg: ManagerBasedRlEnvCfg) -> None:
     cfg.scene.sensors = (cfg.scene.sensors or ()) + (illegal_ground_contact,)
 
 
-def _configure_actions(cfg: ManagerBasedRlEnvCfg) -> None:
+def _configure_actions(
+    cfg: ManagerBasedRlEnvCfg, dr: DomainRandomizationParams
+) -> None:
     """Wolf policy action contract：每腿 1 个位置 term + 1 个轮速度 term 交错拼接。
 
     flat policy action 顺序 = WOLF_ACTION_TERM_ORDER（每腿 [hip thigh calf wheel]
     block，FL → FR → RL → RR，共 16 维）。
 
     - 腿部：`JointPositionActionCfg`（use_default_offset=True）→
-      ``q_target = q_default + 0.20 * raw``；
+      ``q_target = q_default + 0.20 * raw``；DR 开启时用带 calf backlash 状态机
+      的子类 cfg（term 名 / 维度 / 顺序不变；backlash 关闭时与原生逐位等价）；
     - 轮部：`JointVelocityActionCfg`，scale 为 per-wheel dict（含 forward sign）→
-      ``dq_target = forward_sign * 10.0 * raw``；velocity target 直接写入理想 PD
-      执行器（Kp=0 / Kd=1 / limit 17 N·m，robots/wolf 冻结值，不在 task 层修改）。
+      ``dq_target = forward_sign * 10.0 * raw``；DR 开启时用带 target
+      scaling / bias 的子类 cfg（关闭时与原生逐位等价）；velocity target 直接
+      写入理想 PD 执行器（Kp=0 / Kd=1 / limit 17 N·m，robots/wolf 冻结值）；
     - 不做默认 [-1,1] action clip（GaussianDistribution 初 std 1.0，raw 无界）。
 
     每关节一个 IdealPd 执行器（sort_actuators=True），`find_joints_by_actuator_names`
@@ -221,15 +285,31 @@ def _configure_actions(cfg: ManagerBasedRlEnvCfg) -> None:
     """
     cfg.actions.pop("joint_pos")
 
-    action_terms: dict[str, JointPositionActionCfg | JointVelocityActionCfg] = {}
-    for leg in WOLF_LEG_ORDER:
-        action_terms[f"joint_pos_{leg.lower()}"] = JointPositionActionCfg(
+    backlash_on = dr.calf_backlash.enabled
+    wheel_target_on = (
+        dr.wheel_target.vel_ref_scale_enabled or dr.wheel_target.vel_ref_bias_enabled
+    )
+
+    def _position_cfg(leg: str) -> JointPositionActionCfg:
+        base = dict(
             entity_name="robot",
             actuator_names=WOLF_LEG_ACTION_JOINT_NAMES[leg],
             scale=WOLF_CONFIG.control.leg_action_scale,
             use_default_offset=True,
         )
-        action_terms[f"wheel_vel_{leg.lower()}"] = JointVelocityActionCfg(
+        if not backlash_on:
+            return JointPositionActionCfg(**base)
+        return CalfBacklashPositionActionCfg(
+            **base,
+            backlash_enabled=True,
+            width_range=dr.calf_backlash.width_range,
+            min_kp_scale=dr.calf_backlash.min_kp_scale,
+            engage_start=dr.calf_backlash.engage_start,
+            leak=dr.calf_backlash.leak,
+        )
+
+    def _velocity_cfg(leg: str) -> JointVelocityActionCfg:
+        base = dict(
             entity_name="robot",
             actuator_names=WOLF_WHEEL_JOINT_NAME[leg],
             scale={
@@ -240,16 +320,37 @@ def _configure_actions(cfg: ManagerBasedRlEnvCfg) -> None:
             },
             use_default_offset=True,
         )
+        if not wheel_target_on:
+            return JointVelocityActionCfg(**base)
+        return ScaledBiasedWheelVelocityActionCfg(
+            **base,
+            vel_ref_scale_enabled=dr.wheel_target.vel_ref_scale_enabled,
+            vel_ref_scale_range=dr.wheel_target.vel_ref_scale_range,
+            vel_ref_bias_enabled=dr.wheel_target.vel_ref_bias_enabled,
+            vel_ref_bias_range=dr.wheel_target.vel_ref_bias_range,
+        )
+
+    action_terms = {}
+    for leg in WOLF_LEG_ORDER:
+        action_terms[f"joint_pos_{leg.lower()}"] = _position_cfg(leg)
+        action_terms[f"wheel_vel_{leg.lower()}"] = _velocity_cfg(leg)
     assert tuple(action_terms) == WOLF_ACTION_TERM_ORDER
     cfg.actions = action_terms  # type: ignore[assignment]
 
 
-def _configure_events(cfg: ManagerBasedRlEnvCfg) -> None:
-    """Reset contract（无 DR：Wolf 本轮维持 nominal dynamics）。
+def _configure_events(
+    cfg: ManagerBasedRlEnvCfg, dr: DomainRandomizationParams
+) -> None:
+    """Reset contract + DR event contract（dict 顺序 = 同 mode 内应用顺序）。
 
     reset_base：root pose 不随机（default 站立，root 高度 = INIT_STATE z），六维
     速度小幅独立扰动；leg 关节按 hip / thigh / calf 三组小幅 offset；轮子显式
     归零位零速（不留隐式依赖）。
+
+    DR（旧 BlackW 候选范围，全部默认关闭）：地面摩擦 → 轮摩擦乘子（依赖前序
+    事件的当前值，顺序敏感）→ 质量 / COM / 惯量（均相对 nominal，无累计漂移）
+    → 腿 / 轮执行器 → 轮半径（含初始高度补偿）→ 外部扰动。DR 开启时，
+    initial_joint_pos 用 multiplicative reset 替换腿关节 offset reset。
     """
     base_events = dict(cfg.events)
     base_joint_reset = base_events["reset_robot_joints"]
@@ -262,20 +363,37 @@ def _configure_events(cfg: ManagerBasedRlEnvCfg) -> None:
             "velocity_range": dict(WOLF_CONFIG.reset.root_velocity),
         },
     )
-    leg_resets = {
-        f"reset_{joint_group}_joints": replace(
-            base_joint_reset,
-            params={
-                "position_range": position_range,
-                "velocity_range": (0.0, 0.0),
-                "asset_cfg": SceneEntityCfg(
-                    "robot",
-                    joint_names=tuple(f"{leg}_{joint_group}" for leg in WOLF_LEG_ORDER),
-                ),
-            },
-        )
-        for joint_group, position_range in WOLF_CONFIG.reset.leg_position.items()
-    }
+    if dr.initial_joint_pos_enabled:
+        # DR：multiplicative reset（旧版 _reset_dofs 语义），替换三组 offset reset。
+        leg_resets = {
+            "reset_initial_joint_pos": EventTermCfg(
+                func=reset_joints_by_default_scale,
+                mode="reset",
+                params={
+                    "scale_range": dr.initial_joint_pos_range,
+                    "asset_cfg": SceneEntityCfg(
+                        "robot",
+                        joint_names=WOLF_LEGS_FL_FIRST_JOINT_NAMES,
+                        preserve_order=True,
+                    ),
+                },
+            ),
+        }
+    else:
+        leg_resets = {
+            f"reset_{joint_group}_joints": replace(
+                base_joint_reset,
+                params={
+                    "position_range": position_range,
+                    "velocity_range": (0.0, 0.0),
+                    "asset_cfg": SceneEntityCfg(
+                        "robot",
+                        joint_names=tuple(f"{leg}_{joint_group}" for leg in WOLF_LEG_ORDER),
+                    ),
+                },
+            )
+            for joint_group, position_range in WOLF_CONFIG.reset.leg_position.items()
+        }
     wheel_reset = replace(
         base_joint_reset,
         params={
@@ -290,8 +408,10 @@ def _configure_events(cfg: ManagerBasedRlEnvCfg) -> None:
         "reset_base": reset_base,
         **leg_resets,
         "reset_wheel_joints": wheel_reset,
+        **_dr_event_terms(dr),
     }
-    # baseline 的 push / foot_friction / encoder_bias / base_com DR 事件全部不注册。
+    # baseline 的 push / foot_friction / encoder_bias / base_com DR 事件全部不注册
+    # （Wolf DR 事件统一在 _dr_event_terms 中显式构造）。
 
 
 def _configure_rewards(cfg: ManagerBasedRlEnvCfg) -> None:
@@ -359,7 +479,42 @@ def _configure_flat_terrain(cfg: ManagerBasedRlEnvCfg) -> None:
     cfg.curriculum.pop("terrain_levels", None)
 
 
-def _configure_observations(cfg: ManagerBasedRlEnvCfg) -> None:
+def _wheel_vel_term_cfg(dr: DomainRandomizationParams) -> ObservationTermCfg:
+    """actor wheel_vel term：DR 开启时用带 per-episode bias 的类 term（仅 actor）。
+
+    critic 构造时显式替换回无 bias 的真实 signed_wheel_velocity。
+    """
+    wheel_obs = SceneEntityCfg(
+        "robot", joint_names=WOLF_WHEEL_JOINT_POLICY_ORDER, preserve_order=True
+    )
+    if not dr.wheel_obs_bias.enabled:
+        return ObservationTermCfg(
+            func=signed_wheel_velocity,
+            params={"asset_cfg": wheel_obs},
+            scale=_WOLF_ACTOR_TERM_SCALE["wheel_vel"],
+            noise=UniformNoiseCfg(
+                n_min=_WOLF_ACTOR_TERM_NOISE["wheel_vel"][0],
+                n_max=_WOLF_ACTOR_TERM_NOISE["wheel_vel"][1],
+            ),
+        )
+    return ObservationTermCfg(
+        func=BiasedSignedWheelVelocity,
+        params={
+            "asset_cfg": wheel_obs,
+            "bias_range": dr.wheel_obs_bias.range,
+            "enabled": True,
+        },
+        scale=_WOLF_ACTOR_TERM_SCALE["wheel_vel"],
+        noise=UniformNoiseCfg(
+            n_min=_WOLF_ACTOR_TERM_NOISE["wheel_vel"][0],
+            n_max=_WOLF_ACTOR_TERM_NOISE["wheel_vel"][1],
+        ),
+    )
+
+
+def _configure_observations(
+    cfg: ManagerBasedRlEnvCfg, dr: DomainRandomizationParams
+) -> None:
     """Wolf PPO actor 53 维 / critic 56 维 observation contract（顺序 / scale / noise）。
 
     IMU 观测走 Wolf XML 原生 sensor（`robot/imu_ang_vel` / `robot/imu_upvector`，
@@ -415,11 +570,7 @@ def _configure_observations(cfg: ManagerBasedRlEnvCfg) -> None:
                 mdp.joint_vel_rel,
                 {"asset_cfg": SceneEntityCfg("robot", joint_names=WOLF_LEGS_FL_FIRST_JOINT_NAMES, preserve_order=True)},
             ),
-            _actor_term(
-                "wheel_vel",
-                signed_wheel_velocity,
-                {"asset_cfg": SceneEntityCfg("robot", joint_names=WOLF_WHEEL_JOINT_POLICY_ORDER, preserve_order=True)},
-            ),
+            ("wheel_vel", _wheel_vel_term_cfg(dr)),
             _actor_term("actions", mdp.last_action),
         )
     )
@@ -430,11 +581,18 @@ def _configure_observations(cfg: ManagerBasedRlEnvCfg) -> None:
     )
 
     # critic：同布局，全部无 noise（独立构造 cfg 对象），末尾追加真实 base_lin_vel。
+    # wheel_vel：若 actor 使用带 bias 的类 term，critic 显式替换回真实值
+    # （DR 的轮速观测偏置不得污染 critic privileged observation）。
     critic_built: dict[str, ObservationTermCfg] = {}
     for name, term in actor_built.items():
+        func = term.func
+        params = dict(term.params)
+        if name == "wheel_vel" and dr.wheel_obs_bias.enabled:
+            func = signed_wheel_velocity
+            params = {"asset_cfg": params["asset_cfg"]}
         critic_built[name] = ObservationTermCfg(
-            func=term.func,
-            params=dict(term.params),
+            func=func,
+            params=params,
             scale=term.scale,
         )
     critic_built["base_lin_vel"] = ObservationTermCfg(
@@ -462,6 +620,205 @@ def _configure_terminations(cfg: ManagerBasedRlEnvCfg) -> None:
             "force_threshold": WOLF_CONFIG.termination.illegal_contact_force,
         },
     )
+
+
+def _dr_event_terms(dr: DomainRandomizationParams) -> dict[str, EventTermCfg]:
+    """Wolf DR 事件表（仅显式开启的项注册；dict 顺序 = 同 mode 内应用顺序）。
+
+    顺序敏感点：
+    - ``dr_ground_friction``（绝对值写入全部 collision geom）必须先于
+      ``dr_wheel_friction``（乘子，读当前值）；
+    - ``dr_wheel_radius`` 必须在 ``reset_base`` 之后（覆盖 root z 做高度补偿）。
+    """
+    terms: dict[str, EventTermCfg] = {}
+
+    all_collision_geoms = SceneEntityCfg("robot", geom_names=(".*",))
+    wheel_geoms = SceneEntityCfg(
+        "robot", geom_names=WOLF_WHEEL_COLLISION_GEOM_NAMES, preserve_order=True
+    )
+    base_body = SceneEntityCfg("robot", body_names=("base_link",))
+    wheel_bodies = SceneEntityCfg(
+        "robot", body_names=tuple(f"{leg}_Link4" for leg in WOLF_LEG_ORDER)
+    )
+    # Link1-3（非 base、非轮）：link mass / inertia 随机化目标。
+    link_bodies = SceneEntityCfg(
+        "robot",
+        body_names=tuple(
+            f"{leg}_Link{i}" for leg in WOLF_LEG_ORDER for i in (1, 2, 3)
+        ),
+    )
+    leg_actuators = SceneEntityCfg(
+        "robot",
+        actuator_names=tuple(
+            f"{leg}_{joint}" for leg in WOLF_LEG_ORDER for joint in ("hip", "thigh", "calf")
+        ),
+    )
+    wheel_actuators = SceneEntityCfg(
+        "robot", actuator_names=WOLF_WHEEL_JOINT_NAMES
+    )
+
+    # --- 摩擦（reset，per-episode 重采样；轮乘子顺序敏感）---
+    if dr.ground_friction_enabled:
+        terms["dr_ground_friction"] = EventTermCfg(
+            func=mdp_dr.geom_friction,
+            mode="reset",
+            params={
+                "asset_cfg": all_collision_geoms,
+                "operation": "abs",
+                "ranges": dr.ground_friction_range,
+                "shared_random": True,
+            },
+        )
+    if dr.wheel_friction_enabled:
+        terms["dr_wheel_friction"] = EventTermCfg(
+            func=randomize_wheel_friction_multiplier,
+            mode="reset",
+            params={
+                "scale_range": dr.wheel_friction_scale_range,
+                "asset_cfg": wheel_geoms,
+                "from_current_base": dr.ground_friction_enabled,
+            },
+        )
+
+    # --- 刚体质量 / COM / 惯量（reset，相对 nominal，无累计漂移）---
+    if dr.base_mass_enabled:
+        terms["dr_base_mass"] = EventTermCfg(
+            func=mdp_dr.body_mass,
+            mode="reset",
+            params={
+                "asset_cfg": base_body,
+                "operation": "add",
+                "ranges": dr.base_mass_range,
+            },
+        )
+    if dr.link_mass_enabled:
+        terms["dr_link_mass"] = EventTermCfg(
+            func=mdp_dr.body_mass,
+            mode="reset",
+            params={
+                "asset_cfg": link_bodies,
+                "operation": "scale",
+                "ranges": dr.link_mass_scale_range,
+            },
+        )
+    if dr.wheel_mass_enabled:
+        terms["dr_wheel_mass"] = EventTermCfg(
+            func=mdp_dr.body_mass,
+            mode="reset",
+            params={
+                "asset_cfg": wheel_bodies,
+                "operation": "scale",
+                "ranges": dr.wheel_mass_scale_range,
+            },
+        )
+    if dr.link_inertia_enabled:
+        terms["dr_link_inertia"] = EventTermCfg(
+            func=randomize_body_inertia_scale,
+            mode="reset",
+            params={
+                "ranges": dr.link_inertia_scale_range,
+                "asset_cfg": link_bodies,
+                "shared_random": False,
+            },
+        )
+    if dr.wheel_inertia_enabled:
+        terms["dr_wheel_inertia"] = EventTermCfg(
+            func=randomize_body_inertia_scale,
+            mode="reset",
+            params={
+                "ranges": dr.wheel_inertia_scale_range,
+                "asset_cfg": wheel_bodies,
+                "shared_random": True,
+            },
+        )
+    if dr.base_com_enabled:
+        terms["dr_base_com"] = EventTermCfg(
+            func=mdp_dr.body_com_offset,
+            mode="reset",
+            params={
+                "asset_cfg": base_body,
+                "operation": "add",
+                "ranges": {
+                    0: dr.base_com_offset_range,
+                    1: dr.base_com_offset_range,
+                    2: dr.base_com_offset_range,
+                },
+            },
+        )
+
+    # --- 执行器（reset）---
+    if dr.kp_enabled or dr.kd_enabled or dr.motor_strength_enabled or dr.hip_motor_strength_enabled:
+        terms["dr_leg_pd_gains"] = EventTermCfg(
+            func=randomize_leg_pd_gains_strength,
+            mode="reset",
+            params={
+                "kp_range": dr.kp_scale_range if dr.kp_enabled else (1.0, 1.0),
+                "kd_range": dr.kd_scale_range if dr.kd_enabled else (1.0, 1.0),
+                "motor_strength_range": (
+                    dr.motor_strength_range if dr.motor_strength_enabled else (1.0, 1.0)
+                ),
+                "hip_strength_range": (
+                    dr.hip_motor_strength_range if dr.hip_motor_strength_enabled else None
+                ),
+                "asset_cfg": leg_actuators,
+            },
+        )
+    if dr.wheel_motor_enabled:
+        terms["dr_wheel_motor"] = EventTermCfg(
+            func=randomize_wheel_motor_strength,
+            mode="reset",
+            params={
+                "strength_range": dr.wheel_motor_strength_range,
+                "asset_cfg": wheel_actuators,
+            },
+        )
+
+    # --- 轮几何（reset，含初始高度补偿；依赖 reset_base 先写入 nominal root z）---
+    if dr.wheel_radius_enabled:
+        terms["dr_wheel_radius"] = EventTermCfg(
+            func=randomize_wheel_radius_with_height,
+            mode="reset",
+            params={
+                "scale_range": dr.wheel_radius_scale_range,
+                "asset_cfg": wheel_geoms,
+                "nominal_root_z": WOLF_DEFAULT_ROOT_Z,
+            },
+        )
+
+    # --- reset：initial joint position（multiplicative）已在 _configure_events 中
+    # 替换腿 offset reset，不在此重复注册。---
+
+    # --- 外部扰动（interval，全局同步）---
+    if dr.push_enabled:
+        terms["dr_push_robot"] = EventTermCfg(
+            func=envs_mdp.push_by_setting_velocity,
+            mode="interval",
+            interval_range_s=dr.push_interval_s,
+            is_global_time=True,
+            params={
+                "velocity_range": {
+                    "x": dr.push_velocity_xy,
+                    "y": dr.push_velocity_xy,
+                },
+            },
+        )
+    if dr.disturbance_enabled:
+        disturbance_interval_s = (
+            dr.disturbance_interval_policy_steps * WOLF_CONFIG.control.policy_dt
+        )
+        terms["dr_disturbance"] = EventTermCfg(
+            func=envs_mdp.apply_external_force_torque,
+            mode="interval",
+            interval_range_s=(disturbance_interval_s, disturbance_interval_s),
+            is_global_time=True,
+            params={
+                "force_range": dr.disturbance_force_range,
+                "torque_range": (0.0, 0.0),
+                "asset_cfg": base_body,
+            },
+        )
+
+    return terms
 
 
 def _configure_common_runtime(cfg: ManagerBasedRlEnvCfg, *, play: bool) -> None:
@@ -502,24 +859,43 @@ def _configure_command_curriculum(cfg: ManagerBasedRlEnvCfg) -> None:
 
 
 def _configure_play(cfg: ManagerBasedRlEnvCfg) -> None:
-    """play 模式：remove illegal_contact，curriculum 清空（nominal 干净观察）。"""
+    """play 模式：remove illegal_contact，curriculum 清空（nominal 干净观察）。
+
+    play 强制关闭 DR（双保险：builder 路径已不注入，这里再清一次防御）。
+    """
     cfg.episode_length_s = int(1e9)
     cfg.observations["actor"].enable_corruption = False
     cfg.terminations.pop("illegal_contact", None)
     cfg.curriculum = {}
+    for name in [k for k in cfg.events if k.startswith("dr_")]:
+        cfg.events.pop(name, None)
 
 
-def _build_wolf_env_cfg(play: bool) -> ManagerBasedRlEnvCfg:
-    """Wolf flat 任务的完整装配路径（train 含 command curriculum，play 干净）。"""
+def _build_wolf_env_cfg(
+    play: bool,
+    dr: DomainRandomizationParams | None = None,
+) -> ManagerBasedRlEnvCfg:
+    """Wolf flat 任务的完整装配路径（train 含 command curriculum，play 干净）。
+
+    play 模式强制无 DR（nominal dynamics）；train 的 DR 默认取 WOLF_CONFIG.dr
+    （DomainRandomizationParams，默认全关），也可显式传入（供 minimal 等
+    profile / 验证脚本使用）。
+    """
     cfg = make_velocity_env_cfg()
 
+    if play:
+        dr = DomainRandomizationParams()
+    else:
+        dr = WOLF_CONFIG.dr if dr is None else dr
+        dr.validate()
+
     _configure_command(cfg)
-    _configure_scene_and_sensors(cfg)
-    _configure_actions(cfg)
-    _configure_events(cfg)
+    _configure_scene_and_sensors(cfg, dr)
+    _configure_actions(cfg, dr)
+    _configure_events(cfg, dr)
     _configure_rewards(cfg)
     _configure_flat_terrain(cfg)
-    _configure_observations(cfg)
+    _configure_observations(cfg, dr)
     _configure_terminations(cfg)
     _configure_common_runtime(cfg, play=play)
     if not play:
@@ -530,15 +906,22 @@ def _build_wolf_env_cfg(play: bool) -> ManagerBasedRlEnvCfg:
     return cfg
 
 
-def wolf_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+def wolf_flat_env_cfg(
+    play: bool = False,
+    dr: DomainRandomizationParams | None = None,
+) -> ManagerBasedRlEnvCfg:
     """Wolf flat-ground PPO task。
 
-    actor 53 维单帧；critic 56 维；terrain 为 plane；nominal dynamics（无 DR）。
+    actor 53 维单帧；critic 56 维；terrain 为 plane；DR 默认取 WOLF_CONFIG.dr
+    （全关 = nominal dynamics）。
     """
-    return _build_wolf_env_cfg(play=play)
+    return _build_wolf_env_cfg(play=play, dr=dr)
 
 
-def wolf_flat_him_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+def wolf_flat_him_env_cfg(
+    play: bool = False,
+    dr: DomainRandomizationParams | None = None,
+) -> ManagerBasedRlEnvCfg:
     """``wolf-flat`` + HIM observation / history / terminal contract（复用 black/him.py）。
 
     与 ``wolf_flat_env_cfg`` 的 reward / command / reset / action / termination /
@@ -549,7 +932,7 @@ def wolf_flat_him_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     - 新增 ``estimator_velocity`` group（``[B, 3]``，scaled true base lin vel）；
     - 注册 terminal successor target recorder。
     """
-    cfg = wolf_flat_env_cfg(play=play)
+    cfg = wolf_flat_env_cfg(play=play, dr=dr)
     configure_him_observations(cfg)
     configure_him_terminal_targets(cfg)
     return cfg

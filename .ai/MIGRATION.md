@@ -35,6 +35,7 @@ Black performance-based forward-speed command curriculum
 Wolf robot asset / joint order / actuator contract (stage 1): COMPLETE（§27）
 Wolf IMU observation contract: COMPLETE（§27.5）
 Wolf flat PPO / HIM / command curriculum integration: COMPLETE（§28）
+Wolf Domain Randomization（逐项开关 + minimal profile）: COMPLETE（§29）
 Hardware effort/current ceiling: UNCONFIRMED（实机前确认）
 ```
 
@@ -4353,6 +4354,99 @@ CUDA PASS（runtime 段 GPU 重跑 + 1024 env × 3 iter 真实训练 mean_reward
 Black 回归：check_black_flat（CPU+CUDA）/ rough（CPU+CUDA）/ rough_him /
      command_curriculum / him / him_algo / him_runner / him_warm_start 全部 PASS。
 未验证：长训收敛 / 高速（±4）行为 / DR / rough / sim2real —— 均未开始。
+```
+
+## 29. Wolf Domain Randomization（本轮集成，COMPLETE）
+
+一次性集成单元：Wolf flat PPO / HIM 共用的 Domain Randomization，全部在
+`wolf_config.DomainRandomizationParams`（默认全关）逐项开关；play 强制全关；
+minimal 训练 profile = `wolf_config.MINIMAL_DR`（轮地摩擦 + 腿部 PD gains）。
+PPO 与 HIM 同一 DR 配置。Actor/critic observation layout（53/56）、16-D action
+layout、raw action 语义均未修改。
+
+### 29.1 实现位置
+
+```text
+src/alldog_mjlab/tasks/velocity/wolf/randomization.py
+    自定义 DR 实现：轮摩擦乘子复合、body inertia scale、腿 PD×motor strength
+    组合、calf backlash play 模式 action term、轮 target scale/bias action term、
+    轮 obs bias class obs term、wheel radius+初始高度补偿 event、
+    multiplicative initial joint pos reset
+src/alldog_mjlab/tasks/velocity/wolf/env_cfgs.py
+    DR 事件表（dict 顺序 = 同 mode 内应用顺序；wheel friction 依赖 ground
+    friction 顺序敏感）、actuator delay 注入（_wolf_robot_cfg）、critic
+    wheel_vel term 显式去 bias
+src/alldog_mjlab/tasks/velocity/wolf/wolf_config.py
+    DomainRandomizationParams / CalfBacklashParams / WheelTargetBiasParams /
+    WheelObsBiasParams / MINIMAL_DR
+```
+
+原生优先使用：payload/com 用 `dr.body_mass(add)` /「dr.body_com_offset(add)」；
+link/wheel mass 用 `dr.body_mass(scale)`；ground friction 用
+`dr.geom_friction(abs,shared_random)`；push 用 native `push_by_setting_velocity`；
+disturbance 用 native `apply_external_force_torque`；delay 用原生 actuator
+`delay_min_lag/delay_max_lag`（"3/4 policy step" → ×decimation 物理 step）；
+wheel radius 用 `dr.geom_size(scale)`（写后自动刷新 rbound/aabb）。
+
+### 29.2 遷移对照表（旧 BlackW → Wolf）
+
+| Legacy feature | 旧版当前实际行为 | Wolf 实现 | MjLab 表达 | 验证结果 |
+|---|---|---|---|---|
+| base payload mass [-1,2]kg | 每 reset 重采样，add 到 base mass | IMPLEMENTED | dr.body_mass(add) | bounds PASS |
+| base COM offset ±0.05 | add 到 base COM | IMPLEMENTED | dr.body_com_offset(add) | bounds PASS |
+| link mass [0.9,1.1] | 每 body 独立采样，“自 body 起”均值 | IMPLEMENTED（base body 除外） | dr.body_mass(scale) | PASS |
+| friction [0.25,1.25] | 单系数套用 actor 全部 shape | IMPLEMENTED | dr.geom_friction(abs,shared_random) | bounds PASS |
+| wheel friction ×[0.4,1.0] | base×scale，后乘 | IMPLEMENTED | 自定义复合（读当前值再乘） | compPASS（ratio∈[0.4,1]） |
+| restitution [0,0.1] | Isaac Gym shape restitution | UNSUPPORTED（未迁移） | v1.6 无可靠恢复系数机制（solref 不等价） | — |
+| motor strength [0.9,1.1] | 终端力矩乘因子，"clip 后语义 = 栱增益缩放" | IMPLEMENTED | 自定义：合成进 IdealPd kp/kd | bounds PASS |
+| hip motor strength [0.8,1.05] | per-hip 因子，全局后乘 | IMPLEMENTED | same（仅 hip actuator 第二因子） | bounds PASS |
+| hip passive damping ×[0.8,1.5] | URDF dof damping=0，乘子无效 | LEGACY INERT（不迁移） | Wolf XML damping=0，base 无意义 | 静态分析 |
+| calf backlash play 模式 | effective target + Kp 弱化（每 substep 状态机） | IMPLEMENTED | action term 状态机，写入 q+kp_scale×(eff−q) | 状态机逐项复算 PASS |
+| Kp/Kd ×[0.9,1.1] | per-env 标量因子（全腿共享） | IMPLEMENTED（同语义 per-env 标量） | 自定义复合（相对 default） | bounds PASS |
+| initial joint pos ×[0.5,1.5] | 旧 base 美人默认 reset（与开关无关，恒为乘法） | IMPLEMENTED（开启时替换 leg offset reset；基线 offset reset 保留） | 自定义 reset_joints_by_default_scale | bounds PASS |
+| inertia ×[0.9,1.1]（含 base） | per-body per-axis 独立缩放 principal axes | IMPLEMENTED（间题：Wolf 关闭时与 DR-on 均为 body_inertia 直接缩放；包含 base+links） | 自定义 randomize_body_inertia_scale | bounds PASS |
+| disturbance ±30N / 8 步 | body local 系恒力，8 步重采样 | NOT EQUIVALENT（有意） | native apply_external_force_torque（world 系；均匀分布统计等价）；reset 自动清零 | 写入/清零 PASS |
+| push 15s / ±1m/s | root xy 速度**赋值**（非增量） | NOT EQUIVALENT（与 Black MjLab 版先例一致） | native push_by_setting_velocity（增量） | 冒烟 rollout |
+| leg delay ≤3 policy step | 每 reset 固定 lag∈{0..2}（旧 base 实际 randint(0,3)；config value 未用） | NOT EQUIVALENT（有意） | native actuator delay（0..12 physics step，≤每 policy step 重采样；episode 初 buffer 回填无延迟待填满） | stepdown 测量 PASS + 配置 PASS |
+| wheel delay ≤4 policy step | 每 reset 固定 lag∈{0..4} | NOT EQUIVALENT（同上） | 同上（0..16 physics step） | 同上 |
+| wheel motor strength [0.8,1.2] | wheel τ 乘因子（Kd 通道） | IMPLEMENTED | 轮 actuator Kd 缩放（Kp 恒 0） | bounds PASS（无 stiffness 注入） |
+| wheel vel ref scale [0.9,1.1] | per-wheel，乘 target | IMPLEMENTED | action term target scaling | dq_target=2×10+3 精确 PASS |
+| wheel vel ref bias ±0.3 | per-wheel，加到 ref | IMPLEMENTED | action term target bias | 同上 PASS |
+| wheel vel obs bias ±0.5 | per-wheel，加观测 | IMPLEMENTED | actor-only class obs term（critic 显式去 bias） | critic==真实值 PASS;actor==真实+bias±noise PASS |
+| wheel mass [0.9,1.1] | wheel body mass×scale | IMPLEMENTED | dr.body_mass(scale)（wheel body） | bounds PASS |
+| wheel inertia [0.8,1.2] | wheel body inertia×scale | IMPLEMENTED | 自定义 randomize_body_inertia_scale(wheel) | bounds PASS |
+| wheel radius ×[0.9,1.1] | per-env 固定采样（startup） | NOT EQUIVALENT（有意：per-episode 重采样） | dr.geom_size(scale)+root z 补偿 | r=0.12 静置抬高 PASS；rbound 一致 PASS |
+| wheel base half width ×[0.95,1.05] | learned 轮速模式未使用该参数 | LEGACY INERT（不迁移） | Wolf learned 轮速无前馈半轮距项 | 静态分析 |
+
+### 29.3 关键实现约束（已冻结）
+
+- MuJoCo 接触摩擦按 geom pair 取 **max** 结合（地面 geom 恒 1.0）：轮摩擦乘子
+  必须直接写轮 geom 绝对值；`plane` 地面摩擦自身不改（对 nominal 无影响，
+  ground_friction off 时轮摩擦相对 compile-time default 建立，不跨 episode 累计）。
+- 所有质量/COM/惯量/gain 条目相对 compile-time default 建立（“scale/add” relative
+  default），关关开开连续 reset 无漂移（验证：5 次 reset 分布同区间）。
+- 腿/轮 delay 融入 IdealPdActuator 原生 delay（腿≤12、轮≤16 physics step；
+  `update_period=decimation`，`per_env_phase=False`）；关闭时无 buffer、无残余。
+- calf backlash 关闭时用原生 JointPositionActionCfg（无状态机实例）；轮 target
+  scale/bias 关闭时同理；`MINIMAL_DR` = ground_friction+Kp+Kd。
+- INIT 高度契约变更（用户确认 2026-10）：`WOLF_DEFAULT_ROOT_Z 0.4289 → 0.4432`
+  （工作区 calf 默认角 1.52→1.43 未提交修改保留；0.4289 为 calf=1.52 旧姿态的
+  几何接触值，calf=1.43 下轮地穿地 14.3mm；0.4432 = calf=1.43 下 FK 轮心偏移
+  0.3632+0.08）。`check_wolf_robot.py` 陈旧硬编码 Kp=60/damping=2.0 同步更正为
+  引用 wolf_constants 冻结值（工作区/未提交，不 diff 提交）。
+
+### 29.4 验证记录（tests/check_wolf_dr.py，不提交）
+
+```text
+CPU  PASS（静态 cfg / 全关 contract 逐位一致 + 中性 DR==nominal + 无残留 buffer /
+     参数 bounds / 摩擦复合 / 无漂移×5 reset / initial joint pos 分布 / target 编制 /
+     obs bias 隔离 / backlash 状态机 / delay stepdown ∈[0,16] / r=0.12 静置抬高 /
+     xfrc reset 清零 / PPO+HIM DR-on 真实训练 2×2iter）
+CUDA PASS（同套全项 GPU 重跑，含 DR-on 训练 smoke）
+回归：check_wolf_task（CPU+CUDA）/ check_black_flat（CPU+CUDA）/
+     check_wolf_robot（新站立高度）/ check_wolf_imu 全部 PASS
+未验证：长训收敛质量（DR-on 长 iter）、rough/sim2real、decimation 换算 delay 的
+     sim2real 等价性 —— 均未开始。
 ```
 
 ## 26. Update Rule
