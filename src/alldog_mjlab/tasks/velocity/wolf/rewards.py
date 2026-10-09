@@ -1,18 +1,167 @@
-"""Wolf flat 任务专属的 reward math。
+"""Wolf 任务的 reward math（task local，不 import `black.rewards`）。
 
-tracking / 罚项公式全部复用 `black/rewards.py` 的机器人无关实现；这里只实现
-按 16-D 显式 action contract 分组的 leg / wheel action rate（native
-`action_rate_l2` 对全部 16 维求和，无法按腿 / 轮分组）。
+tracking / 罚项公式与 black/rewards.py 的机器人无关实现逐公式独立同构
+（HIMLoco 公式；公式与 Black 完全相同也在 Wolf 中独立定义），另加按 16-D
+显式 action contract 分组的 leg / wheel action rate（native `action_rate_l2`
+对全部 16 维求和，无法按腿 / 轮分组）。
+
+rough 专属：`base_height_l2_terrain`（局部地形相对高度的 footprint 均值 L2，
+算法与 Black rough 相同：native terrain_scan 中央 7 x 5 = 35 rays 的 clearance
+均值）。
 """
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any
+
 import torch
+
+from mjlab.envs import mdp as envs_mdp
+from mjlab.managers import ManagerTermBase
+from mjlab.managers.scene_entity_config import SceneEntityCfg
 
 from alldog_mjlab.robots.wolf.wolf_constants import (
     WOLF_LEG_JOINT_NAMES,
     WOLF_LEG_ORDER,
 )
+
+if TYPE_CHECKING:
+    from mjlab.entity import Entity
+    from mjlab.envs import ManagerBasedRlEnv
+
+_DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
+
+# rough base-height footprint：Black rough 已验证的中央 7 x 5 = 35 条 ray
+# （x ∈ [-0.3, 0.3]、y ∈ [-0.2, 0.2]）；边界值来自 WOLF_CONFIG.terrain 的
+# footprint 参数（Wolf 层配置，数值当前与 Black 相同）。
+_FOOTPRINT_TOLERANCE = 1e-4
+
+
+def track_linear_velocity_xy(
+    env: ManagerBasedRlEnv,
+    sigma: float,
+    command_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """只跟踪 commanded planar 线速度的指数奖励。
+
+    ``reward = exp(-Σ(v_cmd_xy - v_xy)² / sigma)``，body-frame root 线速度，
+    竖直分量不参与。``sigma`` 即 legacy ``tracking_sigma``。
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    assert command is not None, f"Command '{command_name}' not found."
+    actual = asset.data.root_link_lin_vel_b
+    error = torch.sum(torch.square(command[:, :2] - actual[:, :2]), dim=1)
+    return torch.exp(-error / sigma)
+
+
+def track_angular_velocity_z(
+    env: ManagerBasedRlEnv,
+    sigma: float,
+    command_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """只跟踪 commanded yaw 角速度的指数奖励。
+
+    ``reward = exp(-(w_cmd_z - w_z)² / sigma)``，body-frame root 角速度。
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    assert command is not None, f"Command '{command_name}' not found."
+    actual = asset.data.root_link_ang_vel_b
+    error = torch.square(command[:, 2] - actual[:, 2])
+    return torch.exp(-error / sigma)
+
+
+def vertical_linear_velocity_l2(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """惩罚 body-frame root 竖直线速度：``v_z²``。"""
+    asset: Entity = env.scene[asset_cfg.name]
+    return torch.square(asset.data.root_link_lin_vel_b[:, 2])
+
+
+def angular_velocity_xy_l2(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """惩罚 body-frame root 的 roll / pitch 角速度：``ω_x² + ω_y²``。
+
+    MjLab native ``body_angular_velocity_penalty`` 读 world-frame body 角速度，
+    与 body-frame root 角速度不是同一 contract，因此单独实现。
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    angular_velocity_xy = asset.data.root_link_ang_vel_b[:, :2]
+    return torch.sum(torch.square(angular_velocity_xy), dim=1)
+
+
+def base_height_l2_flat(
+    env: ManagerBasedRlEnv,
+    target_height: float,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """惩罚 root 高度偏离期望值：``(root_link_pos_w.z - target_height)²``（flat）。
+
+    flat 任务的地面是 world z = 0 的 plane，world z 即离地高度，不需要地形采样。
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    base_height = asset.data.root_link_pos_w[:, 2]
+    return torch.square(base_height - target_height)
+
+
+class base_height_l2_terrain(ManagerTermBase):
+    """rough task 的 local terrain-relative root 高度 L2。
+
+    native ``height_scan()`` 的 raw 输出是每条 ray 的局部离地高度
+    （frame z - terrain hit z），因此 base height 取 footprint 内 ray 的均值：
+    ``reward = (mean(raw_footprint) - target_height)²``。与
+    ``base_height_l2_flat`` 的唯一差别是测量方式（world z vs local clearance），
+    kernel / target / weight 均相同。
+
+    footprint = native ``terrain_scan`` 中央 7 x 5 = 35 条 ray（x 半宽 0.3 m /
+    y 半长 0.2 m，来自 WOLF_CONFIG.terrain 的 footprint 参数）；索引在
+    ``__init__`` 从 sensor pattern 的真实 offsets 推导，不手写 magic indices。
+    """
+
+    _NUM_RAYS = 35  # 7 x 5
+
+    def __init__(self, cfg, env: "ManagerBasedRlEnv") -> None:
+        from alldog_mjlab.tasks.velocity.wolf.wolf_config import WOLF_CONFIG
+
+        super().__init__(env)
+        sensor_name: str = cfg.params["sensor_name"]
+        footprint_x = WOLF_CONFIG.terrain.base_height_footprint_x
+        footprint_y = WOLF_CONFIG.terrain.base_height_footprint_y
+        pattern = env.scene[sensor_name].cfg.pattern
+        offsets, _ = pattern.generate_rays(None, str(self.device))
+        mask = (offsets[:, 0].abs() <= footprint_x + _FOOTPRINT_TOLERANCE) & (
+            offsets[:, 1].abs() <= footprint_y + _FOOTPRINT_TOLERANCE
+        )
+        self._indices = mask.nonzero(as_tuple=False).squeeze(-1)
+        selected = offsets[self._indices]
+        assert selected.shape[0] == self._NUM_RAYS, selected.shape
+        assert (
+            abs(float(selected[:, 0].abs().max()) - footprint_x)
+            <= _FOOTPRINT_TOLERANCE
+        ), float(selected[:, 0].abs().max())
+        assert (
+            abs(float(selected[:, 1].abs().max()) - footprint_y)
+            <= _FOOTPRINT_TOLERANCE
+        ), float(selected[:, 1].abs().max())
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        target_height: float,
+        sensor_name: str,
+        **kwargs: Any,
+    ) -> torch.Tensor:
+        del kwargs  # footprint 索引已在 __init__ 中解析。
+        raw_scan = envs_mdp.height_scan(env, sensor_name=sensor_name)
+        base_height = raw_scan[:, self._indices].mean(dim=1)
+        return torch.square(base_height - target_height)
 
 # ---------------------------------------------------------------------------
 # 16-D raw action 通道分组 contract。

@@ -174,7 +174,8 @@ uv run export --task-id black-rough-him
 
 ### Wolf 训练
 
-Wolf 轮足机器人（16 执行器：12 腿关节 + 4 轮）已注册平地任务：
+Wolf 轮足机器人（16 执行器：12 腿关节 + 4 轮）已注册平地与复杂地形任务
+（任务实现完全独立，不依赖 Black 任务代码）：
 
 ~~~bash
 # 从随机初始化训练 wolf flat PPO
@@ -191,6 +192,14 @@ uv run train wolf-flat-him \
 # 继续 wolf flat PPO / HIM
 uv run train wolf-flat --agent.resume True
 
+# wolf-flat PPO 续训 wolf rough（模型/optimizer 恢复；速度课程 range 保留）
+uv run train wolf-rough --agent.resume True \
+    --agent.load-run '.*_wolf_flat$'
+
+# wolf-flat HIM 继续 wolf rough HIM（HIM full resume；速度课程 range 保留）
+uv run train wolf-rough-him --agent.resume True \
+    --agent.load-run '.*_wolf_flat_him$'
+
 # 导出（PPO：[1,53]→[1,16]；HIM：[1,318]→[1,16]）
 uv run export --task-id wolf-flat
 uv run export --task-id wolf-flat-him
@@ -200,7 +209,9 @@ uv run export --task-id wolf-flat-him
 `q_target = q_default + 0.20*raw`，轮 `dq_target = sign*10*raw`
 （符号 FL +1 / FR -1 / RL +1 / RR -1，正值 = 机身前进）。HIM actor 输入为
 6 × 53 历史（部署侧 newest→oldest 展平 318 维）。速度指令由性能驱动课程从
-±1 m/s 扩展到 ±4 m/s。长期训练收敛评估尚未进行。
+±1 m/s 扩展到 ±4 m/s。wolf-rough 复用 flat 的完整 observation/action 契约
+（actor 53-D / critic 56-D，无高度图输入），仅地形、地形课程、base_height
+测量方式与越界截断不同。rough 训练收敛与曲线质量评估尚未进行。
 
 ## Tasks
 
@@ -212,8 +223,10 @@ uv run export --task-id wolf-flat-him
 | `black-rough-him` | HIM / PPO | 复杂地形、历史观测与环境估计 | 续训链路已实现，长期效果待评估 |
 | `wolf-flat` | PPO | 平地速度跟踪（轮足） | 训练链路已实现，长期效果待评估 |
 | `wolf-flat-him` | HIM / PPO | 平地速度跟踪（轮足、历史观测与环境估计） | 训练链路已实现，长期效果待评估 |
+| `wolf-rough` | PPO | 复杂地形速度跟踪（轮足，flat 契约续训） | 已注册，训练效果评估未开始 |
+| `wolf-rough-him` | HIM / PPO | 复杂地形（轮足、历史观测与环境估计） | 已注册，训练效果评估未开始 |
 
-Black 四个任务共享 Black 的机器人模型和底层控制配置。flat 与 rough 的主要差异在地形、地形课程和相应奖励/终止设置；普通 PPO 与 HIM 使用不同的 actor 输入契约。Wolf 两个任务共享 Wolf 的机器人资产（IMU 原生观测）与轮足执行器契约，速度指令范围与 Black 独立。
+Black 四个任务共享 Black 的机器人模型和底层控制配置。flat 与 rough 的主要差异在地形、地形课程和相应奖励/终止设置；普通 PPO 与 HIM 使用不同的 actor 输入契约。Wolf 四个任务共享 Wolf 的机器人资产（IMU 原生观测）与轮足执行器契约，速度指令范围与 Black 独立，且不依赖 Black 任务代码（两套任务实现完全独立）。
 
 ## Configuration
 
@@ -227,7 +240,8 @@ src/alldog_mjlab/
 ├── tasks/
 │   └── velocity/
 │       ├── black/        环境组装、奖励、观测、动作、地形与训练配置
-│       └── wolf/         轮足机器人平地任务（wolf_config.py 为参数入口）
+│       └── wolf/         轮足机器人平地/复杂地形任务（wolf_config.py 为参数入口；
+│                            实现 task local，不依赖 black/）
 ├── algorithms/
 │   └── him/              HIM estimator、policy、storage 与 PPO 更新
 └── utils/                策略导出等工具

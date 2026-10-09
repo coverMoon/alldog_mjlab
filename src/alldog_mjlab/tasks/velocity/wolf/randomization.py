@@ -10,7 +10,8 @@
   geom，并把地面 geom 切向摩擦压到 0，使 pair 合成结果完全由机器人 geom 决定；
   实际 wheel-ground contact 摩擦因此可完整覆盖配置采样范围（含 < 1.0 段），
   且摩擦乘子读前序 ground_friction 事件写入的当前值再乘 per-env 共享乘子
-  （event dict 顺序 = 应用顺序）。仅支持 plane terrain（Wolf flat）。
+  （event dict 顺序 = 应用顺序）。地面 geom 选择由 caller 传入：flat plane 为
+  单个 ``terrain`` geom，rough generator 为全部 patch geom（压 0 语义对两者一致）。
 - 执行器：保留 IdealPdActuator 控制律，Kp/Kd/motor strength 组合缩放通过
   ``set_gains`` 相对 default 建立；轮子 Kp 恒为 0，任何缩放都不会引入
   position stiffness。
@@ -70,11 +71,19 @@ def _press_terrain_friction(
 
     MuJoCo contact 摩擦 = max(geom1, geom2)：地面默认 1.0 会把 pair 合成结果
     抬高下限（采样值 < 1.0 被吞掉）。压 0 后合成结果完全由机器人 geom 决定，
-    wheel-ground contact 摩擦可完整覆盖配置采样范围与乘子组合。仅支持
-    plane terrain（Wolf flat）。
+    wheel-ground contact 摩擦可完整覆盖配置采样范围与乘子组合。地形选择由
+    caller 传入（flat plane 为单个 ``terrain`` geom；rough generator 为全部
+    patch geom，``geom_names=(".*",)`）；选择器匹配不到 geom 时 fail-loud
+    （不允许摩擦 DR 已启用但实际没有生效）。
     """
     terrain = env.scene[terrain_cfg.name]
     env_grid, geom_grid = _resolve_geom_grid(env, terrain, terrain_cfg, env_ids)
+    if geom_grid.numel() == 0:
+        raise ValueError(
+            f"terrain friction selector matched no geoms for entity "
+            f"{terrain_cfg.name!r} (geom_names={terrain_cfg.geom_names}); "
+            "摩擦 DR 将不会生效，禁止静默无效"
+        )
     env.sim.model.geom_friction[env_grid, geom_grid, 0] = 0.0
 
 def _resolve_geom_grid(

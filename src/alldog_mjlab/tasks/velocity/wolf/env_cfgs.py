@@ -1,19 +1,25 @@
-"""Wolf flat velocity task 的 MjLab task assembly（结构对应 black/env_cfgs.py）。
+"""Wolf velocity task 的 MjLab task assembly（flat / rough 共用；task local）。
 
 term 顺序 contract、selector 绑定、sensor 装配都显式写在本文件；训练数值在
-wolf_config.py，reward 数学复用 black/rewards.py（机器人无关），Wolf 专属的
-sign / 16-D action 分组逻辑在本任务的 observations.py / rewards.py。
+wolf_config.py，reward 数学在本任务的 rewards.py（与 black/rewards.py 公式独立
+同构，不 import），16-D action 分组逻辑在本任务的 observations.py / rewards.py。
 
 与 Black task 的关键结构差异：
 - actor 角速度 / 投影重力来自 Wolf XML 原生 IMU sensor（robot/imu_*，§27.5）；
 - action 为 8 个原生 action term 的交错拼接（每腿 3 pos + 1 wheel，共 16 维）；
 - wheel 有独立 obs / reward 通道；
-- 终止只有 time_out + base_link 非法接触（无倾角 / 无 stuck）；play 下移除非法接触；
-- 无 DR 事件、无 terrain generator / curriculum（flat plane，nominal dynamics）。
+- critic 56 维（flat / rough 共用），**不含** height_scan（与 Black critic 追加
+  187 维不同；Wolf rough 不给 actor / critic 新增高度图输入，保持 checkpoint
+  shape 跨地形兼容）；terrain 扫描仅服务 rough 的 base_height reward；
+- 终止：time_out + base_link 非法接触 + rough 的 out_of_terrain_bounds
+  （无倾角 / 无 stuck）；play 下移除非法接触与越界终止；
+- flat = plane terrain + 无 terrain curriculum；rough = generator terrain +
+  native terrain_levels_vel + Wolf 性能驱动 command curriculum；
+- flat / rough 共用全部机器人专科 / action / observation / reset / DR 契约。
 """
 
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs import mdp as envs_mdp
@@ -28,7 +34,7 @@ from mjlab.managers import (
     TerminationTermCfg,
 )
 from mjlab.managers.scene_entity_config import SceneEntityCfg
-from mjlab.sensor import ContactMatch, ContactSensorCfg
+from mjlab.sensor import ContactMatch, ContactSensorCfg, GridPatternCfg, ObjRef, RayCastSensorCfg
 from mjlab.tasks.velocity import mdp
 from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
@@ -44,21 +50,25 @@ from alldog_mjlab.robots.wolf.wolf_constants import (
     WOLF_WHEEL_JOINT_NAMES,
     WOLF_WHEEL_RADIUS,
 )
-from alldog_mjlab.tasks.velocity.black.curriculums import (
+from alldog_mjlab.tasks.velocity.wolf.curriculums import (
     CURRICULUM_TERM_NAME,
-    ForwardSpeedCommandCurriculum,
+    WolfForwardSpeedCommandCurriculum,
 )
-from alldog_mjlab.tasks.velocity.black.him import (
+from alldog_mjlab.tasks.velocity.wolf.him import (
     configure_him_observations,
     configure_him_terminal_targets,
 )
-from alldog_mjlab.tasks.velocity.black.rewards import (
+from alldog_mjlab.tasks.velocity.wolf.rewards import (
     angular_velocity_xy_l2,
     base_height_l2_flat,
+    base_height_l2_terrain,
+    leg_action_rate_l2,
     track_angular_velocity_z,
     track_linear_velocity_xy,
     vertical_linear_velocity_l2,
+    wheel_action_rate_l2,
 )
+from alldog_mjlab.tasks.velocity.wolf.terrain import wolf_rough_terrain_generator_cfg
 from alldog_mjlab.tasks.velocity.wolf.randomization import (
     CalfBacklashPositionActionCfg,
     ScaledBiasedWheelVelocityActionCfg,
@@ -72,10 +82,6 @@ from alldog_mjlab.tasks.velocity.wolf.randomization import (
     reset_joints_by_default_scale,
 )
 from alldog_mjlab.tasks.velocity.wolf.observations import signed_wheel_velocity
-from alldog_mjlab.tasks.velocity.wolf.rewards import (
-    leg_action_rate_l2,
-    wheel_action_rate_l2,
-)
 from alldog_mjlab.tasks.velocity.wolf.wolf_config import (
     WOLF_CONFIG,
     DomainRandomizationParams,
@@ -150,6 +156,15 @@ _WOLF_ACTOR_TERM_NOISE = {
 
 # 非法接触终止 sensor 身份：illegal_contact_bodies（config 可配）对 terrain。
 WOLF_ILLEGAL_CONTACT_SENSOR = "illegal_ground_contact"
+
+# rough terrain scan sensor 身份 contract（只存在于 rough 任务）：MjLab v1.6
+# 原生 RayCastSensorCfg，17 x 11 = 187 rays，ray yaw 对齐，仅碰撞 group 0（terrain）。
+# raw clearance 语义由 native ``envs_mdp.height_scan`` 提供（frame z - hit z）。
+# flat 不注册该 sensor。
+WOLF_TERRAIN_SCAN_SENSOR = "terrain_scan"
+
+# rough terrain curriculum 的注册名（native ``terrain_levels_vel``；仅 rough train）。
+WOLF_TERRAIN_CURRICULUM_TERM = "terrain_levels"
 
 # Command term 名称（task wiring：reward / termination / curriculum 都按名取它）。
 WOLF_COMMAND_NAME = "twist"
@@ -229,12 +244,13 @@ def _wolf_robot_cfg(dr: DomainRandomizationParams) -> "EntityCfg":
 
 
 def _configure_scene_and_sensors(
-    cfg: ManagerBasedRlEnvCfg, dr: DomainRandomizationParams
+    cfg: ManagerBasedRlEnvCfg, dr: DomainRandomizationParams, rough: bool
 ) -> None:
-    """robot entity 与非法接触 sensor 装配；移除 baseline 的 terrain / foot 传感器。
+    """robot entity 与 sensor 装配；移除 baseline 的 terrain / foot 传感器。
 
     Wolf 用不到 foot site / height scan：轮足结构没有足端摆动相概念，flat plane 的
-    base height reward 直接读 world z，critic 也不需要 terrain height。
+    base height reward 直接读 world z，critic 也不需要 terrain height。rough 用
+    Wolf 自己的 terrain_scan（等价 flat/rough 共用 sensor 的处理，按后重建）。
     DR 的 actuator delay 在 robot cfg 层注入（见 _wolf_robot_cfg）。
     """
     cfg.scene.entities = {"robot": _wolf_robot_cfg(dr)}
@@ -243,6 +259,8 @@ def _configure_scene_and_sensors(
         for sensor in (cfg.scene.sensors or ())
         if sensor.name not in ("foot_height_scan", "terrain_scan")
     )
+    if rough:
+        _configure_rough_terrain_scan(cfg)
 
     illegal_ground_contact = ContactSensorCfg(
         name=WOLF_ILLEGAL_CONTACT_SENSOR,
@@ -339,7 +357,7 @@ def _configure_actions(
 
 
 def _configure_events(
-    cfg: ManagerBasedRlEnvCfg, dr: DomainRandomizationParams
+    cfg: ManagerBasedRlEnvCfg, dr: DomainRandomizationParams, rough: bool
 ) -> None:
     """Reset contract + DR event contract（dict 顺序 = 同 mode 内应用顺序）。
 
@@ -408,20 +426,39 @@ def _configure_events(
         "reset_base": reset_base,
         **leg_resets,
         "reset_wheel_joints": wheel_reset,
-        **_dr_event_terms(dr),
+        **_dr_event_terms(dr, rough),
     }
     # baseline 的 push / foot_friction / encoder_bias / base_com DR 事件全部不注册
     # （Wolf DR 事件统一在 _dr_event_terms 中显式构造）。
 
 
-def _configure_rewards(cfg: ManagerBasedRlEnvCfg) -> None:
-    """Wolf flat v1 reward baseline：显式 8 项（dict 顺序即 logging 顺序）。
+def _configure_rewards(cfg: ManagerBasedRlEnvCfg, rough: bool) -> None:
+    """Wolf reward baseline：显式 8 项（dict 顺序即 logging 顺序）；flat / rough 共用。
 
-    tracking / lin_vel_z / body_ang_vel / orientation / base_height 复用 Black
-    已验证实现（HIMLoco 公式，机器人无关）；action rate 按显式 16-D contract 的
-    leg / wheel 分组（wolf/rewards.py，见 WOLF_ACTION_TERM_ORDER 的块布局推导）。
+    tracking / 罚项 / base_height 公式在本任务 rewards.py（与 black/rewards.py 公式
+    独立同构，不 import）；action rate 按显式 16-D contract 的 leg / wheel 分组。
+    rough 只把 ``base_height`` 换成 local terrain-relative 语义（仅 func / params；
+    key / weight / 顺序不变，高度目标仍读 WOLF_CONFIG.reward.base_height_target）。
     不加入 run_still / 固定步态 / 强制轮地接触等限制高速轮足混合的项。
     """
+    base_height_term = (
+        RewardTermCfg(
+            func=base_height_l2_terrain,
+            weight=WOLF_CONFIG.reward.scales.base_height,
+            params={
+                "target_height": WOLF_CONFIG.reward.base_height_target,
+                "sensor_name": WOLF_TERRAIN_SCAN_SENSOR,
+            },
+        )
+        if rough
+        else RewardTermCfg(
+            func=base_height_l2_flat,
+            weight=WOLF_CONFIG.reward.scales.base_height,
+            params={
+                "target_height": WOLF_CONFIG.reward.base_height_target,
+            },
+        )
+    )
     cfg.rewards = {
         "track_linear_velocity": RewardTermCfg(
             func=track_linear_velocity_xy,
@@ -452,13 +489,7 @@ def _configure_rewards(cfg: ManagerBasedRlEnvCfg) -> None:
             func=mdp.flat_orientation_l2,
             weight=WOLF_CONFIG.reward.scales.orientation,
         ),
-        "base_height": RewardTermCfg(
-            func=base_height_l2_flat,
-            weight=WOLF_CONFIG.reward.scales.base_height,
-            params={
-                "target_height": WOLF_CONFIG.reward.base_height_target,
-            },
-        ),
+        "base_height": base_height_term,
         "leg_action_rate": RewardTermCfg(
             func=leg_action_rate_l2,
             weight=WOLF_CONFIG.reward.scales.leg_action_rate,
@@ -476,7 +507,44 @@ def _configure_flat_terrain(cfg: ManagerBasedRlEnvCfg) -> None:
     assert cfg.scene.terrain is not None
     cfg.scene.terrain.terrain_type = "plane"
     cfg.scene.terrain.terrain_generator = None
-    cfg.curriculum.pop("terrain_levels", None)
+    cfg.curriculum.pop(WOLF_TERRAIN_CURRICULUM_TERM, None)
+
+
+def _configure_rough_terrain(cfg: ManagerBasedRlEnvCfg) -> None:
+    """rough task specialization：curriculum terrain generator（一个 terrain 一列）。
+
+    generator 内部 ``curriculum=True``，因此列数 = terrain 类型数（7），
+    ``proportion`` 是 env 分配权重。terrain curriculum（``terrain_levels_vel``）
+    的注册在 builder 的 curriculum 阶段处理（仅 rough train）。
+    """
+    assert cfg.scene.terrain is not None
+    cfg.scene.terrain.terrain_type = "generator"
+    cfg.scene.terrain.terrain_generator = wolf_rough_terrain_generator_cfg()
+    cfg.scene.terrain.max_init_terrain_level = (
+        WOLF_CONFIG.terrain.max_init_terrain_level
+    )
+
+
+def _configure_rough_terrain_scan(cfg: ManagerBasedRlEnvCfg) -> None:
+    """rough 专用 native RayCastSensorCfg：base_link frame、yaw 对齐、187 rays。
+
+    flat 不注册该 sensor（不增加不必要的地形传感器）。数值来自 WOLF_CONFIG.terrain
+    的 sensor 参数（当前与 MjLab velocity baseline / Black rough 的 terrain_scan
+    同值）。raw clearance 语义由 native ``envs_mdp.height_scan`` 提供，本文件不做
+    二次包装（base_height reward 直接消费 ``base_height_l2_terrain``）。
+    """
+    t = WOLF_CONFIG.terrain
+    sensor = RayCastSensorCfg(
+        name=WOLF_TERRAIN_SCAN_SENSOR,
+        frame=ObjRef(type="body", name="base_link", entity="robot"),
+        ray_alignment="yaw",
+        pattern=GridPatternCfg(size=t.terrain_scan_size, resolution=t.terrain_scan_resolution),
+        max_distance=t.terrain_scan_max_distance,
+        exclude_parent_body=True,
+        include_geom_groups=(0,),  #Terrain only.
+        debug_vis=True,
+    )
+    cfg.scene.sensors = (cfg.scene.sensors or ()) + (sensor,)
 
 
 def _wheel_vel_term_cfg(dr: DomainRandomizationParams) -> ObservationTermCfg:
@@ -605,14 +673,20 @@ def _configure_observations(
     cfg.observations["critic"].enable_corruption = False
 
 
-def _configure_terminations(cfg: ManagerBasedRlEnvCfg) -> None:
+def _configure_terminations(cfg: ManagerBasedRlEnvCfg, rough: bool) -> None:
     """终止 contract：time_out + illegal_contact（base_link 对 terrain）。
 
-    baseline 的 fell_over（倾角终止）与 out_of_terrain_bounds 显式移除；stuck
-    termination 本轮不注册。
+    baseline 的 fell_over（倾角终止）显式移除；stuck termination 本轮不注册。
+    rough 追加 native ``out_of_terrain_bounds``（time_out=True：有限生成地形边界的
+    人工截断，不是机器人 physical failure，由 PPO 做 value bootstrap）；flat 不注册。
     """
-    cfg.terminations.pop("fell_over", None)
     cfg.terminations.pop("out_of_terrain_bounds", None)
+    if rough:
+        cfg.terminations["out_of_terrain_bounds"] = TerminationTermCfg(
+            func=mdp.out_of_terrain_bounds,
+            time_out=True,
+        )
+    cfg.terminations.pop("fell_over", None)
     cfg.terminations["illegal_contact"] = TerminationTermCfg(
         func=mdp.illegal_contact,
         params={
@@ -622,7 +696,9 @@ def _configure_terminations(cfg: ManagerBasedRlEnvCfg) -> None:
     )
 
 
-def _dr_event_terms(dr: DomainRandomizationParams) -> dict[str, EventTermCfg]:
+def _dr_event_terms(
+    dr: DomainRandomizationParams, rough: bool
+) -> dict[str, EventTermCfg]:
     """Wolf DR 事件表（仅显式开启的项注册；dict 顺序 = 同 mode 内应用顺序）。
 
     顺序敏感点：
@@ -637,8 +713,15 @@ def _dr_event_terms(dr: DomainRandomizationParams) -> dict[str, EventTermCfg]:
     wheel_geoms = SceneEntityCfg(
         "robot", geom_names=WOLF_WHEEL_COLLISION_GEOM_NAMES, preserve_order=True
     )
-    # 地面 geom（plane terrain 的碰撞平面；摩擦事件把它压 0，见 randomization 模块）。
-    ground_plane_geoms = SceneEntityCfg("terrain", geom_names=("terrain",))
+    # 地面 geom（terrain 实体的碰撞 geom；摩擦事件把它们压 0，见 randomization 模块）。
+    # flat plane 是单个命名 "terrain" 的 geom；rough generator 的全部 patch geom
+    # （含未命名 hfield / box）用 ".*" 显式选中；geom 选择由 randomization 侧
+    # fail-loud 防空（ selector 无匹配时报错，不允许静默无效 DR）。
+    terrain_geoms = (
+        SceneEntityCfg("terrain", geom_names=(".*",))
+        if rough
+        else SceneEntityCfg("terrain", geom_names=("terrain",))
+    )
     base_body = SceneEntityCfg("robot", body_names=("base_link",))
     wheel_bodies = SceneEntityCfg(
         "robot", body_names=tuple(f"{leg}_Link4" for leg in WOLF_LEG_ORDER)
@@ -669,7 +752,7 @@ def _dr_event_terms(dr: DomainRandomizationParams) -> dict[str, EventTermCfg]:
             mode="reset",
             params={
                 "asset_cfg": all_collision_geoms,
-                "terrain_cfg": ground_plane_geoms,
+                "terrain_cfg": terrain_geoms,
                 "friction_range": dr.ground_friction_range,
             },
         )
@@ -680,7 +763,7 @@ def _dr_event_terms(dr: DomainRandomizationParams) -> dict[str, EventTermCfg]:
             params={
                 "scale_range": dr.wheel_friction_scale_range,
                 "asset_cfg": wheel_geoms,
-                "terrain_cfg": ground_plane_geoms,
+                "terrain_cfg": terrain_geoms,
                 "from_current_base": dr.ground_friction_enabled,
             },
         )
@@ -825,7 +908,7 @@ def _dr_event_terms(dr: DomainRandomizationParams) -> dict[str, EventTermCfg]:
     return terms
 
 
-def _configure_common_runtime(cfg: ManagerBasedRlEnvCfg, *, play: bool) -> None:
+def _configure_common_runtime(cfg: ManagerBasedRlEnvCfg, *, play: bool, rough: bool = False) -> None:
     """task 级通用字段：env 数、episode 长度、physics dt、sim capacity、viewer。"""
     cfg.scene.num_envs = (
         WOLF_CONFIG.env.play_num_envs if play else WOLF_CONFIG.env.train_num_envs
@@ -834,31 +917,50 @@ def _configure_common_runtime(cfg: ManagerBasedRlEnvCfg, *, play: bool) -> None:
     cfg.decimation = WOLF_CONFIG.control.decimation
     cfg.sim.mujoco.timestep = WOLF_CONFIG.control.physics_dt
     # MJWarp per-world capacity（与 Black 同源的候选值，见 wolf_config.SimulationParams）。
-    cfg.sim.nconmax = WOLF_CONFIG.simulation.nconmax
-    cfg.sim.njmax = WOLF_CONFIG.simulation.njmax
+    # rough generator 模板 spawn 状态 contact 数高于 plane（>=178），用 rough_nconmax。
+    cfg.sim.nconmax = WOLF_CONFIG.simulation.rough_nconmax if rough else WOLF_CONFIG.simulation.nconmax
+    cfg.sim.njmax = WOLF_CONFIG.simulation.rough_njmax if rough else WOLF_CONFIG.simulation.njmax
     cfg.viewer.body_name = "base_link"
     cfg.viewer.distance = 1.8
     cfg.viewer.elevation = -10.0
 
 
-def _configure_command_curriculum(cfg: ManagerBasedRlEnvCfg) -> None:
-    """性能驱动 forward-speed command curriculum（仅 train；stage = flat）。
+def _configure_command_curriculum(
+    cfg: ManagerBasedRlEnvCfg, stage: Literal["flat", "rough"]
+) -> None:
+    """性能驱动 forward-speed command curriculum（仅 train；stage = flat | rough）。
 
-    与 Black 同一 CurriculumTerm 实现（curriculums.py），数值全部由 WOLF_CONFIG
+    Wolf 本地 CurriculumTerm 实现（curriculums.py），数值全部由 WOLF_CONFIG
     注入（含 max_abs_vx=4.0），不从 BLACK_CONFIG 读取；`robot` / `stage` 元数据
-    用于 checkpoint restore 的 provenance 判定（跨 robot 拒绝恢复）。
+    用于 checkpoint restore 的 provenance / restore mode 判定（跨 robot 拒绝恢复；
+    flat→rough 跨 stage 用 range 恢复）。
     """
     cc = WOLF_CONFIG.command.command_curriculum
     cc.validate()
+    if not cc.enabled:
+        return
     cfg.curriculum[CURRICULUM_TERM_NAME] = CurriculumTermCfg(
-        func=ForwardSpeedCommandCurriculum,
+        func=WolfForwardSpeedCommandCurriculum,
         params={
             "command_name": WOLF_COMMAND_NAME,
             "reward_term_name": WOLF_TRACKING_VELOCITY_REWARD_TERM,
-            "stage": "flat",
+            "stage": stage,
             "robot": "wolf",
             "curriculum_params": cc,
         },
+    )
+
+
+def _configure_terrain_curriculum(cfg: ManagerBasedRlEnvCfg) -> None:
+    """rough train 启用 terrain curriculum（native ``terrain_levels_vel``）。
+
+    难度推进 / 回退公式由 MjLab native 实现（walked distance 与 commanded velocity
+    对比）；command curriculum 由 ``_configure_command_curriculum()`` 在其上追加
+    （不覆盖；flat 不注册本 term）。
+    """
+    cfg.curriculum[WOLF_TERRAIN_CURRICULUM_TERM] = CurriculumTermCfg(
+        func=mdp.terrain_levels_vel,
+        params={"command_name": WOLF_COMMAND_NAME},
     )
 
 
@@ -870,6 +972,8 @@ def _configure_play(cfg: ManagerBasedRlEnvCfg) -> None:
     cfg.episode_length_s = int(1e9)
     cfg.observations["actor"].enable_corruption = False
     cfg.terminations.pop("illegal_contact", None)
+    # 越界终止仅在 rough 注册；play 下按 Black rough 处理同样移除。
+    cfg.terminations.pop("out_of_terrain_bounds", None)
     cfg.curriculum = {}
     for name in [k for k in cfg.events if k.startswith("dr_")]:
         cfg.events.pop(name, None)
@@ -877,9 +981,16 @@ def _configure_play(cfg: ManagerBasedRlEnvCfg) -> None:
 
 def _build_wolf_env_cfg(
     play: bool,
+    rough: bool,
     dr: DomainRandomizationParams | None = None,
 ) -> ManagerBasedRlEnvCfg:
-    """Wolf flat 任务的完整装配路径（train 含 command curriculum，play 干净）。
+    """Wolf flat / rough 共用装配路径（二者只差 terrain 语义等任务特化）。
+
+    顺序：command / scene+sensors（rough 追加 terrain_scan）/ actions / events /
+    rewards（rough 换 base_height 测量方式）→ flat 或 rough terrain →
+    observations → terminations（rough 追加 out_of_terrain_bounds）→
+    common runtime → curriculum（rough train：terrain_levels + command；
+    flat train：command；play：两者都没有）→ play。
 
     play 模式强制无 DR（nominal dynamics）；train 的 DR 默认取 WOLF_CONFIG.dr
     （DomainRandomizationParams，默认全关），也可显式传入（供 minimal 等
@@ -894,16 +1005,22 @@ def _build_wolf_env_cfg(
         dr.validate()
 
     _configure_command(cfg)
-    _configure_scene_and_sensors(cfg, dr)
+    _configure_scene_and_sensors(cfg, dr, rough)
     _configure_actions(cfg, dr)
-    _configure_events(cfg, dr)
-    _configure_rewards(cfg)
-    _configure_flat_terrain(cfg)
+    _configure_events(cfg, dr, rough)
+    _configure_rewards(cfg, rough)
+    if rough:
+        _configure_rough_terrain(cfg)
+    else:
+        _configure_flat_terrain(cfg)
     _configure_observations(cfg, dr)
-    _configure_terminations(cfg)
-    _configure_common_runtime(cfg, play=play)
+    _configure_terminations(cfg, rough)
+    _configure_common_runtime(cfg, play=play, rough=rough)
+    stage = "rough" if rough else "flat"
     if not play:
-        _configure_command_curriculum(cfg)
+        if rough:
+            _configure_terrain_curriculum(cfg)
+        _configure_command_curriculum(cfg, stage)
     if play:
         _configure_play(cfg)
 
@@ -919,24 +1036,54 @@ def wolf_flat_env_cfg(
     actor 53 维单帧；critic 56 维；terrain 为 plane；DR 默认取 WOLF_CONFIG.dr
     （全关 = nominal dynamics）。
     """
-    return _build_wolf_env_cfg(play=play, dr=dr)
+    return _build_wolf_env_cfg(play=play, rough=False, dr=dr)
+
+
+def wolf_rough_env_cfg(
+    play: bool = False,
+    dr: DomainRandomizationParams | None = None,
+) -> ManagerBasedRlEnvCfg:
+    """Wolf rough-terrain PPO task（flat contract + rough terrain 语义）。
+
+    actor 仍为 53 维单帧、critic 仍为 56 维（不含 height_scan，与 flat 完全同 shape，
+    保证 flat→rough 续训直接复用 checkpoint 网络）；差异仅在：terrain generator
+    （7 类 / 10 行）、base_height reward 改用 terrain_scan 中央 35 rays clearance、
+    增加 out_of_terrain_bounds 截断、train 开启 terrain_levels_vel + command
+    curriculum（stage=rough）。play 保留 generator 布局供策略回放，移除非法接触 /
+    越界终止。
+
+    DR 默认取 WOLF_CONFIG.dr（全关 = nominal dynamics）；rough 下摩擦 DR 的
+    地面 geom 选择为 generator 全部 patch geom（见 _dr_event_terms）。
+    """
+    return _build_wolf_env_cfg(play=play, rough=True, dr=dr)
 
 
 def wolf_flat_him_env_cfg(
     play: bool = False,
     dr: DomainRandomizationParams | None = None,
 ) -> ManagerBasedRlEnvCfg:
-    """``wolf-flat`` + HIM observation / history / terminal contract（复用 black/him.py）。
+    """``wolf-flat`` + HIM observation / history / terminal contract（wolf/him.py）。
 
     与 ``wolf_flat_env_cfg`` 的 reward / command / reset / action / termination /
-    terrain / robot 完全相同，只增量应用 HIM 契约（black/him.py 为机器人无关实现，
-    group 名与 terminal extras key 均为 HIM 算法接口 contract）：
+    terrain / robot 完全相同，只增量应用 HIM 契约（wolf/him.py，group 名与
+    terminal extras key 均为 HIM 算法接口 contract）：
 
     - actor group 打开 MjLab 原生 history（``[B, 6, 53]``，oldest → newest）；
     - 新增 ``estimator_velocity`` group（``[B, 3]``，scaled true base lin vel）；
     - 注册 terminal successor target recorder。
     """
     cfg = wolf_flat_env_cfg(play=play, dr=dr)
+    configure_him_observations(cfg)
+    configure_him_terminal_targets(cfg)
+    return cfg
+
+
+def wolf_rough_him_env_cfg(
+    play: bool = False,
+    dr: DomainRandomizationParams | None = None,
+) -> ManagerBasedRlEnvCfg:
+    """``wolf-rough`` + HIM observation / history / terminal contract（同 flat HIM）。"""
+    cfg = wolf_rough_env_cfg(play=play, dr=dr)
     configure_him_observations(cfg)
     configure_him_terminal_targets(cfg)
     return cfg

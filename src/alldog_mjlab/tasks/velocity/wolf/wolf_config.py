@@ -12,9 +12,80 @@ from dataclasses import dataclass, field
 from typing import Literal
 import math
 
-from alldog_mjlab.tasks.velocity.black.black_config import (
-    CommandCurriculumParams,
-)
+
+def _check_probabilities(proportions: dict[str, float], expected_keys: tuple[str, ...]) -> None:
+    if set(proportions) != set(expected_keys):
+        raise ValueError(
+            f"terrain proportions keys must be {sorted(expected_keys)}, "
+            f"got {sorted(proportions)}"
+        )
+    if any(not math.isfinite(v) or v < 0 for v in proportions.values()):
+        raise ValueError("terrain proportions must be finite and nonnegative")
+    if sum(proportions.values()) <= 0:
+        raise ValueError("terrain proportions must have positive total weight")
+
+
+# =============================================================================
+# Command curriculum（Wolf 本地版本，与 Black 同语义独立定义）
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class CommandCurriculumParams:
+    """Wolf forward-speed command curriculum 冻结参数。
+
+    语义与 Black 的 command curriculum 状态机完全一致（buffer / EMA / pass
+    streak，见 wolf/curriculums.py），但作为 Wolf task-local 数据类独立定义：
+    checkpoint state 的兼容性由序列化字段（version / vx range / EMA / streak /
+    buffer）保证，不由类共享保证。评价样本是每个完成 episode 的线性速度
+    tracking ratio；全部阈值与统计参数在这里集中冻结。
+    """
+
+    # play 模式下 curriculum 完全不运行（不采样、不评估、不扩 range）。
+    enabled: bool = True
+    # 初始范围沿用 CommandParams.lin_vel_x；这里显式列出便于切换默认值。
+    initial_lin_vel_x: tuple[float, float] = (-1.0, 1.0)
+    # 目标范围上界：vx_min >= -max_abs_vx、vx_max <= +max_abs_vx，永不越界。
+    max_abs_vx: float = 2.0
+    # 每次推进双边同时扩展 step：vx_min -= step、vx_max += step。
+    step: float = 0.1
+    # low-speed 组（low_speed_min < |vx| <= split）的 tracking ratio EMA 需超过该阈值。
+    threshold_low: float = 0.70
+    # high-speed 组阈值 = threshold_low - threshold_offset。
+    threshold_offset: float = 0.10
+    # EMA 平滑系数：ema = (1-alpha)*old + alpha*new_mean。
+    ema_alpha: float = 0.20
+    # 连续这么多次成功 evaluation（EMA 双双过线）才扩一次 range。
+    required_passes: int = 2
+    # buffer 累计这么多个有效 episode sample 才触发一次 low/high 评估。
+    buffer_min: int = 256
+    # 组计数下限：评估要求 low 与 high 样本各自至少这么多个；不足时保留 buffer。
+    min_low_count: int = 8
+    min_high_count: int = 4
+    # 组划分下限：|vx| <= low_speed_min 的样本不属于任何组，只保留在 buffer 里。
+    low_speed_min: float = 0.2
+    low_high_split_ratio: float = 0.6
+
+    def threshold_high(self) -> float:
+        """high-speed 组阈值 = low 阈值 - 阈值偏移。"""
+        return self.threshold_low - self.threshold_offset
+
+    def validate(self) -> None:
+        if not (0.0 < self.ema_alpha < 1.0):
+            raise ValueError("command curriculum ema_alpha must be in (0, 1)")
+        if self.required_passes < 1:
+            raise ValueError("command curriculum required_passes must be >= 1")
+        if self.buffer_min < 1:
+            raise ValueError("command curriculum buffer_min must be >= 1")
+        if self.step <= 0.0 or self.max_abs_vx <= 0.0:
+            raise ValueError("command curriculum step / max_abs_vx must be positive")
+        if self.threshold_high() <= 0.0:
+            raise ValueError(
+                "command curriculum high threshold must be positive: "
+                f"{self.threshold_low} - {self.threshold_offset}"
+            )
+        if self.min_low_count < 1 or self.min_high_count < 1:
+            raise ValueError("command curriculum group counts must be >= 1")
 
 
 @dataclass(frozen=True)
@@ -84,6 +155,91 @@ class CommandParams:
         default_factory=lambda: CommandCurriculumParams(max_abs_vx=4.0,
                                                         initial_lin_vel_x=(-1.0, 1.0))
     )
+
+
+# =============================================================================
+# Rough terrain
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class TerrainParams:
+    """Wolf rough v1 的 terrain generator 数值（首版候选，沿用 Black rough 已实现值）。
+
+    数值是搜索起点而不是已验证适合 Wolf 轮足运动的结果；后续按训练表现调整。
+    MjLab v1.6 curriculum 的 row difficulty 按 ``row / (num_rows - 1)`` 在
+    ``difficulty_range`` 内插值，（0.0, 0.9）+ num_rows=10 对应难度 0.0…0.9。
+    proportions 在 curriculum 模式下是每类 terrain 的 env 分配权重（不是列数）。
+    """
+
+    # Patch 与网格
+    size: tuple[float, float] = (8.0, 8.0)
+    num_rows: int = 10
+    difficulty_range: tuple[float, float] = (0.0, 0.9)
+    # MjLab border 为 z = 0 的 flat apron，取 native rough preset 的 20.0 m。
+    border_width: float = 20.0
+
+    # 高度场分辨率（Black rough 同值）
+    horizontal_scale: float = 0.1
+    vertical_scale: float = 0.005
+    platform_width: float = 3.0
+
+    # 各 terrain 的 env 分配权重
+    proportions: dict[str, float] = field(
+        default_factory=lambda: {
+            "flat": 0.10,
+            "smooth_slope_up": 0.05,
+            "smooth_slope_down": 0.05,
+            "rough_slope": 0.10,
+            "discrete_obstacles": 0.20,
+            "stairs_up": 0.25,
+            "stairs_down": 0.25,
+        }
+    )
+
+    # smooth slope：max slope = 0.7 x 0.9 = 0.63
+    slope_range: tuple[float, float] = (0.0, 0.7)
+
+    # rough slope 噪声：amplitude = rough_noise_base + rough_noise_gain x difficulty
+    rough_noise_base: float = 0.015
+    rough_noise_gain: float = 0.1
+    rough_noise_step: float = 0.005
+    rough_noise_downsample: float = 0.2
+    rough_base_thickness_ratio: float = 1.0
+
+    # discrete obstacles
+    obstacle_height_range: tuple[float, float] = (0.06, 0.26)
+    obstacle_width_range: tuple[float, float] = (1.0, 2.0)
+    obstacle_count: int = 20
+
+    # stairs（native box 金字塔台阶）：step_height = base + difficulty x gain = 0.05 + 0.18 d
+    stair_step_height_base: float = 0.05
+    stair_step_height_gain: float = 0.18
+    stair_step_width: float = 0.3
+
+    # 初始 terrain level 上限（inclusive）。Wolf 首版与 Black rough 同值。
+    max_init_terrain_level: int = 5
+
+    # terrain scan / footprint 的传感器参数（rough 专用，与 Black rough 同值）。
+    terrain_scan_size: tuple[float, float] = (1.6, 1.0)
+    terrain_scan_resolution: float = 0.1
+    terrain_scan_max_distance: float = 5.0
+
+    # base_height footprint（中央 7x5 = 35 rays，相对 frame body 的半宽/半长）。
+    base_height_footprint_x: float = 0.3
+    base_height_footprint_y: float = 0.2
+
+    _TERRAIN_KEYS = (
+        "flat", "smooth_slope_up", "smooth_slope_down", "rough_slope",
+        "discrete_obstacles", "stairs_up", "stairs_down",
+    )
+
+    def validate(self) -> None:
+        _check_probabilities(self.proportions, self._TERRAIN_KEYS)
+        if self.horizontal_scale <= 0 or self.vertical_scale <= 0:
+            raise ValueError("terrain scales must be positive")
+        if self.num_rows < 2:
+            raise ValueError("terrain num_rows must be >= 2")
 
 
 # =============================================================================
@@ -343,9 +499,16 @@ class SimulationParams:
     # 平面相交：实测 124 contacts -> nefc 下限 496（= 124x4 pyramidal rows，
     # tile 16 对齐 -> 512）。运行时腿自接触大幅消失、只剩轮-地接触，nefc 预计远低
     # 于 512（诊断工具需保持 overflow NO；后续可按实测收窄）。nconmax 同样被
-    # spawn 自接触抬高（>=124），Rough 阶段如有实测再调。
+    # spawn 自接触抬高（>=124）。
     nconmax: int = 128
+    # rough：generator 地形模板 spawn 状态的 contact 数远高于 plane（robot 对各
+    # patch 几何的模板自接触；实测下限 178），128 不够。取 256 留余量
+    # （capacity tuning，同 Black rough nconmax=128 的 workaround 语义）。
+    rough_nconmax: int = 256
     njmax: int = 512
+    # rough：模板 spawn nefc 下限实测 712（plane 512 不够），取 1024（tile 16 对齐
+    # + 余量）。运行时 overflow 状态需保持 NO（同 flat 的诊断约定）。
+    rough_njmax: int = 1024
 
 
 @dataclass(frozen=True)
@@ -410,6 +573,16 @@ class RunnerParams:
             run_name="wolf_flat_him", load_run=r".*_wolf_flat_him$"
         )
     )
+    rough: StageRunnerParams = field(
+        default_factory=lambda: StageRunnerParams(
+            run_name="wolf_rough", load_run=r".*_wolf_rough$"
+        )
+    )
+    rough_him: StageRunnerParams = field(
+        default_factory=lambda: StageRunnerParams(
+            run_name="wolf_rough_him", load_run=r".*_wolf_rough_him$"
+        )
+    )
     save_interval: int = 50
     num_steps_per_env: int = 64
     max_iterations: int = 10_000
@@ -429,6 +602,8 @@ class WolfConfig:
     reset: ResetParams = field(default_factory=ResetParams)
     termination: TerminationParams = field(default_factory=TerminationParams)
     reward: RewardParams = field(default_factory=RewardParams)
+    # rough terrain：首版候选数值；flat 任务不使用（terrain_type=plane）。
+    terrain: TerrainParams = field(default_factory=TerrainParams)
     # DR：默认全关（baseline 连续性）；minimal 训练 profile 见 MINIMAL_DR。
     dr: DomainRandomizationParams = field(default_factory=DomainRandomizationParams)
     simulation: SimulationParams = field(default_factory=SimulationParams)

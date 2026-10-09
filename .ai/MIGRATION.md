@@ -36,6 +36,7 @@ Wolf robot asset / joint order / actuator contract (stage 1): COMPLETE（§27）
 Wolf IMU observation contract: COMPLETE（§27.5）
 Wolf flat PPO / HIM / command curriculum integration: COMPLETE（§28）
 Wolf Domain Randomization（逐项开关 + minimal profile）: COMPLETE（§29）
+Wolf task-local independence + Wolf rough PPO/HIM: COMPLETE（§30）
 Hardware effort/current ceiling: UNCONFIRMED（实机前确认）
 ```
 
@@ -1511,6 +1512,10 @@ black-rough-him registration + flat→rough HIM full resume: COMPLETE（§24 / �
 Black rough stairs terrain（up / down, native box）: COMPLETE（§13.5）
 Black forward-speed command curriculum + checkpoint state: COMPLETE（§4.3 / §4.4）
 Wolf robot asset / joint order / actuator contract (stage 1): COMPLETE（§27）
+Wolf IMU observation contract: COMPLETE（§27.5）
+Wolf flat PPO / HIM / command curriculum integration: COMPLETE（§28）
+Wolf Domain Randomization（逐项开关 + minimal profile）: COMPLETE（§29）
+Wolf task-local independence + rough PPO/HIM registration: COMPLETE（§30）
 ```
 
 command 已冻结为固定范围 + native sampler，且不再有任何 curriculum（§4）。
@@ -1532,7 +1537,10 @@ Black command curriculum training validation（§4.3 已实现未长训验证）
     先跑 black-flat（PPO 或 HIM）观察 vx_max progression / Curriculum/command/ema_low
     / ema_high / tracking ratio / 训练稳定性；随后 black-rough range-resume continuation。
 Black HIM training validation — flat HIM 收敛 + flat→rough HIM 训练行为
-（registration / resume 机制已全部完成；"算法能跑" ≠ "算法训练有效"，排在课程验证之后）
+（registration / resume 机制已全部完成；“算法能跑” ≠ “算法训练有效”，排在课程验证之后）
+Wolf rough PPO/HIM training validation（§30 注册完成、未训练验证）—
+    先跑 wolf-flat（PPO 或 HIM）基线，确认行为与迁移前一致；
+    随后 wolf-flat → wolf-rough resume / warm start 路线与 rough 课程推进。
 ```
 
 Black real robot backend / sim2real contract 仍等待用户决定，不自动开始实现。
@@ -4446,6 +4454,132 @@ wheel radius 用 `dr.geom_size(scale)`（写后自动刷新 rbound/aabb）。
 - 站立契约（用户确认 2026-10，已提交）：腿部 PD Kp=80/Kd=3、默认 calf 角
   ±1.43 rad、`WOLF_DEFAULT_ROOT_Z = 0.4432`（= calf=1.43 下 FK 轮心偏移
   0.3632 + 轮半径 0.08；旧值 0.4289 为 calf=1.52 旧姿态几何接触高度，弃用）。
+
+## 30. Wolf Task Independence + Wolf Rough PPO/HIM（本轮集成，COMPLETE）
+
+一次性单元：Wolf 任务实现完全脱离 `tasks.velocity.black.*` import（独立原实现，
+不建共享包装层），并注册 wolf-rough / wolf-rough-him。flat 的 PPO/HIM、课程、DR、
+checkpoint、warm start、export 契约全部保留（已有 wolf-flat 旧 checkpoint 直接可用）。
+不改通用 HIM 算法（`algorithms/him/*` 零修改）、不改 Black 生产代码。
+
+### 30.1 Task independence
+
+```text
+新增 Wolf 本地文件（独立同构实现，公式 / 状态机语义与 Black 已验证版本一致）：
+    curriculums.py           WolfForwardSpeedCommandCurriculum + state 序列化
+                             （version/stage/robot/vx/EMA/streak/buffer 字段与旧
+                              Wolf checkpoint 完全一致；CURRICULUM_STATE_VERSION=1）
+    curriculum_checkpoint.py mixin + WolfVelocityCommandCurriculumRunner（ROBOT="wolf"）
+    him.py                   HIM task-side contract（group 名 / extras key / 6 帧布局
+                              不变；[B,6,53] oldest→newest；canonical newest→oldest）
+    terrain.py               WolfRoughSlopeTerrainCfg + wolf_rough_terrain_generator_cfg
+    rewards.py               追加 5 个 tracking/罚项公式 + base_height_l2_terrain
+                             （35-ray footprint；Black 未用项不复制）
+重写：rl_cfg.py（WolfRslRlOnPolicyRunnerCfg / WolfHim*Cfg；字段值不变）、
+       him_runner.py（WolfHimOnPolicyRunner，warm start 逻辑同构）、__init__.py
+Wolf config：CommandCurriculumParams 改为 Wolf 本地 dataclass（不再 import
+     black.black_config）；新增 TerrainParams；runner 增加 rough / rough_him
+     StageRunnerParams（run_name/load_run 与 flat 同风格）。
+```
+
+Provenance 修复：旧注册把 wolf-flat PPO 挂在 Black 目录 runner（类属性
+`ROBOT="black"`），与 checkpoint state `robot="wolf"` 不一致；现在
+`WolfVelocityCommandCurriculumRunner.ROBOT = "wolf"`；provenance 校验（跨 robot
+fail-loud）保持开启，不关闭。
+
+### 30.2 Wolf rough terrain / 环境（首版候选数值）
+
+```text
+terrain generator（curriculum=True，7 类 x 10 行，值与 Black rough 已实现版一致；
+仅数值复制，不运行时引用 BLACK_CONFIG）：
+    patch 8x8m / border 20m / horizontal 0.1 / vertical 0.005 / platform 3.0m
+    proportions: flat 0.10 / up 0.05 / down 0.05 / rough_slope 0.10 /
+                 obstacles 0.20 / stairs_up 0.25 / stairs_down 0.25
+    difficulty [0,0.9]；slope [0,0.7]；rough noise base 0.015 / gain 0.1 /
+    step 0.005 / downsample 0.2；obstacles [0.06,0.26]m x [1,2]m x 20；
+    stairs base 0.05 / gain 0.18 / width 0.30；max_init_terrain_level 5
+rough_slope = WolfRoughSlopeTerrainCfg（slope+noise 双 native 数学相加，同 Black
+     已验证实现语义）。
+MJWarp capacity：rough 模板 spawn 实测下限 ncon >= 178 / nefc >= 712（plane 为
+     124/496）；rough_nconmax=256 / rough_njmax=1024（capacity tuning 面非契约值。
+     runtime 需保持 overflow NO，待长训练核）。
+```
+
+rough 环境特化（与 flat 共用全部基础控制/observation/action/reset/DR 契约）：
+
+- terrain_scan：Wolf 本地 RayCastSensorCfg（base_link frame / yaw 对齐 /
+  GridPatternCfg 1.6x1.0 @0.1 = 17x11 = 187 rays / max 5.0m / geom group 0）；
+  仅 rough 注册，flat 没有；
+- base_height reward：flat = world-z（base_height_l2_flat），rough = terrain_scan
+  中央 7x5=35 rays clearance 均值（base_height_l2_terrain）；key/weight/顺序不变，
+  高度目标仍读 WOLF_CONFIG.reward.base_height_target；
+- termination：+ native out_of_terrain_bounds（time_out=True）；play 两项均移除；
+- curriculum 任：rough train 同时开 native terrain_levels_vel + Wolf command
+  curriculum（stage="rough"，阈值/EMA/buffer 与 flat 完全同一套参数）；flat 只有
+  command curriculum；play 全清空；
+- rough play 保留 generator（回放地形分布与训练一致）。
+```
+
+### 30.3 Frozen contracts（flat 不变项 + rough 增量）
+
+```text
+observation / action（flat = rough = play，四任务一致；无新增维度）：
+    PPO：actor 53-D 单帧 / critic 56-D / action 16-D
+    HIM：history [B,6,53]（oldest→newest）/ source encoder input 318 /
+         velocity target 3（×2.0）/ latent 16 / actor input 53+3+16=72 /
+         action 16 / critic 56
+    rough 不给 actor/critic 新增 height_map；terrain_scan 只服务 base_height reward。
+checkpoint / resume：
+    checkpoint 数据格式不变（infos.env_state.command_curriculum：version / stage /
+    robot / vx range / EMA / streak / buffer）；restore mode：
+    same-stage resume → full；flat→rough（PPO 或 HIM）→ range（EMA/streak/buffer
+    fresh）；PPO→HIM warm start → range；旧 checkpoint 无 state → none + warning；
+    cross-robot → fail-loud。wolf-rough-him 不支持 PPO→HIM warm start
+    （warm_start_supported=False，请求报错）。
+模型/optimizer/iteration 的原生行为不变；不继承上一任务的 terrain level / env
+    runtime state（terrain_levels 从 max_init_terrain_level 或 checkpoint env_state
+    不含该项开始；command curriculum 只按上述 mode 恢复）。
+```
+
+### 30.4 DR 在 rough 下的实际支持范围
+
+```text
+摩擦 DR（ground/wheel）：rough 下地面 geom 选择改为 terrain 实体全部 patch geom
+    （``geom_names=(".*",)``；flat 保持单个 ``terrain`` geom）；压 0 语义一致，
+    contact 摩擦 = 机器人 geom 值。选择器无匹配时 fail-loud（
+    _press_terrain_friction 空选择：ValueError）。验证：rough contact（读
+    sim.data.contact）== 轮 geom 值（19 contacts，714 geoms 压 0）。
+其余 DR 项：全部只写机器人实体（mass/COMfiction/gains/delay/bias/backlash/
+    target scale/push/disturbance/wheel radius），terrain 无关，语义不变。
+轮半径 DR 的 root z 补偿在 rough 下同样成立（正文见 §29.3；spawn 高度由
+    reset_base + env_origins 提供，事件仅追加 delta）。
+安全限制：若未来 terrain 相关 DR（如地形 restitution）无法与 generator 安全组合，
+    必须在配置构建阶段 fail-loud 并在本节登记，不允许静默禁用。
+rough 首轮 DR 默认全部关闭（nominal rough 基线优先）。
+```
+
+### 30.5 验证记录（tests/check_wolf_rough.py + tests/check_wolf_task.py，不提交）
+
+```text
+STATIC/LIGHT CPU PASS：
+    - 四 task（train+play）配置构建；observation/action shape：actor 53 / critic 56 /
+      action 16（PPO）；rough HIM [B,6,53] + estimator 3；
+    - flat/rough reward 装配（仅 base_height func 差异；weight/key/顺序一致）、
+      terrain generator 7 类 10 行参数、curriculum（rough train = terrain_levels +
+      command(stage=rough)；flat = command；play 空）、termination（rough 有
+      OOB，play 无）、sensor（flat 无 terrain_scan，rough 有且 frame=base_link）；
+    - rl_cfg：run_name / experiment_name / warm_start_supported 门控；
+    - provenance：cross-robot fail-loud + robot="wolf" range 恢复（函数级）；
+    - rough 摩擦 DR：714 patch geoms 压 0；13 步 rollout 后 19 个 wheel-terrain
+      contact 摩擦 == 对应轮 geom 值；
+    - rough PPO/HIM 6 步 rollout finite；
+    - flat 回归（调用既有 check_wolf_task 静态+provenance 段与 check_wolf_dr
+      static/nominal/friction 段）全部 PASS。
+NOT RUN：PPO/HIM 实际训练（flat→rough resume / warm start / HIM full resume 的
+    端到端训练验证）、rough 长训收敛、rough DR-on 训练、CUDA 全矩阵、
+    rough capacity 长程 overflow 监控、export（rough 网络与 flat 同 shape，
+    预期直接复用）；由后续独立 review 决定验证方式。
+```
 
 ### 29.4 验证记录（tests/check_wolf_dr.py，不提交）
 
