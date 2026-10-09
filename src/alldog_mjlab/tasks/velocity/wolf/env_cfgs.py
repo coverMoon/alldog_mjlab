@@ -21,6 +21,8 @@ wolf_config.py，reward 数学在本任务的 rewards.py（与 black/rewards.py 
 from dataclasses import replace
 from typing import TYPE_CHECKING, Literal
 
+import mujoco
+
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs import mdp as envs_mdp
 from mjlab.envs.mdp import dr as mdp_dr
@@ -166,6 +168,9 @@ WOLF_TERRAIN_SCAN_SENSOR = "terrain_scan"
 # rough terrain curriculum 的注册名（native ``terrain_levels_vel``；仅 rough train）。
 WOLF_TERRAIN_CURRICULUM_TERM = "terrain_levels"
 
+# 编译模板 spawn 状态的 root body（SceneCfg.spec_fn 目标；attach 后带实体前缀）。
+WOLF_TEMPLATE_ROOT_BODY = "robot/base_link"
+
 # Command term 名称（task wiring：reward / termination / curriculum 都按名取它）。
 WOLF_COMMAND_NAME = "twist"
 
@@ -181,6 +186,60 @@ WOLF_LEGS_FL_FIRST_JOINT_NAMES = tuple(
     name for leg in WOLF_LEG_ORDER for name in WOLF_LEG_ACTION_JOINT_NAMES[leg]
 )
 WOLF_WHEEL_JOINT_POLICY_ORDER = tuple(f"{leg}_foot" for leg in WOLF_LEG_ORDER)
+
+
+def _configure_template_spawn_height(cfg: ManagerBasedRlEnvCfg) -> None:
+    """设置编译模板 spawn 高度（SceneCfg.spec_fn，实体 attach 后 / 编译前调用）。
+
+    背景（MJWarp 容量诊断，tests/diag_wolf_capacity.py）：Wolf MJCF 编译后
+    ``qpos0`` 的 root z=0（自由关节 qpos0 z 来自 body pos，INIT_STATE 的
+    z=0.4432 只进入 ``init_state`` keyframe，不进 qpos0），模板 spawn 状态下
+    机体与全部腿碰撞 geom 大深度插入 plane，模板 ncon=124 / nefc=496，被
+    ``put_data`` 作为硬下限（io.py:1931/1951），把 nconmax/njmax 钉在 128/512。
+
+    本函数把模板 root body 位置改为 z=WOLF_TEMPLATE_ROOT_Z（0.45），使编译后
+    ``qpos0`` root z=0.45、模板 ncon/nefc ≈ 0，从而容量改由运行时需求决定
+    （活动样本峰值 ncon≤16 / nefc≤40）。已验证效果：ncon 124→24（仅抬 z、关节
+    零位）、0（关节 default 时）。
+
+    不改变的量：
+    - ``default_root_state``（实体 cfg `INIT_STATE`，z=0.4432）——训练 reset
+      高度语义不变（实测 reset 后 root z 仍为 0.4432）;
+    - hinge joint `ref`（保持 0.0）、关节几何、default joint pose、actuator、
+      quat（模板 root quat 保持单位）；
+    - 不写编译后的 ``MjModel.qpos0``（qpos0 由 MuJoCo 正常编译流程从 spec
+      生成），不替换 ``MjData``。
+    """
+    def spec_fn(spec: "mujoco.MjSpec") -> None:
+        body = next(
+            (b for b in spec.bodies if b.name == WOLF_TEMPLATE_ROOT_BODY), None
+        )
+        if body is None:
+            raise ValueError(
+                f"Wolf 模板 spec_fn：找不到根 body {WOLF_TEMPLATE_ROOT_BODY!r}，"
+                "spec 结构与预期不符，fail-loud"
+            )
+        # 自由关节名来自 MJCF（robot/floating_base_joint），不属于 root body 名前缀；
+        # 用“全 spec 恰好 1 个 freejoint”+ 根 body 名校验共同判定。
+        free_joints = [
+            j
+            for j in spec.joints
+            if int(j.type) == int(mujoco.mjtJoint.mjJNT_FREE)
+        ]
+        if len(free_joints) != 1:
+            raise ValueError(
+                "Wolf 模板 spec_fn：根 body 下自由关节数量应为 1，实际 "
+                f"{len(free_joints)}（joints={[j.name for j in free_joints]}），fail-loud"
+            )
+        # 抬升模板 root 高度（写入 spec，由 MuJoCo 正常编译流程产生 qpos0）。
+        body.pos[:] = [0.0, 0.0, WOLF_CONFIG.simulation.template_root_z]
+
+    if cfg.scene.spec_fn is not None:
+        raise ValueError(
+            "cfg.scene.spec_fn 已存在（Wolf 不覆盖既有 spec_fn；"
+            "baseline 未使用该字段，出现该值说明装配链路有未知来源）"
+        )
+    cfg.scene.spec_fn = spec_fn
 
 
 def _configure_command(cfg: ManagerBasedRlEnvCfg) -> None:
@@ -1003,6 +1062,11 @@ def _build_wolf_env_cfg(
     else:
         dr = WOLF_CONFIG.dr if dr is None else dr
         dr.validate()
+
+    if not rough:
+        # 仅 flat（train + play）：编译模板 spawn 高度抬高，消除模板穿地接触
+        # 对 MJWarp 容量的硬下限；rough 模板容量需求另行处理（§30.2）。
+        _configure_template_spawn_height(cfg)
 
     _configure_command(cfg)
     _configure_scene_and_sensors(cfg, dr, rough)

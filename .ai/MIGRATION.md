@@ -37,6 +37,7 @@ Wolf IMU observation contract: COMPLETE（§27.5）
 Wolf flat PPO / HIM / command curriculum integration: COMPLETE（§28）
 Wolf Domain Randomization（逐项开关 + minimal profile）: COMPLETE（§29）
 Wolf task-local independence + Wolf rough PPO/HIM: COMPLETE（§30）
+Wolf flat 模板 spawn 高度 + flat 容量优化（64/256）: COMPLETE（§31）
 Hardware effort/current ceiling: UNCONFIRMED（实机前确认）
 ```
 
@@ -1516,6 +1517,7 @@ Wolf IMU observation contract: COMPLETE（§27.5）
 Wolf flat PPO / HIM / command curriculum integration: COMPLETE（§28）
 Wolf Domain Randomization（逐项开关 + minimal profile）: COMPLETE（§29）
 Wolf task-local independence + rough PPO/HIM registration: COMPLETE（§30）
+Wolf flat 模板 spawn 高度 + flat 容量优化: COMPLETE（§31）
 ```
 
 command 已冻结为固定范围 + native sampler，且不再有任何 curriculum（§4）。
@@ -1541,6 +1543,8 @@ Black HIM training validation — flat HIM 收敛 + flat→rough HIM 训练行�
 Wolf rough PPO/HIM training validation（§30 注册完成、未训练验证）—
     先跑 wolf-flat（PPO 或 HIM）基线，确认行为与迁移前一致；
     随后 wolf-flat → wolf-rough resume / warm start 路线与 rough 课程推进。
+Wolf flat 容量长训监控（§31 候选值 64/256）— 真实训练下确认 overflow 恒为
+    NO；若触发按 §31.3 约定上调并在 §31 登记实测下限。
 ```
 
 Black real robot backend / sim2real contract 仍等待用户决定，不自动开始实现。
@@ -4316,8 +4320,9 @@ reset：root pose 不随机（default 站立 z=0.4432）；root 速度六轴小�
     无 DR 事件（nominal dynamics）。
 
 simulation：timestep 0.005 × decimation 4 = policy 50 Hz；
-    nconmax 128（spawn 自接触 ~124）/ njmax 512（spawn nefc 下限 496 tile 对齐；
-    运行时实测 nefc ≈ 8–36，overflow 未出现，容量候选可后续收窄）
+    容量历史：128/512 曾被穿地模板（qpos0 root z=0，ncon=124/nefc=496）钉住；
+    2026-10 模板抬高后（§31）flat 容量改为 64/256（运行时需求候选值；
+    运行时实测 nefc ≈ 8–36，overflow 未出现，需长训监控）
 ```
 
 ### 28.3 Command curriculum（复用 + provenance）
@@ -4603,6 +4608,80 @@ CUDA SKIPPED（本轮仅轻量定向检查，未重跑 GPU 矩阵；摩擦/半�
      device 分支，预期一致，待下轮完整验证补齐）
 未验证：PPO/HIM DR-on 训练冒烟（本轮跳过）、长训收敛质量、rough/sim2real、
      delay sim2real 等价性 —— 未开始/未重跑。
+```
+
+## 31. Wolf Flat 模板 Spawn 高度与仿真容量优化（本轮集成，COMPLETE）
+
+诊断（tests/diag_wolf_capacity.py，不提交）发现：Wolf flat 编译模板 qpos0
+（freejoint root z=0、关节 0）与 plane 相交，实测模板 ncon=124 / nefc=496（4 行
+pyramidal × 124 contacts），MJWarp put_data 的硬下限把 flat 容量钉在
+128/512（~12x 运行时需求余量：活动样本峰值 ncon=16 / nefc=40）。
+
+本轮修复：不改 MJCF / 不写 MjModel.qpos0，在 task 装配层用 MjLab v1.6.0 原生
+`SceneCfg.spec_fn`（Scene.__init__ 内 attach 之后、compile 之前调用）把 Wolf
+root body（`robot/base_link`）的 spec body pos z 抬到 0.45，由 MuJoCo 正常编译
+流程产生 qpos0。
+
+### 31.1 实现位置
+
+```text
+env_cfgs.py：
+    _build_wolf_env_cfg 对全部 flat / flat-him（train + play）路径调用：
+    _configure_template_spawn_height（仅 not rough 分支）：
+        spec_fn 校验根 body 存在（robot/base_link）、全 spec 恰好 1 个 freejoint、
+        body 不是 world body，写入 body.pos = [0,0,template_root_z]；
+        cfg.scene.spec_fn 已被占用时 fail-loud（baseline 从不设置该字段）。
+    常量 WOLF_TEMPLATE_ROOT_BODY = "robot/base_link"；freejoint 类型判定用
+    mjtJoint（freejoint 名为 MJCF 的 robot/floating_base_joint，不属于
+    root body 名前缀，不能按名字前缀过滤）。
+wolf_config.py SimulationParams：
+    template_root_z = 0.45（注释注明只影响模板，不改训练 reset 高度）；
+    flat nconmax 128→64 / njmax 512→256（由运行时需求决定的候选值；
+    rough 保持 256/1024 不变）。
+```
+
+### 31.2 实测结果与 frozen 值
+
+```text
+模板（编译 qpos0）：
+    修改前：root z=0 / 关节 0 → ncon=124 / nefc=496
+    修改后：root z=0.45 / 关节 0 → ncon=24 / nefc=96
+            （calf Link3 cylinder ×4 + wheel ×4 处于 dist≈0 边缘；
+              0.45 相对站立 FK 清 6.8mm，knee/calf 常规位形不触地）
+    qpos0[0:7] = [0,0,0.45,1,0,0,0]；全部 16 个 hinge ref 仍为 0（qpos0[7:] == 0）。
+    keyframe init_state（z=0.4432 + 0.82 关节）不变（key 与 qpos0 是独立机制）。
+容量：flat 64/256（<模板 24/96 下限 + 运行时需求；overflow 必须 NO）；
+    rough 256/1024 完全不变（无 spec_fn；rough 模板 spawn 下限仍 178/712，
+    本轮不处理）。
+不变项（实测）：
+    EntityCfg INIT_STATE / default_root_state z 仍 0.4432（reset 后 root z 实测
+    全部 0.4432，无 0.45 偏移）；default joint pos（EntityCfg init_state 显式
+    joint_pos，不读 keyframe）不变；action / observation / reward / DR / HIM 契约
+    全部不变。
+```
+
+### 31.3 行为等价验证（tests/check_wolf_template_capacity.py，不提交）
+
+```text
+对照方式：同 seed 双 env（旧装配：无 spec_fn + 128/512 模拟优化前；
+新装配：spec_fn + 64/256），corruption 关闭（manager 初始化前设置，
+构建后切换无效），交替 reset 前显式 reseed 保证 reset 采样序列一致。
+CPU PASS：reset（root/joint/qvel/obs actor+critic）逐位级一致；20 步 rollout
+    每步 root/joint/qvel/obs/reward/termination/ncon/nefc 一致（tol 1e-5）；
+    runtime nefc_max=20 / ncon_max=13，overflow 全 0；
+    HIM [B,6,53]+[B,3]+action 16 finite；rough 装配不变断言。
+CUDA:0 PASS（256 envs / 6 步 smoke）：连续量容差按步放宽
+    （tol_i = 1e-3 × 4^i；轮地切向接触为混沌系统：边缘触点 dist≈0 在 kernel
+    微小数值差下离散翻转并指数放大，实测 step3 joint_vel 差 ~0.002 相对
+    0.05%，属混沌分歧而非契约差异）；|Δnefc| ≤ 8/世界（efc_address 是未初始化
+    workspace 字段，per-world ncon 估计不可靠，只作 informational）；
+    overflow 全 0；nefc_max=36 / ncon_max=15。
+回归：check_wolf_task（更新两处过期断言后）/ check_wolf_dr / check_wolf_rough /
+    check_wolf_robot / check_wolf_imu 全部 PASS（CPU）。
+未验证：长训容量 overflow 监控（64/256 为候选，若真实训练触发 overflow 需上调）、
+    rough 模板 spawn 状态优化、CUDA 全矩阵重跑。
+注意：put_data 以 qpos0 种子化 warp 派生量（xquat/xmat/ximat）——优化前的
+    首步派生值与优化后不同，但 reset 后行为已验证一致；该影响仅限首步。
 ```
 
 ## 26. Update Rule

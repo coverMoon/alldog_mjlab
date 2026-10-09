@@ -494,20 +494,26 @@ MINIMAL_DR = replace_default_dr(
 @dataclass(frozen=True)
 class SimulationParams:
     # MJWarp per-world capacity（capacity tuning，不改 solver 数学）。
-    # spawn 模板（qpos0，freejoint 起 z=0）下 Wolf 多个 collision 几何与 terrain
-    # 平面相交：实测 124 contacts -> nefc 下限 496（= 124x4 pyramidal rows，
-    # tile 16 对齐 -> 512）。运行时腿自接触大幅消失、只剩轮-地接触，nefc 预计远低
-    # 于 512（诊断工具需保持 overflow NO；后续可按实测收窄）。nconmax 同样被
-    # spawn 自接触抬高（>=124）。
-    nconmax: int = 128
+    # 历史背景：旧 spawn 模板（qpos0 root z=0）下 Wolf 多个 collision 几何与
+    # plane 相交，实测 124 contacts -> nefc 496（tile 16 对齐 -> 512），模板是
+    # put_data 的硬下限，把容量钉在 128/512。
+    # 2026-10 容量优化：flat 模板 spawn 高度经 SceneCfg.spec_fn 抬到站立区
+    # （template_root_z=0.45），模板 ncon/nefc ≈ 0；nconmax/njmax 改由运行时
+    # 需求决定（实测活动样本峰值 ncon=16 / nefc=40；诊断需保持 overflow NO）。
+    nconmax: int = 64
     # rough：generator 地形模板 spawn 状态的 contact 数远高于 plane（robot 对各
     # patch 几何的模板自接触；实测下限 178），128 不够。取 256 留余量
     # （capacity tuning，同 Black rough nconmax=128 的 workaround 语义）。
     rough_nconmax: int = 256
-    njmax: int = 512
+    njmax: int = 256
     # rough：模板 spawn nefc 下限实测 712（plane 512 不够），取 1024（tile 16 对齐
     # + 余量）。运行时 overflow 状态需保持 NO（同 flat 的诊断约定）。
     rough_njmax: int = 1024
+    # 编译模板 spawn 的 root z（SceneCfg.spec_fn 写入 spec body pos，由正常编译
+    # 流程产生 qpos0；见 env_cfgs._configure_template_spawn_height）。只影响模板
+    # 状态，不改变训练 reset 高度（default_root_state 仍为 INIT_STATE z=0.4432）。
+    # 取站立高度 0.4432 之上 + 少量余量：模板接触清零，容量不再被模板钉住。
+    template_root_z: float = 0.45
 
 
 @dataclass(frozen=True)
