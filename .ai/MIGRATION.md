@@ -4302,23 +4302,34 @@ HIM：
     action 16 / critic 56
     部署 canonical history = newest→oldest flatten（复用 canonical_history()）
 
-command：
-    vx 初始 [-1,1] / 课程 max ±4.0（仅 vx 扩展，步长 0.1）
-    vy [-0.15,0.15] / yaw [-0.6,0.6] / resample 10 s
+command（2026-10 收窄 Y / Yaw 初值，改善跟踪起步）：
+    vx 初始 [-1,1] / 课程 max ±4.0（仅 vx 扩展，步长 0.1；无 Y/Yaw 课程）
+    vy [-0.2,0.2] / yaw [-0.8,0.8] / resample 10 s
     standing 0.1 / forward-only 0.2 / world 0 / heading 关闭
 
-reward（四任务同一套 13 项，dict 顺序 = logging 顺序）:
-    track_linear +1.0 / track_angular +1.0（用户 2026-10 调参，0.5 → 1.0）/
+reward（四任务同一套 14 项，v2 起分轴 tracking；dict 顺序 = logging 顺序）:
+    track_linear_velocity_x +1.0（X 轴单独指数项；课程评分来源）/
+    track_linear_velocity_y +1.0（Y 轴单独指数项，v2 拆分，原 XY 合并项废弃）/
+    track_angular +1.0（用户 2026-10 调参，0.5 → 1.0）/
     lin_vel_z -1.0 / body_ang_vel -0.05 / base_height -2.0（target 0.40 m）/
-    leg_action_rate -0.01 / wheel_action_rate -0.002；sigma 0.25
+    leg_action_rate -0.01 / wheel_action_rate -0.002；sigma 0.25（分轴后
+    单轴误差平方除以 sigma，body-frame 来源不变）
     leg / wheel action rate 按 16-D contract 显式分组（leg = 12 位置通道、
     wheel = 3/7/11/15），不整条 16 维求和
-    姿态（§28.5，四任务统一，v1 曾仅 flat / v2 起 rough 同步启用）：
-    upright L1 -1.5 + hip_default -0.30 / stand_still -0.40 / run_still -0.20 /
-    dof_pos_limits -0.20 / leg_torques -0.0001（13 项；rough 原 native L2
-    -0.5 分支已取消）
+    姿态（§28.5，四任务统一）：orientation L1 -1.5（v2 重命名，原 key
+    "upright" / scale "upright" / func base_orientation_l1；公式不变）+
+    hip_default -0.30 / stand_still -0.40 / run_still -0.20 /
+    dof_pos_limits -0.20 / leg_torques -0.0001
+    dof_pos_limits / leg_torques 为 native 薄包装（rewards.dof_pos_limits /
+    rewards.leg_torques_l2 转发 mjlab.envs.mdp，不复制数学；全部 14 项 func
+    入口在 rewards.py，由 env_cfgs 注册）
     base_height func 差异：flat = world-z / rough = terrain-relative
     （terrain_scan footprint 均值）；target / weight / key / 顺序一致
+curriculum state v2（2026-10，§4.3 Wolf 侧同步）：state 新增
+    ``tracking_reward_term``（= "track_linear_velocity_x"）；评分公式不变
+    （仍除以 |weight|×dt×steps，消除 weight/dt 影响）；恢复兼容：v2→v2 full
+    校验评分来源一致，旧 v1 state 只允许 range（full fail-loud），
+    auto 下 v1 自动降级为 range 并打 warning
 
 termination：time_out（20 s，time_out=True）+ illegal_contact
     （base_link 对 terrain，力阈值 1.0 N，history 4 substeps）；
@@ -4369,12 +4380,12 @@ export（RSL-RL 原生 as_jit + reload 数值等价，max_abs_diff = 0.0）:
 
 针对姿态扭曲 / 关节长期偏离 default 的增强（BlackW blackW_config/env.py
 经验迁移；历史参考 super-dog 本地 HIMLoco，非官方 InternRobotics/HIMLoco）。
-v2 范围修正（有意修改）：取消「flat 专属」限制，Rough 也切换为同一套 13 项；
+v2 范围修正（有意修改）：取消「flat 专属」限制，Rough 也切换为同一套 14 项（tracking 分轴 + orientation 重命名后与 flat 完全一致）；
 Rough 原 8 项基线（upright native L2 -0.5、无姿态项）已废弃，**Rough 奖励
 配置变更后的训练效果未验证**（长时间训练 / 收敛均未评估）。
 
 ```text
-任务范围：wolf-flat / wolf-flat-him / wolf-rough / wolf-rough-him 同一套 13 项
+任务范围：wolf-flat / wolf-flat-him / wolf-rough / wolf-rough-him 同一套 14 项
     （key / weight / 顺序完全一致）；唯一 flat/rough 差异是 base_height func
     （flat = world-z / rough = terrain-relative footprint 均值，terrain_scan）。
 upright（key 不变）：L1 公式
@@ -4411,6 +4422,17 @@ run_still（v2 增补，-0.20）：12 腿关节（hip/thigh/calf，显式排除�
     BlackW `_reward_run_still` 同构，legacy 权重 -1.0，本轮取 -0.20）；
     与 stand_still 共享同一 12 腿 SceneEntityCfg 选择器（rewards.run_still_leg_l1；
     参数在 WOLF_CONFIG.reward.posture：run_still_x/y/yaw_threshold = 0.1/0.1/0.15）。
+命名统一（v2）：reward key "orientation"（原 "upright"）/ scale
+    RewardScales.orientation（原 "upright"）/ func rewards.orientation_l1
+    （原 base_orientation_l1）；权重 -1.5 与公式不变；仅影响 TensorBoard tag，
+    不影响 policy I/O。
+奖励入口梳理（v2）：全部 14 项 reward func 均定义在 rewards.py；
+    dof_pos_limits / leg_torques_l2 为 native 薄包装（转发
+    mjlab.envs.mdp.joint_pos_limits / joint_torques_l2，不复制数学）；
+    wolf_config.py 管参数 / rewards.py 管函数 / env_cfgs.py 管装配。
+课程评分来源（v2）：curriculum params 的 reward_term_name 与
+    WOLF_TRACKING_VELOCITY_REWARD_TERM 改为 "track_linear_velocity_x"；
+    评分公式不变（episode_sum / (steps × dt × |weight|)，消除 weight/dt 影响）。
 训练效果（长训收敛 / 是否真正抑制姿态扭曲）未验证 —— 明确 NOT RUN：
     完整 PPO/HIM 训练与数百 iteration 收敛评估。
 ```
@@ -4429,8 +4451,8 @@ Black 回归：check_black_flat（CPU+CUDA）/ rough（CPU+CUDA）/ rough_him /
 未验证：长训收敛 / 高速（±4）行为 / DR / rough / sim2real —— 均未开始。
 
 姿态奖励 v1/v2 补充（tests/check_wolf_posture_rewards.py，不提交）：
-CPU PASS（四任务注册/权重（flat 13 / rough 8，含 run_still -0.20，upright 公式
-     切换）；四任务 base_height target = 0.40；runtime 数学：
+CPU PASS（四任务注册/权重（v2 统一 14 项：分轴 tracking_x/y + orientation
+     L1 -1.5 + 姿态项含 run_still；含关键分轴数值检查）；四任务 base_height target = 0.40；runtime 数学：
      default 零偏差 = 0、±0.1 偏差对称、alpha 用例 1.0/0.65/0.65/0.50/0.895
      全中（范围 [0.5,1.0]）、stand_still 双门控与纯 yaw 关门、
      run_still 门控（±0.11 开 / x=0.1 关 / y=0.1 关 / yaw=0.15 关 / yaw=0.14
@@ -4443,9 +4465,9 @@ CPU PASS（四任务注册/权重（flat 13 / rough 8，含 run_still -0.20，up
 受控站立沉降实测（Kp=50/Kd=1.2，单环境 500 步）：root z 0.4432 → 稳态下限
      0.3775，沉降 ≈ 6.6 cm（历史参考：Kp=60/Kd=2.0 首版为 0.3773/5.2 cm）——
      仅测量报告，base_height_target 未改。
-v2 统一补充：四任务 13 项同序同权重；rough runtime 重验（base_height
+v2 统一补充：四任务 14 项同序同权重；rough runtime 重验（base_height
      terrain-relative 接口 terrain_scan / target 0.40、选关节 12/actuator 12
-     无轮、13 项 compute [num_envs] finite、PPO shape 53/56 不变）；
+     无轮、14 项 compute [num_envs] finite、PPO shape 53/56 不变）；
      rough 原 8 项基线巳废弃，**rough 新奖励配置的训练效果未验证**。
 回归：check_wolf_task / check_wolf_rough / check_wolf_dr / check_wolf_robot /
      check_wolf_template_capacity 全部 PASS（CPU）。

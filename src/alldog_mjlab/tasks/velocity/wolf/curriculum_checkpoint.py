@@ -70,6 +70,7 @@ def resolve_restore_mode(
     cross-stage resume       range（wolf-flat→wolf-rough / flat HIM→rough HIM）
     旧 checkpoint（无 state）  none（打印 warning，保持 config 初始范围）
     source stage 未知         range（保守：范围保留，统计重新开始）
+    v1 state（评分语义迁移）    auto 下降为 range + warning；显式 full 仍 fail-loud
     ```
 
     PPO→HIM warm start 不走 resume load 路径，由 WolfHimOnPolicyRunner 显式
@@ -111,6 +112,9 @@ def apply_command_curriculum_state(
     - ``robot`` provenance 检查（可选）：checkpoint state 携带的 robot 与当前
       task 的 robot 不同 → fail-loud（跨机器人恢复禁止）；旧 checkpoint 无该
       字段时仅打印 warning（版本 1 迁移期）。
+    - 版本检查：state 为 v1（XY 合并评分语义，已废弃）且 auto 解析出 ``full``
+      时，自动降级为 ``range`` 并打印明确 warning；显式请求 ``full`` 不降级，
+      由 term 的 load_state_dict fail-loud（版本迁移期不允许静默沿用旧统计）。
     返回实际使用的 mode（state None 或 term 缺失时为 None）。
     """
     term = get_command_curriculum_term(env)
@@ -142,6 +146,15 @@ def apply_command_curriculum_state(
             "Use command_curriculum_restore='none' or train from scratch."
         )
     restored = resolve_restore_mode(restore_mode, state.get("stage"), term.stage)
+    if state.get("version") == 1 and restored == "full":
+        # 显式 full 不降级（让 load_state_dict fail-loud）；auto 的 full 降级。
+        if restore_mode == "auto":
+            print(
+                "[WARN] command curriculum state 为 v1（XY 合并评分语义，已废弃）："
+                "auto full restore 降级为 range（只恢复 vx 范围，统计 fresh）；"
+                "如需精确续训 v2 语义请重新训练或使用 v2 checkpoint。"
+            )
+            restored = "range"
     term.load_state_dict(state, mode=restored)
     if restored == "range":
         detail = "EMA / streak / buffer fresh"

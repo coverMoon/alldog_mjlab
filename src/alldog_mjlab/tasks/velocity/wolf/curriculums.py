@@ -18,8 +18,10 @@ command curriculum（与 Black 同一 super-dog 状态机语义的独立实现�
 - play 模式下 curriculum 不注册（``_configure_play`` 清空 curriculum），
   因此 term 不存在，天然不更新。
 
-checkpoint state 的序列化字段（version / vx range / EMA / streak / buffer）
-与 Black 保持相同格式，保证旧 Wolf-flat checkpoint 直接可用。
+checkpoint state 的序列化字段（version / stage / robot / tracking_reward_term /
+vx range / EMA / streak / buffer）自 v2 起（2026-10，评分来源改为 X 单轴
+reward）与 Black（v1，XY 合并评分）不同：v1 state 只允许 range 恢复（full
+fail-loud），见 load_state_dict。
 
 私有 API 依赖（MjLab v1.6.0 pinned）：RewardManager 在 v1.6.0 中没有公开的
 episode-sum accessor（仅有 ``get_term_cfg`` / ``active_terms`` 等接口），因此
@@ -45,7 +47,9 @@ if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
 
 # state_dict 的版本号；load_state_dict 拒绝不支持的版本（fail-loud）。
-CURRICULUM_STATE_VERSION = 1
+# v2（2026-10）：评分来源改为 X 单轴 reward（track_linear_velocity_x），
+# state 新增 ``tracking_reward_term`` 字段；v1 → v2 只允许 range restore。
+CURRICULUM_STATE_VERSION = 2
 
 # CurriculumManager 注册名：决定 TensorBoard 前缀 Curriculum/command/*。
 CURRICULUM_TERM_NAME = "command"
@@ -142,6 +146,7 @@ class WolfForwardSpeedCommandCurriculum(ManagerTermBase):
             "version": CURRICULUM_STATE_VERSION,
             "stage": self._stage,
             "robot": self._robot,
+            "tracking_reward_term": self._reward_term_name,
             "vx_min": self._vx_min,
             "vx_max": self._vx_max,
             "ema_low": self._ema_low,
@@ -156,8 +161,14 @@ class WolfForwardSpeedCommandCurriculum(ManagerTermBase):
 
         - full：range / EMA / streak / buffer 逐值恢复（同 stage 精确续训）；
         - range：只恢复 vx range，EMA / streak / buffer 清空
-          （跨 stage / 跨训练条件 / PPO→HIM warm start）；
+          （跨 stage / 跨训练条件 / PPO→HIM warm start / 评分来源版本迁移）；
         - none：什么都不做（新训练保持初始 state）。
+
+        版本语义（v2 起评分来源为 X 单轴 reward）：
+        - v2 full：要求 ``tracking_reward_term`` 与当前 term 一致（否则说明
+          checkpoint 的评分语义与当前不同，统计不可比，fail-loud）；
+        - v1（评分来源 = XY 合并项）：EMA / streak / buffer 的统计语义已变化，
+          **full 恢复必须明确拒绝**；range 恢复允许（只取 vx range，统计 fresh）。
 
         buffer 至多保留 buffer_min 个样本（超过部分按先进先出截断，避免
         异常 checkpoint 膨胀）。
@@ -166,10 +177,36 @@ class WolfForwardSpeedCommandCurriculum(ManagerTermBase):
             return
         if not isinstance(state, dict):
             raise ValueError(f"command curriculum state must be a dict, got {type(state)}")
-        if state.get("version") != CURRICULUM_STATE_VERSION:
+        state_version = state.get("version")
+        if state_version == CURRICULUM_STATE_VERSION:
+            if mode == "full":
+                state_term = state.get("tracking_reward_term")
+                if state_term != self._reward_term_name:
+                    raise ValueError(
+                        "command curriculum state tracking reward term mismatch: "
+                        f"checkpoint {state_term!r} != current "
+                        f"{self._reward_term_name!r}；full restore 要求评分来源一致"
+                        "（EMA / streak / buffer 基于同一 reward term 才可比），"
+                        "如确需恢复范围请使用 range mode"
+                    )
+        elif state_version == 1:
+            # v1 → v2 评分语义迁移：只允许 range（统计不可比）。
+            if mode == "full":
+                raise ValueError(
+                    "command curriculum state version 1 不支持 full restore"
+                    "（v1 的 EMA / streak / buffer 基于已废弃的 XY 合并评分，"
+                    "统计语义与 v2 的 X 单轴评分不可比）。使用 range mode 只恢复 "
+                    "vx 范围，或 command_curriculum_restore='none'。"
+                )
+            if mode == "range":
+                print(
+                    "[WARN] command curriculum state 为 v1（XY 合并评分来源）："
+                    "只恢复 vx 范围，EMA / streak / buffer 清空（v2 评分语义）。"
+                )
+        else:
             raise ValueError(
                 "unsupported command curriculum state version: "
-                f"{state.get('version')!r} (expected {CURRICULUM_STATE_VERSION})"
+                f"{state_version!r} (expected {CURRICULUM_STATE_VERSION} or 1)"
             )
         vx_min, vx_max = float(state["vx_min"]), float(state["vx_max"])
         self._validate_range(vx_min, vx_max)

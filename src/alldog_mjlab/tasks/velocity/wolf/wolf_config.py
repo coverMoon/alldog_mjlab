@@ -325,15 +325,15 @@ class TerminationParams:
 class RewardScales:
     """Wolf 通用奖励权重（flat / rough 四任务同一套 13 项）。"""
 
-    tracking_linear: float = 1.0
-    tracking_angular: float = 1.0  # 用户 2026-10 调参（0.5 → 1.0）
+    tracking_linear_x: float = 1.0
+    tracking_linear_y: float = 1.0
+    tracking_angular: float = 1.0
     lin_vel_z: float = -1.0
     ang_vel_xy: float = -0.05
     base_height: float = -2.0
     leg_action_rate: float = -0.01
     wheel_action_rate: float = -0.002
-    # ---- 姿态奖励（v1/v2，BlackW 经验迁移；flat / rough 共用）----
-    upright: float = -1.5
+    orientation: float = -1.5
     hip_default: float = -0.30
     stand_still: float = -0.40
     run_still: float = -0.20

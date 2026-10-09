@@ -64,13 +64,16 @@ from alldog_mjlab.tasks.velocity.wolf.rewards import (
     angular_velocity_xy_l2,
     base_height_l2_flat,
     base_height_l2_terrain,
-    base_orientation_l1,
+    dof_pos_limits,
     hip_default_l1,
     leg_action_rate_l2,
+    leg_torques_l2,
+    orientation_l1,
     run_still_leg_l1,
     stand_still_leg_l1,
     track_angular_velocity_z,
-    track_linear_velocity_xy,
+    track_linear_velocity_x,
+    track_linear_velocity_y,
     vertical_linear_velocity_l2,
     wheel_action_rate_l2,
 )
@@ -178,8 +181,9 @@ WOLF_TEMPLATE_ROOT_BODY = "robot/base_link"
 # Command term 名称（task wiring：reward / termination / curriculum 都按名取它）。
 WOLF_COMMAND_NAME = "twist"
 
-# Tracking 线速度 reward term 名：command curriculum 的 performance 采样来源。
-WOLF_TRACKING_VELOCITY_REWARD_TERM = "track_linear_velocity"
+# Tracking X 轴 reward term 名：command curriculum 的 performance 采样来源。
+# X 课程只看前进速度跟踪（v2 起分轴，见 §28.5）。
+WOLF_TRACKING_VELOCITY_REWARD_TERM = "track_linear_velocity_x"
 
 # 腿 / 轮的执行器选择器（显式 policy 顺序驱动，不依赖 MJCF natural order）。
 WOLF_LEG_ACTION_JOINT_NAMES = {
@@ -500,11 +504,13 @@ def _configure_events(
 
 
 def _configure_rewards(cfg: ManagerBasedRlEnvCfg, rough: bool) -> None:
-    """Wolf reward baseline：四任务同一套 13 项（dict 顺序即 logging 顺序）。
+    """Wolf reward baseline：四任务同一套 14 项（dict 顺序即 logging 顺序）。
 
-    tracking / 罚项 / 姿态公式在本任务 rewards.py（与 black/rewards.py 公式
-    独立同构，不 import）；action rate 按显式 16-D contract 的 leg / wheel 分组。
-    姿态奖励（upright L1 / hip_default / stand_still / run_still /
+    全部 reward func 均定义在 rewards.py（与 black/rewards.py 公式独立同构，
+    不 import；native 项经薄包装转发）；action rate 按显式 16-D contract 的
+    leg / wheel 分组。
+    速度跟踪 v2 起分轴：track_linear_velocity_x / _y 独立项（课程评分来源 =
+    X 项）；姿态奖励（orientation L1 / hip_default / stand_still / run_still /
     dof_pos_limits / leg_torques）为 Wolf v1/v2 统一扩展（BlackW 经验迁移），
     flat / rough 共用同一公式 / 权重 / 选关节（有意修改 rough 原 8 项基线，
     见 MIGRATION §28.5）。
@@ -532,9 +538,17 @@ def _configure_rewards(cfg: ManagerBasedRlEnvCfg, rough: bool) -> None:
     )
     posture = WOLF_CONFIG.reward.posture
     cfg.rewards = {
-        "track_linear_velocity": RewardTermCfg(
-            func=track_linear_velocity_xy,
-            weight=WOLF_CONFIG.reward.scales.tracking_linear,
+        "track_linear_velocity_x": RewardTermCfg(
+            func=track_linear_velocity_x,
+            weight=WOLF_CONFIG.reward.scales.tracking_linear_x,
+            params={
+                "command_name": WOLF_COMMAND_NAME,
+                "sigma": WOLF_CONFIG.reward.tracking_sigma,
+            },
+        ),
+        "track_linear_velocity_y": RewardTermCfg(
+            func=track_linear_velocity_y,
+            weight=WOLF_CONFIG.reward.scales.tracking_linear_y,
             params={
                 "command_name": WOLF_COMMAND_NAME,
                 "sigma": WOLF_CONFIG.reward.tracking_sigma,
@@ -556,10 +570,10 @@ def _configure_rewards(cfg: ManagerBasedRlEnvCfg, rough: bool) -> None:
             func=angular_velocity_xy_l2,
             weight=WOLF_CONFIG.reward.scales.ang_vel_xy,
         ),
-        # L1 公式（BlackW 经验，见 rewards.base_orientation_l1；四任务统一）。
-        "upright": RewardTermCfg(
-            func=base_orientation_l1,
-            weight=WOLF_CONFIG.reward.scales.upright,
+        # L1 公式（BlackW 经验，见 rewards.orientation_l1；四任务统一）。
+        "orientation": RewardTermCfg(
+            func=orientation_l1,
+            weight=WOLF_CONFIG.reward.scales.orientation,
         ),
         "base_height": base_height_term,
         "leg_action_rate": RewardTermCfg(
@@ -620,17 +634,17 @@ def _configure_rewards(cfg: ManagerBasedRlEnvCfg, rough: bool) -> None:
         },
     )
     cfg.rewards["dof_pos_limits"] = RewardTermCfg(
-        func=envs_mdp.joint_pos_limits,
+        func=dof_pos_limits,
         weight=WOLF_CONFIG.reward.scales.dof_pos_limits,
         params={"asset_cfg": leg_cfg},
     )
     cfg.rewards["leg_torques"] = RewardTermCfg(
-        func=envs_mdp.joint_torques_l2,
+        func=leg_torques_l2,
         weight=WOLF_CONFIG.reward.scales.leg_torques,
         params={"asset_cfg": leg_actuator_cfg},
     )
     assert WOLF_TRACKING_VELOCITY_REWARD_TERM in cfg.rewards
-    assert len(cfg.rewards) == 13
+    assert len(cfg.rewards) == 14
 
 
 def _configure_flat_terrain(cfg: ManagerBasedRlEnvCfg) -> None:

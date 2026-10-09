@@ -1,13 +1,23 @@
-"""Wolf 任务的 reward math（task local，不 import `black.rewards`）。
+"""Wolf 任务的 reward 函数入口（task local，不 import `black.rewards`）。
 
-tracking / 罚项公式与 black/rewards.py 的机器人无关实现逐公式独立同构
-（HIMLoco 公式；公式与 Black 完全相同也在 Wolf 中独立定义），另加按 16-D
-显式 action contract 分组的 leg / wheel action rate（native `action_rate_l2`
-对全部 16 维求和，无法按腿 / 轮分组）。
+所有 Wolf reward term 的 func 都定义在本文件，由 env_cfgs.py 统一注册
+（wolf_config.py 管参数 / rewards.py 管函数 / env_cfgs.py 管装配）。
 
-rough 专属：`base_height_l2_terrain`（局部地形相对高度的 footprint 均值 L2，
-算法与 Black rough 相同：native terrain_scan 中央 7 x 5 = 35 rays 的 clearance
-均值）。
+分组（按 env_cfgs 注册顺序）：
+
+1. 速度跟踪（分轴）：``track_linear_velocity_x`` / ``track_linear_velocity_y``
+   / ``track_angular_velocity_z``（指数核，body-frame）；
+2. 罚项与姿态：``vertical_linear_velocity_l2`` / ``angular_velocity_xy_l2`` /
+   ``orientation_l1``（body-frame 项目均单独实现，不用 native world-frame 版）；
+3. base_height：``base_height_l2_flat``（world-z，flat）/
+   ``base_height_l2_terrain``（terrain-relative footprint 均值，rough；
+   Black rough 同算法：native terrain_scan 中央 7 x 5 = 35 rays clearance）；
+4. action rate：``leg_action_rate_l2`` / ``wheel_action_rate_l2``（按 16-D
+   显式 action contract 分组，native `action_rate_l2` 对全部 16 维求和无法分组）；
+5. 姿态（BlackW 经验迁移）：``hip_default_l1`` / ``stand_still_leg_l1`` /
+   ``run_still_leg_l1``；
+6. native 薄包装（不复制 MjLab 数学）：``dof_pos_limits`` /
+   ``leg_torques_l2``（直接转发 ``mjlab.envs.mdp`` 原生实现）。
 """
 
 from __future__ import annotations
@@ -37,17 +47,34 @@ _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
 _FOOTPRINT_TOLERANCE = 1e-4
 
 
-def track_linear_velocity_xy(
+def track_linear_velocity_x(
     env: ManagerBasedRlEnv,
     sigma: float,
     command_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """只跟踪 commanded planar 线速度的指数奖励。
+    """只跟踪 commanded X 线速度的指数奖励（单轴）。"""
+    asset: Entity = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    assert command is not None, f"Command '{command_name}' not found."
+    actual = asset.data.root_link_lin_vel_b
+    error = torch.square(command[:, 0] - actual[:, 0])
+    return torch.exp(-error / sigma)
 
-    ``reward = exp(-Σ(v_cmd_xy - v_xy)² / sigma)``，body-frame root 线速度，
-    竖直分量不参与。``sigma`` 即 legacy ``tracking_sigma``。
-    """
+
+def track_linear_velocity_y(
+    env: ManagerBasedRlEnv,
+    sigma: float,
+    command_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """只跟踪 commanded Y 线速度的指数奖励（单轴）。"""
+    asset: Entity = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    assert command is not None, f"Command '{command_name}' not found."
+    actual = asset.data.root_link_lin_vel_b
+    error = torch.square(command[:, 1] - actual[:, 1])
+    return torch.exp(-error / sigma)
     asset: Entity = env.scene[asset_cfg.name]
     command = env.command_manager.get_command(command_name)
     assert command is not None, f"Command '{command_name}' not found."
@@ -226,7 +253,7 @@ _LEG_JOINT_NAMES = tuple(
 )
 
 
-def base_orientation_l1(
+def orientation_l1(
     env: "ManagerBasedRlEnv", asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG
 ) -> torch.Tensor:
     """机身姿态 L1：|projected_gravity_x| + |projected_gravity_y|。
@@ -340,3 +367,29 @@ def run_still_leg_l1(
         dim=1,
     )
     return leg_error * active
+
+
+# ---------------------------------------------------------------------------
+# MjLab native 薄包装（不复制数学实现；统一 Wolf reward 函数入口由本文件提供，
+# 使 env_cfgs.py 的 reward 注册全部指向 task local 名称）。
+# ---------------------------------------------------------------------------
+
+
+def dof_pos_limits(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    """关节软限位越界惩罚（MjLab native `joint_pos_limits` 的 Wolf-local 转发）。"""
+    return envs_mdp.joint_pos_limits(env, asset_cfg=asset_cfg)
+
+
+def leg_torques_l2(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    """关节力矩 L2 惩罚（MjLab native `joint_torques_l2` 的 Wolf-local 转发）。
+
+    选择器由 ``asset_cfg`` 控制：注册时显式传入 12 个腿部 actuator 名称
+    （actuator 名 = 目标关节名），轮 actuator 不参与。
+    """
+    return envs_mdp.joint_torques_l2(env, asset_cfg=asset_cfg)
