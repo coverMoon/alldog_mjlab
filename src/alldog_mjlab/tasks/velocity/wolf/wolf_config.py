@@ -589,7 +589,7 @@ class RunnerParams:
         )
     )
     save_interval: int = 50
-    num_steps_per_env: int = 32
+    num_steps_per_env: int = 64
     max_iterations: int = 10_000
     # resume 时 command curriculum state 的默认恢复策略（语义与 Black 一致：
     # auto = 同 stage full / 跨 stage range / 旧 checkpoint none；PPO→HIM warm start
