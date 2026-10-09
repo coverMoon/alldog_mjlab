@@ -36,7 +36,6 @@ from mjlab.utils.noise import UniformNoiseCfg
 
 from alldog_mjlab.robots.wolf import get_wolf_robot_cfg
 from alldog_mjlab.robots.wolf.wolf_constants import (
-    WOLF_DEFAULT_ROOT_Z,
     WOLF_LEG_JOINT_NAMES,
     WOLF_LEG_ORDER,
     WOLF_POLICY_JOINT_NAMES,
@@ -65,6 +64,7 @@ from alldog_mjlab.tasks.velocity.wolf.randomization import (
     ScaledBiasedWheelVelocityActionCfg,
     BiasedSignedWheelVelocity,
     randomize_body_inertia_scale,
+    randomize_ground_friction,
     randomize_leg_pd_gains_strength,
     randomize_wheel_friction_multiplier,
     randomize_wheel_motor_strength,
@@ -626,9 +626,10 @@ def _dr_event_terms(dr: DomainRandomizationParams) -> dict[str, EventTermCfg]:
     """Wolf DR 事件表（仅显式开启的项注册；dict 顺序 = 同 mode 内应用顺序）。
 
     顺序敏感点：
-    - ``dr_ground_friction``（绝对值写入全部 collision geom）必须先于
-      ``dr_wheel_friction``（乘子，读当前值）；
-    - ``dr_wheel_radius`` 必须在 ``reset_base`` 之后（覆盖 root z 做高度补偿）。
+    - ``dr_ground_friction``（绝对值写全部机器人 collision geom + 地面 geom 压
+      0）必须先于 ``dr_wheel_friction``（乘子，读当前值）；
+    - ``dr_wheel_radius`` 必须在 ``reset_base`` 之后（读改当前 root pose 的
+      Z 分量做高度补偿，保留 XY / quat / velocity）。
     """
     terms: dict[str, EventTermCfg] = {}
 
@@ -636,6 +637,8 @@ def _dr_event_terms(dr: DomainRandomizationParams) -> dict[str, EventTermCfg]:
     wheel_geoms = SceneEntityCfg(
         "robot", geom_names=WOLF_WHEEL_COLLISION_GEOM_NAMES, preserve_order=True
     )
+    # 地面 geom（plane terrain 的碰撞平面；摩擦事件把它压 0，见 randomization 模块）。
+    ground_plane_geoms = SceneEntityCfg("terrain", geom_names=("terrain",))
     base_body = SceneEntityCfg("robot", body_names=("base_link",))
     wheel_bodies = SceneEntityCfg(
         "robot", body_names=tuple(f"{leg}_Link4" for leg in WOLF_LEG_ORDER)
@@ -658,15 +661,16 @@ def _dr_event_terms(dr: DomainRandomizationParams) -> dict[str, EventTermCfg]:
     )
 
     # --- 摩擦（reset，per-episode 重采样；轮乘子顺序敏感）---
+    # 地面 geom 由事件压 0，保证 wheel-ground contact 摩擦不被地面默认 1.0
+    # 经 max() 合成抬高下限（采样范围低段 / 乘子结果可达）。
     if dr.ground_friction_enabled:
         terms["dr_ground_friction"] = EventTermCfg(
-            func=mdp_dr.geom_friction,
+            func=randomize_ground_friction,
             mode="reset",
             params={
                 "asset_cfg": all_collision_geoms,
-                "operation": "abs",
-                "ranges": dr.ground_friction_range,
-                "shared_random": True,
+                "terrain_cfg": ground_plane_geoms,
+                "friction_range": dr.ground_friction_range,
             },
         )
     if dr.wheel_friction_enabled:
@@ -676,6 +680,7 @@ def _dr_event_terms(dr: DomainRandomizationParams) -> dict[str, EventTermCfg]:
             params={
                 "scale_range": dr.wheel_friction_scale_range,
                 "asset_cfg": wheel_geoms,
+                "terrain_cfg": ground_plane_geoms,
                 "from_current_base": dr.ground_friction_enabled,
             },
         )
@@ -773,7 +778,7 @@ def _dr_event_terms(dr: DomainRandomizationParams) -> dict[str, EventTermCfg]:
             },
         )
 
-    # --- 轮几何（reset，含初始高度补偿；依赖 reset_base 先写入 nominal root z）---
+    # --- 轮几何（reset，含初始高度补偿；在 reset_base 之后读改当前 root pose Z）---
     if dr.wheel_radius_enabled:
         terms["dr_wheel_radius"] = EventTermCfg(
             func=randomize_wheel_radius_with_height,
@@ -781,7 +786,6 @@ def _dr_event_terms(dr: DomainRandomizationParams) -> dict[str, EventTermCfg]:
             params={
                 "scale_range": dr.wheel_radius_scale_range,
                 "asset_cfg": wheel_geoms,
-                "nominal_root_z": WOLF_DEFAULT_ROOT_Z,
             },
         )
 

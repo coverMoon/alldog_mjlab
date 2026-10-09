@@ -6,8 +6,8 @@ MJCF（``xmls/wolf.xml``）是模型权威来源；本文件定义 entity 级配
 关节名保持 Wolf 原生命名（``FL_hip / FL_thigh / FL_calf / FL_foot``，其余腿同理），
 不向 Black 的 ``*_joint`` 命名靠拢。
 
-PD 参数均为首版仿真候选值，**不是已确认的实机电机规格**：
-- 腿部 hip/thigh/calf：position PD，Kp=60、Kd=2.0、effort_limit=60 N·m；
+PD 参数为当前实际值，**实机电机规格仍待确认**：
+- 腿部 hip/thigh/calf：position PD，Kp=80、Kd=3.0、effort_limit=60 N·m；
 - 轮部 foot：velocity PD，Kp=0、Kd=1.0、effort_limit=17 N·m（速度目标由后续
   task 的 velocity action 提供；轮部不做 torque action，也不用 XML velocity servo）。
 """

@@ -5,10 +5,12 @@
 - 优先使用 MjLab v1.6.0 原生 ``dr.*`` / ``mdp.*``；本模块只实现原生机制
   无法直接表达的部分，全部相对 nominal（compile-time default）参数显式建立
   状态，禁止跨 episode 累计漂移。
-- 轮地摩擦：MuJoCo 接触摩擦按 geom pair 取 max 结合（地面 geom 恒为默认
-  1.0），因此「全局摩擦 + 轮摩擦乘子」必须直接以绝对值写轮 geom，而不是
-  依赖 pair 组合；轮摩擦事件读取前序 ground_friction 事件写入的当前值再乘
-  per-env 乘子（event dict 顺序 = 应用顺序）。
+- 轮地摩擦：MuJoCo 接触摩擦按 geom pair 取 **max** 结合（地面 geom 默认 1.0
+  会把合成结果抬高下限）。因此「全局摩擦 + 轮摩擦乘子」直接以绝对值写机器人
+  geom，并把地面 geom 切向摩擦压到 0，使 pair 合成结果完全由机器人 geom 决定；
+  实际 wheel-ground contact 摩擦因此可完整覆盖配置采样范围（含 < 1.0 段），
+  且摩擦乘子读前序 ground_friction 事件写入的当前值再乘 per-env 共享乘子
+  （event dict 顺序 = 应用顺序）。仅支持 plane terrain（Wolf flat）。
 - 执行器：保留 IdealPdActuator 控制律，Kp/Kd/motor strength 组合缩放通过
   ``set_gains`` 相对 default 建立；轮子 Kp 恒为 0，任何缩放都不会引入
   position stiffness。
@@ -47,7 +49,7 @@ from alldog_mjlab.tasks.velocity.wolf.observations import signed_wheel_velocity
 
 
 # ---------------------------------------------------------------------------
-# Event：轮摩擦乘子（依赖前序 ground_friction 事件写入的绝对值）
+# Event：轮地摩擦（地面 geom 压 0 + 轮摩擦乘子，依赖 event dict 顺序）
 # ---------------------------------------------------------------------------
 
 
@@ -57,6 +59,23 @@ def _resolve_env_ids(
     if env_ids is None:
         return torch.arange(env.num_envs, device=env.device, dtype=torch.int)
     return env_ids.to(env.device, dtype=torch.int)
+
+
+def _press_terrain_friction(
+    env: ManagerBasedRlEnv,
+    terrain_cfg: SceneEntityCfg,
+    env_ids: torch.Tensor,
+) -> None:
+    """把地面 geom 的切向摩擦压到 0。
+
+    MuJoCo contact 摩擦 = max(geom1, geom2)：地面默认 1.0 会把 pair 合成结果
+    抬高下限（采样值 < 1.0 被吞掉）。压 0 后合成结果完全由机器人 geom 决定，
+    wheel-ground contact 摩擦可完整覆盖配置采样范围与乘子组合。仅支持
+    plane terrain（Wolf flat）。
+    """
+    terrain = env.scene[terrain_cfg.name]
+    env_grid, geom_grid = _resolve_geom_grid(env, terrain, terrain_cfg, env_ids)
+    env.sim.model.geom_friction[env_grid, geom_grid, 0] = 0.0
 
 def _resolve_geom_grid(
     env: ManagerBasedRlEnv,
@@ -80,17 +99,44 @@ def _resolve_geom_grid(
 
 
 @requires_model_fields("geom_friction")
+def randomize_ground_friction(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor | None,
+    friction_range: tuple[float, float],
+    asset_cfg: SceneEntityCfg,
+    terrain_cfg: SceneEntityCfg,
+) -> None:
+    """基础摩擦：per-env 单标量（旧版单系数语义），绝对值写全部机器人 collision geom。
+
+    同时把地面 geom 切向摩擦压 0（见 ``_press_terrain_friction``）：否则地面默认
+    1.0 经 max() 合成会把 contact 摩擦下限抬高到 1.0，采样范围 [0.25, 1.25]
+    的低段实际不可达。压 0 后 wheel-ground contact 摩擦 = 本事件写入的采样值。
+    """
+    env_ids = _resolve_env_ids(env, env_ids)
+    asset = env.scene[asset_cfg.name]
+    env_grid, geom_grid = _resolve_geom_grid(env, asset, asset_cfg, env_ids)
+    sampled = sample_uniform(
+        friction_range[0], friction_range[1], (len(env_ids), 1), device=env.device
+    )
+    env.sim.model.geom_friction[env_grid, geom_grid, 0] = sampled
+    _press_terrain_friction(env, terrain_cfg, env_ids)
+
+
+@requires_model_fields("geom_friction")
 def randomize_wheel_friction_multiplier(
     env: ManagerBasedRlEnv,
     env_ids: torch.Tensor | None,
     scale_range: tuple[float, float],
     asset_cfg: SceneEntityCfg,
+    terrain_cfg: SceneEntityCfg,
     from_current_base: bool,
 ) -> None:
-    """轮摩擦 = 本 episode 基础摩擦 × per-env 采样乘子。
+    """轮摩擦 = 本 episode 基础摩擦 × per-env 共享乘子（旧 BlackW 语义）。
 
-    MuJoCo 接触摩擦按 geom pair 取 max 结合，乘法组合无法经 pair 表达，故直接
-    改写轮 geom 的切向摩擦绝对值。
+    乘子为每环境单标量（四轮同值），不引入逐轮独立随机化。乘子经 max()
+    合成无法靠 pair 表达，故直接改写轮 geom 切向摩擦绝对值；并把地面 geom
+    压 0，保证 wheel-ground contact 摩擦 = 轮 geom 值（否则地面默认 1.0 会
+    把乘子结果抬回 1.0，乘子对 < 1.0 段失效）。
 
     ``from_current_base=True``（ground_friction 同开）：读前序 ground_friction
     事件写入的当前值作为基础摩擦（event dict 顺序保证）；
@@ -104,10 +150,12 @@ def randomize_wheel_friction_multiplier(
         base = env.sim.model.geom_friction[env_grid, geom_grid, 0].clone()
     else:
         base = env.sim.get_default_field("geom_friction")[geom_grid, 0]
+    # per-env 共享乘子：(n_envs, 1) 采样，广播到四轮（旧版 (len(env_ids), 1) 语义）。
     scale = sample_uniform(
-        scale_range[0], scale_range[1], base.shape, device=env.device
+        scale_range[0], scale_range[1], (len(env_ids), 1), device=env.device
     )
     env.sim.model.geom_friction[env_grid, geom_grid, 0] = base * scale
+    _press_terrain_friction(env, terrain_cfg, env_ids)
 
 
 # ---------------------------------------------------------------------------
@@ -297,15 +345,16 @@ def randomize_wheel_radius_with_height(
     env_ids: torch.Tensor | None,
     scale_range: tuple[float, float],
     asset_cfg: SceneEntityCfg,
-    nominal_root_z: float,
 ) -> None:
     """轮碰撞圆柱半径相对 nominal 乘法缩放，并把 root z 抬高到新几何接触高度。
 
     - 半径用原生 ``dr.geom_size``（scale 相对 default，不累计；写后同步刷新
       geom_rbound / geom_aabb，broadphase 一致）；轮 body 有显式 inertial，
       几何变化不会暗中修改质量。
-    - 初始高度补偿：root z = nominal_root_z + (r_new − r_nominal)，避免半径
-      变化后 reset 轮地初始穿透（写 pos，不改 quat / 速度）。
+    - 初始高度补偿：只读改当前 root pose 的 Z 分量
+      ``z += (r_new − r_nominal)``，避免半径变化后 reset 轮地初始穿透；
+      XY / quaternion 原样保留（read-modify-write qpos），velocity（qvel）
+      完全不触碰（保留 reset_base 写入的六维扰动）。
     """
     env_ids = _resolve_env_ids(env, env_ids)
     dr.geom_size(
@@ -322,19 +371,15 @@ def randomize_wheel_radius_with_height(
     r_new = env.sim.model.geom_size[env_grid, geom_grid, 0]  # (n, 4)
     # shared_random=True ⇒ 同 env 内 4 轮半径一致；取第一列做高度补偿。
     assert bool(torch.allclose(r_new, r_new[:, :1], rtol=0, atol=0)), r_new
-    z = nominal_root_z + (r_new[:, :1] - WOLF_WHEEL_RADIUS)
-    origin = env.scene.env_origins[env_ids]
-    pose = torch.cat(
-        [
-            torch.cat(
-                [origin[:, :2], z], dim=-1
-            ),
-            torch.zeros(len(env_ids), 4, device=env.device),
-        ],
-        dim=-1,
-    )
-    pose[:, 3] = 1.0  # 单位四元数（与 nominal reset 一致）
-    asset.write_root_link_pose_to_sim(pose, env_ids=env_ids)
+    # 只调整当前 root pose 的 Z（XY / quat 原样保留；写 pose 不触碰 qvel）。
+    # 读 sim 原始 qpos（reset 事件阶段 derived kinematics 未经 forward，不可用
+    # root_link_pose_w）；free_joint_q_adr 为 per-world 绝对 qpos 地址。
+    env_ids_long = env_ids.to(env.device, dtype=torch.long)
+    pose = env.sim.data.qpos[
+        env_ids_long[:, None], asset.indexing.free_joint_q_adr
+    ].clone()
+    pose[:, 2] += (r_new[:, 0] - WOLF_WHEEL_RADIUS)
+    asset.write_root_link_pose_to_sim(pose, env_ids=env_ids_long)
 
 
 # ---------------------------------------------------------------------------

@@ -116,7 +116,7 @@ class NoiseParams:
 class ResetParams:
     """Episode reset 的 pose / velocity 采样范围（小幅扰动，nominal dynamics）。
 
-    root pose 不随机高度 / 姿态（default 站立 0.4289 m 直接落地）；root 六维速度
+    root pose 不随机高度 / 姿态（default 站立 0.4432 m 直接落地）；root 六维速度
     小幅独立均匀采样；腿关节相对 default pose 小幅 offset（完全在 soft limit 内）；
     轮子位置 / 速度归零（default 即 0）。
     """

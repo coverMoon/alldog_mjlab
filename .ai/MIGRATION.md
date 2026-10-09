@@ -4133,25 +4133,26 @@ wheel       WOLF_WHEEL_JOINT_NAMES / WOLF_WHEEL_COLLISION_GEOM_NAMES
 
 ```text
 joint 默认姿态（rad）:
-    hip 0；thigh FL/RR +0.82 / FR/RL -0.82；calf FL/RR +1.52 / FR/RL -1.52；
-    foot 0。关节速度 0；root 单位四元数；root pos (0,0,0.45)。
-几何接触 root z（MuJoCo FK 实测）= 0.4289 = 轮心偏移 0.3489 + 轮半径 0.08
-    （轮径更新后按上轮值直接算出，FK 复核一致）。
-INIT_STATE pos z = 0.4289：轮最低点 ≈ 0（亚 mm 级余量），可直接站立。
+    hip 0；thigh FL/RR +0.82 / FR/RL -0.82；calf FL/RR +1.43 / FR/RL -1.43；
+    foot 0。关节速度 0；root 单位四元数；root pos (0,0,0.4432)。
+几何接触 root z = 0.4432 = 轮心偏移 0.3632 + 轮半径 0.08（calf=1.43 姿态 FK 实测）。
+INIT_STATE pos z = 0.4432：轮最低点 ≈ 0，可直接站立。
 受控站立（腿部位返 PD 至 default + 轮部速度 PD 0，2.5 s）:
-    root z 0.4289 → 稳态 0.3773；静力沉降 ≈ 5.2 cm（thigh 静力矩 ≈ 11 N·m /
-    Kp=60 → 稳态误差 ≈ 0.23 rad）；roll/pitch ≈ 0；4 轮接地（cylinder-plane
-    收敛后 4 contacts）；max contact force ≈ 85 N；max leg τ 13.9 N·m ≪ 60
-    （无力矩饱和）；无自碰撞 / 弹飞 / 持续塌陷 / 数值发散。
-    Kp 提高以减小沉降记为候选改进（下一阶段再定），本轮未调。
+    以下数值为历史记录：在首版 Kp=60/Kd=2.0、calf=1.52、root z=0.4289 旧姿态下
+    实测（root z 0.4289 → 稳态 0.3773，静力沉降 ≈ 5.2 cm，thigh 静力矩 ≈ 11 N·m
+    → 稳态误差 ≈ 0.23 rad；roll/pitch ≈ 0；4 轮接地；max contact force ≈ 85 N；
+    max leg τ 13.9 N·m ≪ 60；无自碰撞 / 弹飞 / 持续塌陷 / 数值发散）。
+    当前 Kp=80/Kd=3.0 + calf=1.43 姿态下未重跑受控站立沉降记录（候选改进已
+    落地，沉降应更小；待下轮验证记录补充）。
 ```
 
 ### 27.4 执行器 contract
 
 ```text
 全部 MjLab v1.6.0 原生 IdealPdActuatorCfg，逐关节 16 个（sort_actuators=True）：
-    hip/thigh/calf  position PD  Kp=60, Kd=2.0,  effort_limit=60 N·m
-                    （首版仿真候选，非已验证实机电机规格；dq_target=0）
+    hip/thigh/calf  position PD  Kp=80, Kd=3.0,  effort_limit=60 N·m
+                    （腿部 Kp=80/Kd=3 为当前实际值；实机电机规格仍待确认；
+                     dq_target=0）
     foot（轮）       velocity PD  Kp=0,  Kd=1.0,  effort_limit=17 N·m
                     （不使用 torque action / XML velocity servo / 自定义 actuator）
 控制语义 = mjlaw τ = clamp(Kp(pos_t−q)+Kd(vel_t−dq)+effort, ±limit)：
@@ -4218,7 +4219,7 @@ IMU（check_wolf_imu.py）: 静态 / 静止读数 / 5 组倾斜 / 非零角速�
 ### 27.7 待确认硬件参数与下一单元
 
 ```text
-待确认   腿部 60/2/60 与轮部 17 N·m 的实机电机规格；实机 IMU 安装位置
+待确认   腿部 80/3/60 与轮部 17 N·m 的实机电机规格；实机 IMU 安装位置
 下一单元：Wolf flat 长训验证（真实收敛评估，"能跑" ≠ "训练有效"）；
          DR（旧 BlackW 20+ 项，逐项开关）与 rough / sim2real 之后的阶段未开始。
 ```
@@ -4302,7 +4303,7 @@ termination：time_out（20 s，time_out=True）+ illegal_contact
     （base_link 对 terrain，力阈值 1.0 N，history 4 substeps）；
     无倾角终止、无 stuck、无 OOB。play 下 illegal_contact 移除。
 
-reset：root pose 不随机（default 站立 z=0.4289）；root 速度六轴小幅扰动；
+reset：root pose 不随机（default 站立 z=0.4432）；root 速度六轴小幅扰动；
     hip/thigh/calf 小幅 offset（±0.3 内，thigh/calf 非零）；轮子零位零速。
     无 DR 事件（nominal dynamics）。
 
@@ -4382,11 +4383,13 @@ src/alldog_mjlab/tasks/velocity/wolf/wolf_config.py
 ```
 
 原生优先使用：payload/com 用 `dr.body_mass(add)` /「dr.body_com_offset(add)」；
-link/wheel mass 用 `dr.body_mass(scale)`；ground friction 用
-`dr.geom_friction(abs,shared_random)`；push 用 native `push_by_setting_velocity`；
+link/wheel mass 用 `dr.body_mass(scale)`；push 用 native `push_by_setting_velocity`；
 disturbance 用 native `apply_external_force_torque`；delay 用原生 actuator
 `delay_min_lag/delay_max_lag`（"3/4 policy step" → ×decimation 物理 step）；
 wheel radius 用 `dr.geom_size(scale)`（写后自动刷新 rbound/aabb）。
+轮地摩擦为自定义实现（原生 `dr.geom_friction` 无法处理 pair max() 下限，见 §29.3）：
+`randomize_ground_friction`（per-env 标量写全部机器人 geom + 地面 geom 压 0）+
+`randomize_wheel_friction_multiplier`（读当前值 × per-env 共享乘子）。
 
 ### 29.2 遷移对照表（旧 BlackW → Wolf）
 
@@ -4395,8 +4398,8 @@ wheel radius 用 `dr.geom_size(scale)`（写后自动刷新 rbound/aabb）。
 | base payload mass [-1,2]kg | 每 reset 重采样，add 到 base mass | IMPLEMENTED | dr.body_mass(add) | bounds PASS |
 | base COM offset ±0.05 | add 到 base COM | IMPLEMENTED | dr.body_com_offset(add) | bounds PASS |
 | link mass [0.9,1.1] | 每 body 独立采样，“自 body 起”均值 | IMPLEMENTED（base body 除外） | dr.body_mass(scale) | PASS |
-| friction [0.25,1.25] | 单系数套用 actor 全部 shape | IMPLEMENTED | dr.geom_friction(abs,shared_random) | bounds PASS |
-| wheel friction ×[0.4,1.0] | base×scale，后乘 | IMPLEMENTED | 自定义复合（读当前值再乘） | compPASS（ratio∈[0.4,1]） |
+| friction [0.25,1.25] | 单系数套用 actor 全部 shape | IMPLEMENTED | 自定义 randomize_ground_friction（per-env 标量写全部机器人 geom；地面 geom 压 0） | bounds + contact 级 PASS |
+| wheel friction ×[0.4,1.0] | base×scale，后乘（per-env 共享，四轮同值） | IMPLEMENTED | 自定义复合（读当前值再乘 per-env 共享乘子；地面 geom 压 0） | contact 级 PASS（contact == 轮 geom，min 0.142 < 1.0） |
 | restitution [0,0.1] | Isaac Gym shape restitution | UNSUPPORTED（未迁移） | v1.6 无可靠恢复系数机制（solref 不等价） | — |
 | motor strength [0.9,1.1] | 终端力矩乘因子，"clip 后语义 = 栱增益缩放" | IMPLEMENTED | 自定义：合成进 IdealPd kp/kd | bounds PASS |
 | hip motor strength [0.8,1.05] | per-hip 因子，全局后乘 | IMPLEMENTED | same（仅 hip actuator 第二因子） | bounds PASS |
@@ -4415,29 +4418,39 @@ wheel radius 用 `dr.geom_size(scale)`（写后自动刷新 rbound/aabb）。
 | wheel vel obs bias ±0.5 | per-wheel，加观测 | IMPLEMENTED | actor-only class obs term（critic 显式去 bias） | critic==真实值 PASS;actor==真实+bias±noise PASS |
 | wheel mass [0.9,1.1] | wheel body mass×scale | IMPLEMENTED | dr.body_mass(scale)（wheel body） | bounds PASS |
 | wheel inertia [0.8,1.2] | wheel body inertia×scale | IMPLEMENTED | 自定义 randomize_body_inertia_scale(wheel) | bounds PASS |
-| wheel radius ×[0.9,1.1] | per-env 固定采样（startup） | NOT EQUIVALENT（有意：per-episode 重采样） | dr.geom_size(scale)+root z 补偿 | r=0.12 静置抬高 PASS；rbound 一致 PASS |
+| wheel radius ×[0.9,1.1] | per-env 固定采样（startup） | NOT EQUIVALENT（有意：per-episode 重采样） | dr.geom_size(scale)+root pose Z 读改补偿（保留 XY/quat/velocity） | r=0.12 静置抬高 PASS；rbound 一致 PASS；root XY/quat/velocity 保留 PASS |
 | wheel base half width ×[0.95,1.05] | learned 轮速模式未使用该参数 | LEGACY INERT（不迁移） | Wolf learned 轮速无前馈半轮距项 | 静态分析 |
 
 ### 29.3 关键实现约束（已冻结）
 
-- MuJoCo 接触摩擦按 geom pair 取 **max** 结合（地面 geom 恒 1.0）：轮摩擦乘子
-  必须直接写轮 geom 绝对值；`plane` 地面摩擦自身不改（对 nominal 无影响，
-  ground_friction off 时轮摩擦相对 compile-time default 建立，不跨 episode 累计）。
+- MuJoCo 接触摩擦按 geom pair 取 **max** 结合：地面 geom 默认 1.0 会把
+  wheel-ground contact 摩擦下限抬高到 1.0（采样范围低段与乘子结果不可达）。
+  摩擦事件因此把地面 geom（plane terrain 的 `terrain` geom）切向摩擦压 0，
+  contact 摩擦 = 机器人 geom 值：
+  - `dr_ground_friction`：per-env 单标量绝对值写全部机器人 collision geom
+    （旧版单系数语义），同时压地面；
+  - `dr_wheel_friction`：轮 geom = 前序事件写入的当前值 × per-env 共享乘子
+    （旧 BlackW 语义：每环境单标量，四轮同值，非逐轮独立采样），同时压地面。
+  两事件均要求 plane terrain（Wolf flat）；摩擦 DR 全关时地面/机器人 geom
+  均为 nominal 默认值，行为不变。中性 DR（range=(1,1)）contact 摩擦 ==
+  nominal 1.0（已验证）。
+- 轮半径高度补偿只读改当前 root pose 的 Z（`z += r_new − r_nominal`），
+  XY / quaternion 原样保留、velocity（qvel）不触碰（直接读改 sim qpos；
+  derived kinematics 在 reset 事件阶段未经 forward，不可用 root_link_pose_w）。
 - 所有质量/COM/惯量/gain 条目相对 compile-time default 建立（“scale/add” relative
   default），关关开开连续 reset 无漂移（验证：5 次 reset 分布同区间）。
 - 腿/轮 delay 融入 IdealPdActuator 原生 delay（腿≤12、轮≤16 physics step；
   `update_period=decimation`，`per_env_phase=False`）；关闭时无 buffer、无残余。
 - calf backlash 关闭时用原生 JointPositionActionCfg（无状态机实例）；轮 target
   scale/bias 关闭时同理；`MINIMAL_DR` = ground_friction+Kp+Kd。
-- INIT 高度契约变更（用户确认 2026-10）：`WOLF_DEFAULT_ROOT_Z 0.4289 → 0.4432`
-  （工作区 calf 默认角 1.52→1.43 未提交修改保留；0.4289 为 calf=1.52 旧姿态的
-  几何接触值，calf=1.43 下轮地穿地 14.3mm；0.4432 = calf=1.43 下 FK 轮心偏移
-  0.3632+0.08）。`check_wolf_robot.py` 陈旧硬编码 Kp=60/damping=2.0 同步更正为
-  引用 wolf_constants 冻结值（工作区/未提交，不 diff 提交）。
+- 站立契约（用户确认 2026-10，已提交）：腿部 PD Kp=80/Kd=3、默认 calf 角
+  ±1.43 rad、`WOLF_DEFAULT_ROOT_Z = 0.4432`（= calf=1.43 下 FK 轮心偏移
+  0.3632 + 轮半径 0.08；旧值 0.4289 为 calf=1.52 旧姿态几何接触高度，弃用）。
 
 ### 29.4 验证记录（tests/check_wolf_dr.py，不提交）
 
 ```text
+历史（§29 初次集成）：
 CPU  PASS（静态 cfg / 全关 contract 逐位一致 + 中性 DR==nominal + 无残留 buffer /
      参数 bounds / 摩擦复合 / 无漂移×5 reset / initial joint pos 分布 / target 编制 /
      obs bias 隔离 / backlash 状态机 / delay stepdown ∈[0,16] / r=0.12 静置抬高 /
@@ -4445,8 +4458,17 @@ CPU  PASS（静态 cfg / 全关 contract 逐位一致 + 中性 DR==nominal + 无
 CUDA PASS（同套全项 GPU 重跑，含 DR-on 训练 smoke）
 回归：check_wolf_task（CPU+CUDA）/ check_black_flat（CPU+CUDA）/
      check_wolf_robot（新站立高度）/ check_wolf_imu 全部 PASS
-未验证：长训收敛质量（DR-on 长 iter）、rough/sim2real、decimation 换算 delay 的
-     sim2real 等价性 —— 均未开始。
+
+摩擦 / 轮半径定向修复（本轮）：
+CPU  PASS（静态 cfg 顺序 / 全关 + 中性 DR 等价含 contact 级摩擦 == 1.0 /
+     friction composition：contact（读 sim.data.contact）== 轮 geom =
+     base×U(0.4,1.0) per-env 共享、min 0.142 < 1.0（max() 下限已消除）/
+     wheel-only：轮 = 1.0×U(0.4,1.0) + 地面压 0 / 轮半径 root pose 保留：
+     XY/quat/velocity 不变、仅 Z += (r−0.08) / r=0.12 静置抬高）
+CUDA SKIPPED（本轮仅轻量定向检查，未重跑 GPU 矩阵；摩擦/半径写入路径无
+     device 分支，预期一致，待下轮完整验证补齐）
+未验证：PPO/HIM DR-on 训练冒烟（本轮跳过）、长训收敛质量、rough/sim2real、
+     delay sim2real 等价性 —— 未开始/未重跑。
 ```
 
 ## 26. Update Rule
