@@ -67,6 +67,7 @@ from alldog_mjlab.tasks.velocity.wolf.rewards import (
     base_orientation_l1,
     hip_default_l1,
     leg_action_rate_l2,
+    run_still_leg_l1,
     stand_still_leg_l1,
     track_angular_velocity_z,
     track_linear_velocity_xy,
@@ -505,13 +506,14 @@ def _configure_rewards(cfg: ManagerBasedRlEnvCfg, rough: bool) -> None:
     独立同构，不 import）；action rate 按显式 16-D contract 的 leg / wheel 分组。
     rough 只把 ``base_height`` 换成 local terrain-relative 语义（仅 func / params；
     key / weight / 顺序不变，高度目标仍读 WOLF_CONFIG.reward.base_height_target）。
-    不加入 run_still / 固定步态 / 强制轮地接触等限制高速轮足混合的项。
+    不加入足端周期 / 强制轮地接触等限制高速轮足混合的项（run_still 为
+    BlackW 已验证的直线行走回中门控项，v1 已加入 flat）。
 
     flat v1 姿态奖励（BlackW 经验迁移，仅 flat / flat-him）：
     - ``upright`` 换 L1 公式（|gx|+|gy|，weight -1.5）；rough 保持 native
       ``flat_orientation_l2``（-0.5）；
-    - 新增 ``hip_default`` / ``stand_still`` / ``dof_pos_limits`` /
-      ``leg_torques``（公式与选关节见 rewards.py / 参数在
+    - 新增 ``hip_default`` / ``stand_still`` / ``run_still`` /
+      ``dof_pos_limits`` / ``leg_torques``（公式与选关节见 rewards.py / 参数在
       WOLF_CONFIG.reward.posture；关节 / actuator 均显式名称选择，不含轮）。
     """
     base_height_term = (
@@ -619,6 +621,17 @@ def _configure_rewards(cfg: ManagerBasedRlEnvCfg, rough: bool) -> None:
                 "yaw_threshold": posture.stand_still_yaw_threshold,
             },
         )
+        cfg.rewards["run_still"] = RewardTermCfg(
+            func=run_still_leg_l1,
+            weight=WOLF_CONFIG.reward.scales.run_still,
+            params={
+                "asset_cfg": leg_cfg,
+                "command_name": WOLF_COMMAND_NAME,
+                "x_threshold": posture.run_still_x_threshold,
+                "y_threshold": posture.run_still_y_threshold,
+                "yaw_threshold": posture.run_still_yaw_threshold,
+            },
+        )
         cfg.rewards["dof_pos_limits"] = RewardTermCfg(
             func=envs_mdp.joint_pos_limits,
             weight=WOLF_CONFIG.reward.scales.dof_pos_limits,
@@ -630,7 +643,7 @@ def _configure_rewards(cfg: ManagerBasedRlEnvCfg, rough: bool) -> None:
             params={"asset_cfg": leg_actuator_cfg},
         )
     assert WOLF_TRACKING_VELOCITY_REWARD_TERM in cfg.rewards
-    assert len(cfg.rewards) == (8 if rough else 12)
+    assert len(cfg.rewards) == (8 if rough else 13)
 
 
 def _configure_flat_terrain(cfg: ManagerBasedRlEnvCfg) -> None:

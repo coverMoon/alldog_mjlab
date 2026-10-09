@@ -4304,15 +4304,16 @@ command：
     vy [-0.15,0.15] / yaw [-0.6,0.6] / resample 10 s
     standing 0.1 / forward-only 0.2 / world 0 / heading 关闭
 
-reward（基础 8 项 + flat 姿态 4 项，dict 顺序 = logging 顺序）:
+reward（基础 8 项 + flat 姿态 5 项，dict 顺序 = logging 顺序）:
     track_linear +1.0 / track_angular +0.5 / lin_vel_z -1.0 /
-    body_ang_vel -0.05 / base_height -2.0（target 0.45 m，用户调参）/
+    body_ang_vel -0.05 / base_height -2.0（target 0.40 m）/
     leg_action_rate -0.01 / wheel_action_rate -0.002；sigma 0.25
     leg / wheel action rate 按 16-D contract 显式分组（leg = 12 位置通道、
     wheel = 3/7/11/15），不整条 16 维求和
     flat 专属（§28.5）：upright 改 L1 -1.5 + hip_default -0.30 /
-    stand_still -0.40 / dof_pos_limits -0.20 / leg_torques -0.0001（12 项）
-    rough：upright 保持 native L2 -0.5，无姿态 4 项（8 项）
+    stand_still -0.40 / run_still -0.20 / dof_pos_limits -0.20 /
+    leg_torques -0.0001（13 项）
+    rough：upright 保持 native L2 -0.5，无姿态 5 项（8 项）
 
 termination：time_out（20 s，time_out=True）+ illegal_contact
     （base_link 对 terrain，力阈值 1.0 N，history 4 substeps）；
@@ -4390,10 +4391,15 @@ leg_torques（新增，-0.0001）：native mdp.joint_torques_l2，SceneEntityCfg
     WOLF_LEGS_FL_FIRST_JOINT_NAMES），不依赖 MJCF natural order。
 不变：track_linear_velocity +1.0 / track_angular_velocity +0.5 / lin_vel_z -1.0
     / body_ang_vel -0.05 / base_height -2.0 / leg_action_rate -0.01 /
-    wheel_action_rate -0.002；不新增 run_still / 足端周期 / 强制抬轮 / 轮速差 /
-    接触髋惩罚 / 固定步态约束。
-注意：base_height_target 用户同步调参 0.40 → 0.45（与 flat 模板站立高度一致；
-    历史完整模型站立稳态实测 0.3961 m）。
+    wheel_action_rate -0.002；不新增足端周期 / 强制抬轮 / 轮速差 / 接触髋惩罚 /
+    固定步态约束（run_still 为 BlackW 已验证的直线行走回中门控项，v2 加入）。
+高度目标：base_height_target 用户曾试调 0.45（与 flat 模板站立高度一致）后
+    恢复 0.40 m（2026-10；Wolf 完整模型站立稳态实测 0.3961 m；历史首版即 0.40）。
+run_still（v2 增补，-0.20）：12 腿关节（hip/thigh/calf，显式排除轮）回中 L1 ×
+    门控（|cmd_x| > 0.1 严格大于 & |cmd_y| < 0.1 & |cmd_yaw| < 0.15 严格小于；
+    BlackW `_reward_run_still` 同构，legacy 权重 -1.0，本轮取 -0.20）；
+    与 stand_still 共享同一 12 腿 SceneEntityCfg 选择器（rewards.run_still_leg_l1；
+    参数在 WOLF_CONFIG.reward.posture：run_still_x/y/yaw_threshold = 0.1/0.1/0.15）。
 训练效果（长训收敛 / 是否真正抑制姿态扭曲）未验证 —— 明确 NOT RUN：
     完整 PPO/HIM 训练与数百 iteration 收敛评估。
 ```
@@ -4411,10 +4417,13 @@ Black 回归：check_black_flat（CPU+CUDA）/ rough（CPU+CUDA）/ rough_him /
      command_curriculum / him / him_algo / him_runner / him_warm_start 全部 PASS。
 未验证：长训收敛 / 高速（±4）行为 / DR / rough / sim2real —— 均未开始。
 
-姿态奖励 v1 补充（tests/check_wolf_posture_rewards.py，不提交）：
-CPU PASS（四任务注册/权重（flat 12 / rough 8，upright 公式切换）；runtime 数学：
+姿态奖励 v1/v2 补充（tests/check_wolf_posture_rewards.py，不提交）：
+CPU PASS（四任务注册/权重（flat 13 / rough 8，含 run_still -0.20，upright 公式
+     切换）；四任务 base_height target = 0.40；runtime 数学：
      default 零偏差 = 0、±0.1 偏差对称、alpha 用例 1.0/0.65/0.65/0.50/0.895
      全中（范围 [0.5,1.0]）、stand_still 双门控与纯 yaw 关门、
+     run_still 门控（±0.11 开 / x=0.1 关 / y=0.1 关 / yaw=0.15 关 / yaw=0.14
+     开 / 静止与横移与纯 yaw 关、正负对称、零偏差=0）、
      dof_pos_limits 超限为正/限内为 0、leg_torques == 12 腿 actuator_force 平方和、
      upright == sum|gravity_xy|；选中关节/actuator：hip 4 / 腿关节 12 /
      腿 actuator 12 全部无轮（actuator 名 = 关节名显式解析）；
@@ -4422,7 +4431,7 @@ CPU PASS（四任务注册/权重（flat 12 / rough 8，upright 公式切换）�
      reward 输出 [num_envs] finite）
 受控站立沉降实测（Kp=50/Kd=1.2，单环境 500 步）：root z 0.4432 → 稳态下限
      0.3775，沉降 ≈ 6.6 cm（历史参考：Kp=60/Kd=2.0 首版为 0.3773/5.2 cm）——
-     仅测量报告，base_height_target 未改（保持用户调参 0.45）。
+     仅测量报告，base_height_target 未改。
 回归：check_wolf_task / check_wolf_rough / check_wolf_dr / check_wolf_robot /
      check_wolf_template_capacity 全部 PASS（CPU）。
 NOT RUN：完整 PPO/HIM 训练（长训收敛与姿态效果未验证）、CUDA 矩阵。

@@ -335,6 +335,7 @@ class RewardScales:
     upright_flat: float = -1.5
     hip_default: float = -0.30
     stand_still: float = -0.40
+    run_still: float = -0.20
     dof_pos_limits: float = -0.20
     leg_torques: float = -0.0001
 
@@ -353,19 +354,24 @@ class FlatPostureParams:
     # stand_still 静止门控阈值（norm(cmd_xy) / |cmd_yaw| 同时满足才开启）。
     stand_still_lin_threshold: float = 0.1
     stand_still_yaw_threshold: float = 0.1
+    # run_still 门控阈值（|cmd_x| 严格大于、|cmd_y| / |cmd_yaw| 严格小于；
+    # BlackW 同名参数：直线行走时机要求腿回中）。
+    run_still_x_threshold: float = 0.1
+    run_still_y_threshold: float = 0.1
+    run_still_yaw_threshold: float = 0.15
 
 
 @dataclass(frozen=True)
 class RewardParams:
     """Wolf flat v1 reward baseline 的系数与非系数参数。
 
-    tracking_sigma 是指数分母（HIMLoco 语义）；base_height_target 为用户调参值
-    （2026-10：0.40 → 0.45，与 flat 模板站立高度一致；历史 Wolf 完整模型站立稳态
-    实测 0.3961 m）。
+    tracking_sigma 是指数分母（HIMLoco 语义）；base_height_target 用 Wolf 完整模型
+    实测（wheel r=0.08 / 站立稳态 0.3961 m），不沿用 Black 的 0.43；用户
+    2026-10 曾试调 0.45（与 flat 模板站立高度一致）后恢复 0.40。
     """
 
     tracking_sigma: float = 0.25
-    base_height_target: float = 0.45
+    base_height_target: float = 0.40
     scales: RewardScales = field(default_factory=RewardScales)
     posture: FlatPostureParams = field(default_factory=FlatPostureParams)
 

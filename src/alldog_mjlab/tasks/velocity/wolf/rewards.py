@@ -306,3 +306,37 @@ def stand_still_leg_l1(
         dim=1,
     )
     return leg_error * stand_mask
+
+
+def run_still_leg_l1(
+    env: "ManagerBasedRlEnv",
+    asset_cfg: SceneEntityCfg,
+    command_name: str,
+    x_threshold: float,
+    y_threshold: float,
+    yaw_threshold: float,
+) -> torch.Tensor:
+    """直线行走门控的 12 个腿关节（hip/thigh/calf，无轮）回中 L1 惩罚。
+
+    门控 = |cmd_x| > x_threshold 且 |cmd_y| < y_threshold 且 |cmd_yaw| <
+    yaw_threshold（严格不等号；BlackW `_reward_run_still` 同构，阈值
+    0.1 / 0.1 / 0.15 与 legacy 一致）：直线行走时要求腿回中，抑制行走中
+    关节长期偏离 default。
+    """
+    asset: "Entity" = env.scene[asset_cfg.name]
+    default_joint_pos = asset.data.default_joint_pos
+    assert default_joint_pos is not None
+    command = env.command_manager.get_command(command_name)
+    active = (
+        (torch.abs(command[:, 0]) > x_threshold)
+        & (torch.abs(command[:, 1]) < y_threshold)
+        & (torch.abs(command[:, 2]) < yaw_threshold)
+    ).to(torch.float32)
+    leg_error = torch.sum(
+        torch.abs(
+            asset.data.joint_pos[:, asset_cfg.joint_ids]
+            - default_joint_pos[:, asset_cfg.joint_ids]
+        ),
+        dim=1,
+    )
+    return leg_error * active
