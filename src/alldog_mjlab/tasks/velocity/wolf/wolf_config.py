@@ -331,19 +331,43 @@ class RewardScales:
     base_height: float = -2.0
     leg_action_rate: float = -0.01
     wheel_action_rate: float = -0.002
+    # ---- flat 专属姿态奖励（v1，BlackW 经验迁移；rough 不使用）----
+    upright_flat: float = -1.5
+    hip_default: float = -0.30
+    stand_still: float = -0.40
+    dof_pos_limits: float = -0.20
+    leg_torques: float = -0.0001
+
+
+@dataclass(frozen=True)
+class FlatPostureParams:
+    """Wolf flat v1 姿态奖励的非系数参数（BlackW 已验证经验值；公式见 rewards.py）。"""
+
+    # hip_default 的指令衰减：cmd_y / cmd_yaw 越大衰减越强（抬腿侧向 / 转向机动时
+    # 放宽 hip 回中要求）；alpha ∈ [min_scale, 1]。
+    hip_y_ref: float = 0.5
+    hip_yaw_ref: float = 1.0
+    hip_y_scale: float = 0.35
+    hip_yaw_scale: float = 0.35
+    hip_min_scale: float = 0.5
+    # stand_still 静止门控阈值（norm(cmd_xy) / |cmd_yaw| 同时满足才开启）。
+    stand_still_lin_threshold: float = 0.1
+    stand_still_yaw_threshold: float = 0.1
 
 
 @dataclass(frozen=True)
 class RewardParams:
     """Wolf flat v1 reward baseline 的系数与非系数参数。
 
-    tracking_sigma 是指数分母（HIMLoco 语义）；base_height_target 用 Wolf 完整模型
-    实测（wheel r=0.08 / 站立稳态 0.3961 m），不沿用 Black 的 0.43。
+    tracking_sigma 是指数分母（HIMLoco 语义）；base_height_target 为用户调参值
+    （2026-10：0.40 → 0.45，与 flat 模板站立高度一致；历史 Wolf 完整模型站立稳态
+    实测 0.3961 m）。
     """
 
     tracking_sigma: float = 0.25
-    base_height_target: float = 0.40
+    base_height_target: float = 0.45
     scales: RewardScales = field(default_factory=RewardScales)
+    posture: FlatPostureParams = field(default_factory=FlatPostureParams)
 
 
 # =============================================================================

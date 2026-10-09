@@ -4304,12 +4304,15 @@ command：
     vy [-0.15,0.15] / yaw [-0.6,0.6] / resample 10 s
     standing 0.1 / forward-only 0.2 / world 0 / heading 关闭
 
-reward（8 项，dict 顺序 = logging 顺序）:
+reward（基础 8 项 + flat 姿态 4 项，dict 顺序 = logging 顺序）:
     track_linear +1.0 / track_angular +0.5 / lin_vel_z -1.0 /
-    body_ang_vel -0.05 / upright -0.5 / base_height -2.0（target 0.40 m）/
+    body_ang_vel -0.05 / base_height -2.0（target 0.45 m，用户调参）/
     leg_action_rate -0.01 / wheel_action_rate -0.002；sigma 0.25
     leg / wheel action rate 按 16-D contract 显式分组（leg = 12 位置通道、
     wheel = 3/7/11/15），不整条 16 维求和
+    flat 专属（§28.5）：upright 改 L1 -1.5 + hip_default -0.30 /
+    stand_still -0.40 / dof_pos_limits -0.20 / leg_torques -0.0001（12 项）
+    rough：upright 保持 native L2 -0.5，无姿态 4 项（8 项）
 
 termination：time_out（20 s，time_out=True）+ illegal_contact
     （base_link 对 terrain，力阈值 1.0 N，history 4 substeps）；
@@ -4356,7 +4359,46 @@ export（RSL-RL 原生 as_jit + reload 数值等价，max_abs_diff = 0.0）:
     --output-dir 全部保留。
 ```
 
-### 28.5 验证记录（tests/check_wolf_task.py，不提交）
+### 28.5 Wolf Flat v1 姿态奖励（用户迭代，2026-10，仅 flat / flat-him）
+
+针对姿态扭曲 / 关节长期偏离 default 的第一版增强（BlackW blackW_config/env.py
+经验迁移；历史参考 super-dog 本地 HIMLoco，非官方 InternRobotics/HIMLoco）：
+
+```text
+任务范围：仅 wolf-flat / wolf-flat-him；wolf-rough / wolf-rough-him 保持原 8 项
+    及全部数值（_configure_rewards(rough) 分支隔离，无共享侧效应）。
+upright（key 不变）：flat 改为 L1 公式
+        |projected_gravity_x| + |projected_gravity_y|，weight -1.5
+    （rewards.base_orientation_l1；BlackW `_reward_orientation` 的无地形自适应
+    版）；rough 保持 native flat_orientation_l2 / -0.5。
+hip_default（新增，-0.30）：四腿 hip 相对 default 的 L1 偏差 × 指令衰减
+        alpha = clamp(1 - 0.35*min(|cmd_y|/0.5, 1) - 0.35*min(|cmd_yaw|/1.0, 1),
+                      0.5, 1)
+    （rewards.hip_default_l1；BlackW `_reward_hip_default` 同构；参数在
+    WOLF_CONFIG.reward.posture：hip_y_ref=0.5 / hip_yaw_ref=1.0 /
+    hip_y_scale=0.35 / hip_yaw_scale=0.35 / hip_min_scale=0.5）。
+stand_still（新增，-0.40）：静止门控的 12 腿关节（hip/thigh/calf，显式排除
+    轮）回中 L1；门控 = norm(cmd_xy)<0.1 且 |cmd_yaw|<0.1 同时满足
+    （rewards.stand_still_leg_l1；BlackW `_reward_stand_still` 同构）。
+dof_pos_limits（新增，-0.20）：native mdp.joint_pos_limits，SceneEntityCfg
+    显式 12 腿关节；soft limit = 现有机器人 soft_joint_pos_limit_factor=0.9
+    （不改 MJCF 限位；轮关节不参与位置限位奖励）。
+leg_torques（新增，-0.0001）：native mdp.joint_torques_l2，SceneEntityCfg
+    显式 12 腿 actuator（actuator 名 = 目标关节名，create_motor_actuator
+    name=joint_name；实测解析结果 FL_hip…RR_calf 12 个，无轮）。
+关节 / actuator 选择全部显式名称（WOLF_LEG_JOINT_NAMES /
+    WOLF_LEGS_FL_FIRST_JOINT_NAMES），不依赖 MJCF natural order。
+不变：track_linear_velocity +1.0 / track_angular_velocity +0.5 / lin_vel_z -1.0
+    / body_ang_vel -0.05 / base_height -2.0 / leg_action_rate -0.01 /
+    wheel_action_rate -0.002；不新增 run_still / 足端周期 / 强制抬轮 / 轮速差 /
+    接触髋惩罚 / 固定步态约束。
+注意：base_height_target 用户同步调参 0.40 → 0.45（与 flat 模板站立高度一致；
+    历史完整模型站立稳态实测 0.3961 m）。
+训练效果（长训收敛 / 是否真正抑制姿态扭曲）未验证 —— 明确 NOT RUN：
+    完整 PPO/HIM 训练与数百 iteration 收敛评估。
+```
+
+### 28.6 验证记录（tests/check_wolf_task.py，不提交）
 
 ```text
 CPU  PASS（cfg static × task × play / action→target 数值映射（FPS+wheel sign）/
@@ -4368,6 +4410,22 @@ CUDA PASS（runtime 段 GPU 重跑 + 1024 env × 3 iter 真实训练 mean_reward
 Black 回归：check_black_flat（CPU+CUDA）/ rough（CPU+CUDA）/ rough_him /
      command_curriculum / him / him_algo / him_runner / him_warm_start 全部 PASS。
 未验证：长训收敛 / 高速（±4）行为 / DR / rough / sim2real —— 均未开始。
+
+姿态奖励 v1 补充（tests/check_wolf_posture_rewards.py，不提交）：
+CPU PASS（四任务注册/权重（flat 12 / rough 8，upright 公式切换）；runtime 数学：
+     default 零偏差 = 0、±0.1 偏差对称、alpha 用例 1.0/0.65/0.65/0.50/0.895
+     全中（范围 [0.5,1.0]）、stand_still 双门控与纯 yaw 关门、
+     dof_pos_limits 超限为正/限内为 0、leg_torques == 12 腿 actuator_force 平方和、
+     upright == sum|gravity_xy|；选中关节/actuator：hip 4 / 腿关节 12 /
+     腿 actuator 12 全部无轮（actuator 名 = 关节名显式解析）；
+     compute(dt) == Σ raw×weight×dt；PPO 53/56/16 与 HIM [B,6,53]+[B,3] 不变；
+     reward 输出 [num_envs] finite）
+受控站立沉降实测（Kp=50/Kd=1.2，单环境 500 步）：root z 0.4432 → 稳态下限
+     0.3775，沉降 ≈ 6.6 cm（历史参考：Kp=60/Kd=2.0 首版为 0.3773/5.2 cm）——
+     仅测量报告，base_height_target 未改（保持用户调参 0.45）。
+回归：check_wolf_task / check_wolf_rough / check_wolf_dr / check_wolf_robot /
+     check_wolf_template_capacity 全部 PASS（CPU）。
+NOT RUN：完整 PPO/HIM 训练（长训收敛与姿态效果未验证）、CUDA 矩阵。
 ```
 
 ## 29. Wolf Domain Randomization（本轮集成，COMPLETE）

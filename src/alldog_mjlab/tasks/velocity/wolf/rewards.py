@@ -203,3 +203,106 @@ def wheel_action_rate_l2(env) -> torch.Tensor:
     prev_action = env.action_manager.prev_action
     diff = action[:, list(_WHEEL_CHANNELS)] - prev_action[:, list(_WHEEL_CHANNELS)]
     return torch.sum(torch.square(diff), dim=1)
+
+
+# ---------------------------------------------------------------------------
+# Flat v1 姿态奖励（BlackW 经验迁移；仅 wolf-flat / wolf-flat-him 注册）。
+#
+# 关节均用显式名称选择（WOLF_LEG_JOINT_NAMES，不依赖 MJCF natural order）；
+# default 位置读 entity 的 ``default_joint_pos``（EntityCfg INIT_STATE，与 reset
+# 分布同源）。
+# ---------------------------------------------------------------------------
+
+# 四腿 hip 关节名（FL/FR/RL/RR 顺序，仅用于求和，顺序无语义）。
+_HIP_JOINT_NAMES = tuple(
+    WOLF_LEG_JOINT_NAMES[leg][0]  # 每腿第 1 个 = hip
+    for leg in WOLF_LEG_ORDER
+)
+# 12 个腿部位置关节（hip/thigh/calf，不含轮关节 foot）。
+_LEG_JOINT_NAMES = tuple(
+    WOLF_LEG_JOINT_NAMES[leg][joint]
+    for leg in WOLF_LEG_ORDER
+    for joint in range(3)
+)
+
+
+def base_orientation_l1(
+    env: "ManagerBasedRlEnv", asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG
+) -> torch.Tensor:
+    """机身姿态 L1：|projected_gravity_x| + |projected_gravity_y|。
+
+    BlackW `_reward_orientation` 的无地形自适应版（flat 基座无地形变化，
+    指令相关衰减由 hip_default 承担，姿态项本身恒定权重）。
+    """
+    asset: "Entity" = env.scene[asset_cfg.name]
+    return torch.sum(
+        torch.abs(asset.data.projected_gravity_b[:, :2]), dim=1
+    )
+
+
+def hip_default_l1(
+    env: "ManagerBasedRlEnv",
+    asset_cfg: SceneEntityCfg,
+    command_name: str,
+    y_ref: float,
+    yaw_ref: float,
+    y_scale: float,
+    yaw_scale: float,
+    min_scale: float,
+) -> torch.Tensor:
+    """四腿 hip 相对 default 的 L1 偏差 × 指令相关衰减。
+
+    alpha = clamp(1 - y_scale*min(|cmd_y|/y_ref, 1) - yaw_scale*min(|cmd_yaw|/
+    yaw_ref, 1), min_scale, 1)：侧向平移 / 原地转向机动时放宽 hip 回中要求
+    （BlackW `_reward_hip_default` 同构，参数来自 WOLF_CONFIG.reward.posture）。
+    """
+    asset: "Entity" = env.scene[asset_cfg.name]
+    default_joint_pos = asset.data.default_joint_pos
+    assert default_joint_pos is not None
+    hip_error = torch.sum(
+        torch.abs(
+            asset.data.joint_pos[:, asset_cfg.joint_ids]
+            - default_joint_pos[:, asset_cfg.joint_ids]
+        ),
+        dim=1,
+    )
+    command = env.command_manager.get_command(command_name)
+    alpha = 1.0
+    alpha = alpha - y_scale * torch.clamp(
+        torch.abs(command[:, 1]) / max(y_ref, 1e-6), max=1.0
+    )
+    alpha = alpha - yaw_scale * torch.clamp(
+        torch.abs(command[:, 2]) / max(yaw_ref, 1e-6), max=1.0
+    )
+    alpha = torch.clamp(alpha, min=min_scale, max=1.0)
+    return hip_error * alpha
+
+
+def stand_still_leg_l1(
+    env: "ManagerBasedRlEnv",
+    asset_cfg: SceneEntityCfg,
+    command_name: str,
+    lin_threshold: float,
+    yaw_threshold: float,
+) -> torch.Tensor:
+    """静止门控的 12 个腿关节（hip/thigh/calf，无轮）回中 L1 惩罚。
+
+    仅在 norm(cmd_xy) < lin_threshold 且 |cmd_yaw| < yaw_threshold 同时满足时
+    开启（BlackW `_reward_stand_still` 同构；轮关节显式排除——轮静止时由
+    wheel 通道自身表达，不在此重复约束）。
+    """
+    asset: "Entity" = env.scene[asset_cfg.name]
+    default_joint_pos = asset.data.default_joint_pos
+    assert default_joint_pos is not None
+    command = env.command_manager.get_command(command_name)
+    lin_stand = torch.norm(command[:, :2], dim=1) < lin_threshold
+    yaw_stand = torch.abs(command[:, 2]) < yaw_threshold
+    stand_mask = (lin_stand & yaw_stand).to(torch.float32)
+    leg_error = torch.sum(
+        torch.abs(
+            asset.data.joint_pos[:, asset_cfg.joint_ids]
+            - default_joint_pos[:, asset_cfg.joint_ids]
+        ),
+        dim=1,
+    )
+    return leg_error * stand_mask
