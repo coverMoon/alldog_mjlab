@@ -231,8 +231,8 @@ def base_orientation_l1(
 ) -> torch.Tensor:
     """机身姿态 L1：|projected_gravity_x| + |projected_gravity_y|。
 
-    BlackW `_reward_orientation` 的无地形自适应版（flat 基座无地形变化，
-    指令相关衰减由 hip_default 承担，姿态项本身恒定权重）。
+    BlackW `_reward_orientation` 的无地形自适应版（指令相关衰减由 hip_default
+    承担，姿态项本身恒定权重；flat / rough 四任务统一使用）。
     """
     asset: "Entity" = env.scene[asset_cfg.name]
     return torch.sum(

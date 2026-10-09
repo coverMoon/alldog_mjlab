@@ -500,21 +500,17 @@ def _configure_events(
 
 
 def _configure_rewards(cfg: ManagerBasedRlEnvCfg, rough: bool) -> None:
-    """Wolf reward baseline：基础 8 项（dict 顺序即 logging 顺序）+ flat 姿态 4 项。
+    """Wolf reward baseline：四任务同一套 13 项（dict 顺序即 logging 顺序）。
 
-    tracking / 罚项 / base_height 公式在本任务 rewards.py（与 black/rewards.py 公式
+    tracking / 罚项 / 姿态公式在本任务 rewards.py（与 black/rewards.py 公式
     独立同构，不 import）；action rate 按显式 16-D contract 的 leg / wheel 分组。
-    rough 只把 ``base_height`` 换成 local terrain-relative 语义（仅 func / params；
-    key / weight / 顺序不变，高度目标仍读 WOLF_CONFIG.reward.base_height_target）。
-    不加入足端周期 / 强制轮地接触等限制高速轮足混合的项（run_still 为
-    BlackW 已验证的直线行走回中门控项，v1 已加入 flat）。
-
-    flat v1 姿态奖励（BlackW 经验迁移，仅 flat / flat-him）：
-    - ``upright`` 换 L1 公式（|gx|+|gy|，weight -1.5）；rough 保持 native
-      ``flat_orientation_l2``（-0.5）；
-    - 新增 ``hip_default`` / ``stand_still`` / ``run_still`` /
-      ``dof_pos_limits`` / ``leg_torques``（公式与选关节见 rewards.py / 参数在
-      WOLF_CONFIG.reward.posture；关节 / actuator 均显式名称选择，不含轮）。
+    姿态奖励（upright L1 / hip_default / stand_still / run_still /
+    dof_pos_limits / leg_torques）为 Wolf v1/v2 统一扩展（BlackW 经验迁移），
+    flat / rough 共用同一公式 / 权重 / 选关节（有意修改 rough 原 8 项基线，
+    见 MIGRATION §28.5）。
+    唯一的 flat / rough 差异仍是 ``base_height`` func：flat = world-z（
+    base_height_l2_flat）、rough = terrain-relative footprint 均值
+    （base_height_l2_terrain）；target / weight / key / 顺序完全一致。
     """
     base_height_term = (
         RewardTermCfg(
@@ -560,18 +556,10 @@ def _configure_rewards(cfg: ManagerBasedRlEnvCfg, rough: bool) -> None:
             func=angular_velocity_xy_l2,
             weight=WOLF_CONFIG.reward.scales.ang_vel_xy,
         ),
-        # rough：native L2（与 HIMLoco `_reward_orientation` 严格一致）；
-        # flat：L1 公式（BlackW 经验，见 rewards.base_orientation_l1）。
-        "upright": (
-            RewardTermCfg(
-                func=mdp.flat_orientation_l2,
-                weight=WOLF_CONFIG.reward.scales.orientation,
-            )
-            if rough
-            else RewardTermCfg(
-                func=base_orientation_l1,
-                weight=WOLF_CONFIG.reward.scales.upright_flat,
-            )
+        # L1 公式（BlackW 经验，见 rewards.base_orientation_l1；四任务统一）。
+        "upright": RewardTermCfg(
+            func=base_orientation_l1,
+            weight=WOLF_CONFIG.reward.scales.upright,
         ),
         "base_height": base_height_term,
         "leg_action_rate": RewardTermCfg(
@@ -583,67 +571,66 @@ def _configure_rewards(cfg: ManagerBasedRlEnvCfg, rough: bool) -> None:
             weight=WOLF_CONFIG.reward.scales.wheel_action_rate,
         ),
     }
-    if not rough:
-        # 腿部 12 关节（hip/thigh/calf）显式选择；actuator 名 = 目标关节名
-        # （IdealPdActuator 在编译时用关节名命名，见 rewards / wolf_constants）。
-        leg_cfg = SceneEntityCfg(
-            "robot", joint_names=WOLF_LEGS_FL_FIRST_JOINT_NAMES, preserve_order=True
-        )
-        leg_actuator_cfg = SceneEntityCfg(
-            "robot", actuator_names=WOLF_LEGS_FL_FIRST_JOINT_NAMES
-        )
-        cfg.rewards["hip_default"] = RewardTermCfg(
-            func=hip_default_l1,
-            weight=WOLF_CONFIG.reward.scales.hip_default,
-            params={
-                "asset_cfg": SceneEntityCfg(
-                    "robot",
-                    joint_names=tuple(
-                        WOLF_LEG_JOINT_NAMES[leg][0] for leg in WOLF_LEG_ORDER
-                    ),
-                    preserve_order=True,
+    # 腿部 12 关节（hip/thigh/calf）显式选择；actuator 名 = 目标关节名
+    # （IdealPdActuator 在编译时用关节名命名，见 rewards / wolf_constants）。
+    leg_cfg = SceneEntityCfg(
+        "robot", joint_names=WOLF_LEGS_FL_FIRST_JOINT_NAMES, preserve_order=True
+    )
+    leg_actuator_cfg = SceneEntityCfg(
+        "robot", actuator_names=WOLF_LEGS_FL_FIRST_JOINT_NAMES
+    )
+    cfg.rewards["hip_default"] = RewardTermCfg(
+        func=hip_default_l1,
+        weight=WOLF_CONFIG.reward.scales.hip_default,
+        params={
+            "asset_cfg": SceneEntityCfg(
+                "robot",
+                joint_names=tuple(
+                    WOLF_LEG_JOINT_NAMES[leg][0] for leg in WOLF_LEG_ORDER
                 ),
-                "command_name": WOLF_COMMAND_NAME,
-                "y_ref": posture.hip_y_ref,
-                "yaw_ref": posture.hip_yaw_ref,
-                "y_scale": posture.hip_y_scale,
-                "yaw_scale": posture.hip_yaw_scale,
-                "min_scale": posture.hip_min_scale,
-            },
-        )
-        cfg.rewards["stand_still"] = RewardTermCfg(
-            func=stand_still_leg_l1,
-            weight=WOLF_CONFIG.reward.scales.stand_still,
-            params={
-                "asset_cfg": leg_cfg,
-                "command_name": WOLF_COMMAND_NAME,
-                "lin_threshold": posture.stand_still_lin_threshold,
-                "yaw_threshold": posture.stand_still_yaw_threshold,
-            },
-        )
-        cfg.rewards["run_still"] = RewardTermCfg(
-            func=run_still_leg_l1,
-            weight=WOLF_CONFIG.reward.scales.run_still,
-            params={
-                "asset_cfg": leg_cfg,
-                "command_name": WOLF_COMMAND_NAME,
-                "x_threshold": posture.run_still_x_threshold,
-                "y_threshold": posture.run_still_y_threshold,
-                "yaw_threshold": posture.run_still_yaw_threshold,
-            },
-        )
-        cfg.rewards["dof_pos_limits"] = RewardTermCfg(
-            func=envs_mdp.joint_pos_limits,
-            weight=WOLF_CONFIG.reward.scales.dof_pos_limits,
-            params={"asset_cfg": leg_cfg},
-        )
-        cfg.rewards["leg_torques"] = RewardTermCfg(
-            func=envs_mdp.joint_torques_l2,
-            weight=WOLF_CONFIG.reward.scales.leg_torques,
-            params={"asset_cfg": leg_actuator_cfg},
-        )
+                preserve_order=True,
+            ),
+            "command_name": WOLF_COMMAND_NAME,
+            "y_ref": posture.hip_y_ref,
+            "yaw_ref": posture.hip_yaw_ref,
+            "y_scale": posture.hip_y_scale,
+            "yaw_scale": posture.hip_yaw_scale,
+            "min_scale": posture.hip_min_scale,
+        },
+    )
+    cfg.rewards["stand_still"] = RewardTermCfg(
+        func=stand_still_leg_l1,
+        weight=WOLF_CONFIG.reward.scales.stand_still,
+        params={
+            "asset_cfg": leg_cfg,
+            "command_name": WOLF_COMMAND_NAME,
+            "lin_threshold": posture.stand_still_lin_threshold,
+            "yaw_threshold": posture.stand_still_yaw_threshold,
+        },
+    )
+    cfg.rewards["run_still"] = RewardTermCfg(
+        func=run_still_leg_l1,
+        weight=WOLF_CONFIG.reward.scales.run_still,
+        params={
+            "asset_cfg": leg_cfg,
+            "command_name": WOLF_COMMAND_NAME,
+            "x_threshold": posture.run_still_x_threshold,
+            "y_threshold": posture.run_still_y_threshold,
+            "yaw_threshold": posture.run_still_yaw_threshold,
+        },
+    )
+    cfg.rewards["dof_pos_limits"] = RewardTermCfg(
+        func=envs_mdp.joint_pos_limits,
+        weight=WOLF_CONFIG.reward.scales.dof_pos_limits,
+        params={"asset_cfg": leg_cfg},
+    )
+    cfg.rewards["leg_torques"] = RewardTermCfg(
+        func=envs_mdp.joint_torques_l2,
+        weight=WOLF_CONFIG.reward.scales.leg_torques,
+        params={"asset_cfg": leg_actuator_cfg},
+    )
     assert WOLF_TRACKING_VELOCITY_REWARD_TERM in cfg.rewards
-    assert len(cfg.rewards) == (8 if rough else 13)
+    assert len(cfg.rewards) == 13
 
 
 def _configure_flat_terrain(cfg: ManagerBasedRlEnvCfg) -> None:

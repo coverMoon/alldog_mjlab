@@ -43,7 +43,8 @@
       <freejoint/>
       <inertial pos="-0.025143 -5.7679e-8 -0.0042488" mass="9.9614" fullinertia="0.025591 0.03108 0.043798 4.8159e-7 -3.4836e-21 -3.987e-19"/>
       <geom pos="0 0 0" quat="0.7071067811865476 0 0 -0.7071067811865475" group="1" contype="0" conaffinity="0" mass="0" material="base_link_mat" type="mesh" mesh="base_link_simplified" />
-      <geom pos="0 0 0" rgba="0.9372549019607843 0.26666666666666666 0.26666666666666666 1" group="3" contype="1" conaffinity="1" type="box" size="0.215 0.135 0.06" />
+      <!-- 躯干碰撞盒：与 URDF/mujoco/wolf 更新保持一致（Y 半宽 0.135 → 0.10） -->
+      <geom pos="0 0 0" rgba="0.9372549019607843 0.26666666666666666 0.26666666666666666 1" group="3" contype="1" conaffinity="1" type="box" size="0.215 0.10 0.06" />
       <body name="FL_Link1" pos="0.2225 0.09 0" quat="0.4999990816978809 -0.5000009183004326 0.5000009183004325 -0.4999990816978808">
         <joint name="FL_hip" type="hinge" axis="0 0 1" limited="true" range="-0.6 0.8" damping="0" frictionloss="0"/>
         <inertial pos="-0.025322 0.000012207 0.068696" mass="1.4729" fullinertia="0.0020636 0.0011648 0.0010522 -9.4769e-7 0.0000024326 0.0000019093"/>

@@ -4127,6 +4127,9 @@ wolf-flat task / RL task 接入:                              NOT STARTED（下�
        总质量 33.6686 kg（= XML 显式 inertial 累加，逐位一致）
 wheel   碰撞圆柱 radius 0.08 m / half-width 0.0225 m（2026-10 轮径 200→160mm，
         依据 URDF/mujoco/wolf 更新版 XML；轮 Link4 STL 已同步）；半轮距 = ±0.213 m
+躯干    base_link 碰撞盒 half-size 0.215x0.10x0.06 m（2026-10 依
+        URDF/mujoco/wolf 更新把 Y 半宽 0.135 → 0.10；inertial / 质量 / 视觉
+        mesh 不变；模板 ncon/nefc 仍 24/96，容量 64/256 不变）
 ```
 
 ### 27.2 显式 joint / policy contract（wolf_constants.py，唯一 contract 来源）
@@ -4304,16 +4307,18 @@ command：
     vy [-0.15,0.15] / yaw [-0.6,0.6] / resample 10 s
     standing 0.1 / forward-only 0.2 / world 0 / heading 关闭
 
-reward（基础 8 项 + flat 姿态 5 项，dict 顺序 = logging 顺序）:
-    track_linear +1.0 / track_angular +0.5 / lin_vel_z -1.0 /
-    body_ang_vel -0.05 / base_height -2.0（target 0.40 m）/
+reward（四任务同一套 13 项，dict 顺序 = logging 顺序）:
+    track_linear +1.0 / track_angular +1.0（用户 2026-10 调参，0.5 → 1.0）/
+    lin_vel_z -1.0 / body_ang_vel -0.05 / base_height -2.0（target 0.40 m）/
     leg_action_rate -0.01 / wheel_action_rate -0.002；sigma 0.25
     leg / wheel action rate 按 16-D contract 显式分组（leg = 12 位置通道、
     wheel = 3/7/11/15），不整条 16 维求和
-    flat 专属（§28.5）：upright 改 L1 -1.5 + hip_default -0.30 /
-    stand_still -0.40 / run_still -0.20 / dof_pos_limits -0.20 /
-    leg_torques -0.0001（13 项）
-    rough：upright 保持 native L2 -0.5，无姿态 5 项（8 项）
+    姿态（§28.5，四任务统一，v1 曾仅 flat / v2 起 rough 同步启用）：
+    upright L1 -1.5 + hip_default -0.30 / stand_still -0.40 / run_still -0.20 /
+    dof_pos_limits -0.20 / leg_torques -0.0001（13 项；rough 原 native L2
+    -0.5 分支已取消）
+    base_height func 差异：flat = world-z / rough = terrain-relative
+    （terrain_scan footprint 均值）；target / weight / key / 顺序一致
 
 termination：time_out（20 s，time_out=True）+ illegal_contact
     （base_link 对 terrain，力阈值 1.0 N，history 4 substeps）；
@@ -4360,18 +4365,22 @@ export（RSL-RL 原生 as_jit + reload 数值等价，max_abs_diff = 0.0）:
     --output-dir 全部保留。
 ```
 
-### 28.5 Wolf Flat v1 姿态奖励（用户迭代，2026-10，仅 flat / flat-him）
+### 28.5 Wolf 姿态奖励 v1/v2（用户迭代，2026-10；v1 曾仅 flat，v2 起四任务统一）
 
-针对姿态扭曲 / 关节长期偏离 default 的第一版增强（BlackW blackW_config/env.py
-经验迁移；历史参考 super-dog 本地 HIMLoco，非官方 InternRobotics/HIMLoco）：
+针对姿态扭曲 / 关节长期偏离 default 的增强（BlackW blackW_config/env.py
+经验迁移；历史参考 super-dog 本地 HIMLoco，非官方 InternRobotics/HIMLoco）。
+v2 范围修正（有意修改）：取消「flat 专属」限制，Rough 也切换为同一套 13 项；
+Rough 原 8 项基线（upright native L2 -0.5、无姿态项）已废弃，**Rough 奖励
+配置变更后的训练效果未验证**（长时间训练 / 收敛均未评估）。
 
 ```text
-任务范围：仅 wolf-flat / wolf-flat-him；wolf-rough / wolf-rough-him 保持原 8 项
-    及全部数值（_configure_rewards(rough) 分支隔离，无共享侧效应）。
-upright（key 不变）：flat 改为 L1 公式
-        |projected_gravity_x| + |projected_gravity_y|，weight -1.5
+任务范围：wolf-flat / wolf-flat-him / wolf-rough / wolf-rough-him 同一套 13 项
+    （key / weight / 顺序完全一致）；唯一 flat/rough 差异是 base_height func
+    （flat = world-z / rough = terrain-relative footprint 均值，terrain_scan）。
+upright（key 不变）：L1 公式
+        |projected_gravity_x| + |projected_gravity_y|，weight -1.5，四任务统一
     （rewards.base_orientation_l1；BlackW `_reward_orientation` 的无地形自适应
-    版）；rough 保持 native flat_orientation_l2 / -0.5。
+    版）；rough 原 native flat_orientation_l2 / -0.5 分支已取消。
 hip_default（新增，-0.30）：四腿 hip 相对 default 的 L1 偏差 × 指令衰减
         alpha = clamp(1 - 0.35*min(|cmd_y|/0.5, 1) - 0.35*min(|cmd_yaw|/1.0, 1),
                       0.5, 1)
@@ -4381,6 +4390,7 @@ hip_default（新增，-0.30）：四腿 hip 相对 default 的 L1 偏差 × 指
 stand_still（新增，-0.40）：静止门控的 12 腿关节（hip/thigh/calf，显式排除
     轮）回中 L1；门控 = norm(cmd_xy)<0.1 且 |cmd_yaw|<0.1 同时满足
     （rewards.stand_still_leg_l1；BlackW `_reward_stand_still` 同构）。
+    v2 起 rough 同样启用（下同，姿态 5 项均四任务共用）。
 dof_pos_limits（新增，-0.20）：native mdp.joint_pos_limits，SceneEntityCfg
     显式 12 腿关节；soft limit = 现有机器人 soft_joint_pos_limit_factor=0.9
     （不改 MJCF 限位；轮关节不参与位置限位奖励）。
@@ -4389,7 +4399,8 @@ leg_torques（新增，-0.0001）：native mdp.joint_torques_l2，SceneEntityCfg
     name=joint_name；实测解析结果 FL_hip…RR_calf 12 个，无轮）。
 关节 / actuator 选择全部显式名称（WOLF_LEG_JOINT_NAMES /
     WOLF_LEGS_FL_FIRST_JOINT_NAMES），不依赖 MJCF natural order。
-不变：track_linear_velocity +1.0 / track_angular_velocity +0.5 / lin_vel_z -1.0
+不变：track_linear_velocity +1.0 / track_angular_velocity +1.0（用户调参）/
+    lin_vel_z -1.0
     / body_ang_vel -0.05 / base_height -2.0 / leg_action_rate -0.01 /
     wheel_action_rate -0.002；不新增足端周期 / 强制抬轮 / 轮速差 / 接触髋惩罚 /
     固定步态约束（run_still 为 BlackW 已验证的直线行走回中门控项，v2 加入）。
@@ -4432,6 +4443,10 @@ CPU PASS（四任务注册/权重（flat 13 / rough 8，含 run_still -0.20，up
 受控站立沉降实测（Kp=50/Kd=1.2，单环境 500 步）：root z 0.4432 → 稳态下限
      0.3775，沉降 ≈ 6.6 cm（历史参考：Kp=60/Kd=2.0 首版为 0.3773/5.2 cm）——
      仅测量报告，base_height_target 未改。
+v2 统一补充：四任务 13 项同序同权重；rough runtime 重验（base_height
+     terrain-relative 接口 terrain_scan / target 0.40、选关节 12/actuator 12
+     无轮、13 项 compute [num_envs] finite、PPO shape 53/56 不变）；
+     rough 原 8 项基线巳废弃，**rough 新奖励配置的训练效果未验证**。
 回归：check_wolf_task / check_wolf_rough / check_wolf_dr / check_wolf_robot /
      check_wolf_template_capacity 全部 PASS（CPU）。
 NOT RUN：完整 PPO/HIM 训练（长训收敛与姿态效果未验证）、CUDA 矩阵。

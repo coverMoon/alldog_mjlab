@@ -323,16 +323,17 @@ class TerminationParams:
 
 @dataclass(frozen=True)
 class RewardScales:
+    """Wolf 通用奖励权重（flat / rough 四任务同一套 13 项）。"""
+
     tracking_linear: float = 1.0
-    tracking_angular: float = 0.5
+    tracking_angular: float = 1.0  # 用户 2026-10 调参（0.5 → 1.0）
     lin_vel_z: float = -1.0
     ang_vel_xy: float = -0.05
-    orientation: float = -0.5
     base_height: float = -2.0
     leg_action_rate: float = -0.01
     wheel_action_rate: float = -0.002
-    # ---- flat 专属姿态奖励（v1，BlackW 经验迁移；rough 不使用）----
-    upright_flat: float = -1.5
+    # ---- 姿态奖励（v1/v2，BlackW 经验迁移；flat / rough 共用）----
+    upright: float = -1.5
     hip_default: float = -0.30
     stand_still: float = -0.40
     run_still: float = -0.20
@@ -341,8 +342,8 @@ class RewardScales:
 
 
 @dataclass(frozen=True)
-class FlatPostureParams:
-    """Wolf flat v1 姿态奖励的非系数参数（BlackW 已验证经验值；公式见 rewards.py）。"""
+class PostureParams:
+    """Wolf v1 姿态奖励的非系数参数（BlackW 已验证经验值；公式见 rewards.py）。"""
 
     # hip_default 的指令衰减：cmd_y / cmd_yaw 越大衰减越强（抬腿侧向 / 转向机动时
     # 放宽 hip 回中要求）；alpha ∈ [min_scale, 1]。
@@ -373,7 +374,7 @@ class RewardParams:
     tracking_sigma: float = 0.25
     base_height_target: float = 0.40
     scales: RewardScales = field(default_factory=RewardScales)
-    posture: FlatPostureParams = field(default_factory=FlatPostureParams)
+    posture: PostureParams = field(default_factory=PostureParams)
 
 
 # =============================================================================
