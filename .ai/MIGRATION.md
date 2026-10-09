@@ -4627,7 +4627,10 @@ root body（`robot/base_link`）的 spec body pos z 抬到 0.45，由 MuJoCo 正
 ```text
 env_cfgs.py：
     _build_wolf_env_cfg 对全部 flat / flat-him（train + play）路径调用：
-    _configure_template_spawn_height（仅 not rough 分支）：
+    _configure_template_spawn_height（仅 not rough 分支）：把模块顶层回调
+    ``_wolf_flat_template_spec_fn`` 挂到 ``cfg.scene.spec_fn``（不嵌套定义：
+    train CLI 用 asdict + yaml.dump 保存 env.yaml，``!!python/name:`` 标签只能
+    表示有稳定可导入名称的对象，局部函数 qualname 含 ``<locals>`` 不可靠）：
         spec_fn 校验根 body 存在（robot/base_link）、全 spec 恰好 1 个 freejoint、
         body 不是 world body，写入 body.pos = [0,0,template_root_z]；
         cfg.scene.spec_fn 已被占用时 fail-loud（baseline 从不设置该字段）。
