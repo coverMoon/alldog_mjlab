@@ -4157,8 +4157,8 @@ INIT_STATE pos z = 0.4432：轮最低点 ≈ 0，可直接站立。
     实测（root z 0.4289 → 稳态 0.3773，静力沉降 ≈ 5.2 cm，thigh 静力矩 ≈ 11 N·m
     → 稳态误差 ≈ 0.23 rad；roll/pitch ≈ 0；4 轮接地；max contact force ≈ 85 N；
     max leg τ 13.9 N·m ≪ 60；无自碰撞 / 弹飞 / 持续塌陷 / 数值发散）。
-    当前 Kp=50/Kd=1.2（用户 2026-10 调参）+ calf=1.43 姿态下未重跑受控站立
-    沉降记录（候选改进已落地，沉降应更小；待下轮验证记录补充）。
+    当前 Kp=80/Kd=3.0（用户 2026-10 调参轨迹：60/2.0 → 80/3.0 → 50/1.2 →
+    80/3.0）+ calf=1.43 姿态下未重跑受控站立沉降记录（待下轮验证记录补充）。
 ```
 
 ### 27.4 执行器 contract
@@ -4166,7 +4166,8 @@ INIT_STATE pos z = 0.4432：轮最低点 ≈ 0，可直接站立。
 ```text
 全部 MjLab v1.6.0 原生 IdealPdActuatorCfg，逐关节 16 个（sort_actuators=True）：
     hip/thigh/calf  position PD  Kp=80, Kd=3.0,  effort_limit=60 N·m
-                    （腿部 Kp=80/Kd=3 为当前实际值；实机电机规格仍待确认；
+                    （腿部 PD 2026-10 用户调参轨迹：60/2.0 → 80/3.0 → 50/1.2 →
+                     80/3.0，当前实际值 Kp=80/Kd=3.0；实机电机规格仍待确认；
                      dq_target=0）
     foot（轮）       velocity PD  Kp=0,  Kd=1.0,  effort_limit=17 N·m
                     （不使用 torque action / XML velocity servo / 自定义 actuator）
@@ -4174,7 +4175,7 @@ INIT_STATE pos z = 0.4432：轮最低点 ≈ 0，可直接站立。
     轮部 Kp=0 ⇒ 静止位置误差不产生轮矩；正负 velocity target 方向、
     ±17 / ±60 限幅均经 mjlaw 数值探针 PASS。
     编译后 actuator/ctrl 顺序与 policy action order 是两个概念；下一阶段
-    JointPositionActionCfg（leg scale 0.20）与 JointVelocityActionCfg
+    JointPositionActionCfg（leg scale 0.25，2026-10 调参）与 JointVelocityActionCfg
     （wheel scale 10 rad/s）负责显式 mapping，本轮未实现。
 ```
 
@@ -4277,7 +4278,7 @@ runner_cls：
 ```text
 action 16-D（8 个原生 action term 交错，FL→FR→RL→RR 每腿 3+1）:
     [FL_hip FL_thigh FL_calf FL_wheel | FR ... | RL ... | RR ...]
-    leg  = JointPositionActionCfg  q_target = q_default + 0.20 * raw
+    leg  = JointPositionActionCfg  q_target = q_default + 0.25 * raw（2026-10 0.20→0.25）
     wheel= JointVelocityActionCfg  dq_target = sign * 10.0 * raw
           sign = FL +1 / FR -1 / RL +1 / RR -1（robots/wolf 冻结值）
     无默认 [-1,1] clip（Gaussian init std 1.0）
@@ -4312,13 +4313,14 @@ reward（四任务同一套 14 项，v2 起分轴 tracking；dict 顺序 = loggi
     track_linear_velocity_y +1.0（Y 轴单独指数项，v2 拆分，原 XY 合并项废弃）/
     track_angular +1.0（用户 2026-10 调参，0.5 → 1.0）/
     lin_vel_z -1.0 / body_ang_vel -0.05 / base_height -2.0（target 0.40 m）/
-    leg_action_rate -0.01 / wheel_action_rate -0.002；sigma 0.25（分轴后
+    leg_action_rate -0.02 / wheel_action_rate -0.005（2026-10 调参）/
+    sigma 0.25（分轴后
     单轴误差平方除以 sigma，body-frame 来源不变）
     leg / wheel action rate 按 16-D contract 显式分组（leg = 12 位置通道、
     wheel = 3/7/11/15），不整条 16 维求和
     姿态（§28.5，四任务统一）：orientation L1 -1.5（v2 重命名，原 key
     "upright" / scale "upright" / func base_orientation_l1；公式不变）+
-    hip_default -0.30 / stand_still -0.40 / run_still -0.20 /
+    hip_default -0.50（2026-10 由 -0.30 调参）/ stand_still -0.40 / run_still -0.20 /
     dof_pos_limits -0.20 / leg_torques -0.0001
     dof_pos_limits / leg_torques 为 native 薄包装（rewards.dof_pos_limits /
     rewards.leg_torques_l2 转发 mjlab.envs.mdp，不复制数学；全部 14 项 func
@@ -4410,10 +4412,10 @@ leg_torques（新增，-0.0001）：native mdp.joint_torques_l2，SceneEntityCfg
     name=joint_name；实测解析结果 FL_hip…RR_calf 12 个，无轮）。
 关节 / actuator 选择全部显式名称（WOLF_LEG_JOINT_NAMES /
     WOLF_LEGS_FL_FIRST_JOINT_NAMES），不依赖 MJCF natural order。
-不变：track_linear_velocity +1.0 / track_angular_velocity +1.0（用户调参）/
-    lin_vel_z -1.0
-    / body_ang_vel -0.05 / base_height -2.0 / leg_action_rate -0.01 /
-    wheel_action_rate -0.002；不新增足端周期 / 强制抬轮 / 轮速差 / 接触髋惩罚 /
+不变：track_linear_velocity_x +1.0 / track_linear_velocity_y +1.0 /
+    track_angular_velocity +1.0（用户调参）/ lin_vel_z -1.0 /
+    body_ang_vel -0.05 / base_height -2.0 / leg_action_rate -0.02 /
+    wheel_action_rate -0.005；不新增足端周期 / 强制抬轮 / 轮速差 / 接触髋惩罚 /
     固定步态约束（run_still 为 BlackW 已验证的直线行走回中门控项，v2 加入）。
 高度目标：base_height_target 用户曾试调 0.45（与 flat 模板站立高度一致）后
     恢复 0.40 m（2026-10；Wolf 完整模型站立稳态实测 0.3961 m；历史首版即 0.40）。

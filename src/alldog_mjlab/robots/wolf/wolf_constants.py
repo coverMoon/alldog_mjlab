@@ -91,9 +91,9 @@ WOLF_IMU_BODY_OFFSET = (0.0, 0.0, 0.05975)
 # 显式 actuator / PD contract
 # ---------------------------------------------------------------------------
 
-# 腿部（hip/thigh/calf）position PD —— 首版仿真候选，非实机电机规格。
-WOLF_LEG_STIFFNESS = 50.0
-WOLF_LEG_DAMPING = 1.2
+# 腿部（hip/thigh/calf）position PD
+WOLF_LEG_STIFFNESS = 80.0
+WOLF_LEG_DAMPING = 3
 WOLF_LEG_EFFORT_LIMIT = 60.0
 # 轮部（foot）velocity PD：Kp=0 → τ = Kd * (vel_target - dq)，clamp ±17。
 WOLF_WHEEL_STIFFNESS = 0.0

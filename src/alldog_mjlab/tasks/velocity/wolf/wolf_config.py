@@ -102,7 +102,7 @@ class ControlParams:
     physics_dt: float = 0.005
     decimation: int = 4
     # q_target = q_default + leg_action_scale * raw；dq_target = wheel_sign * 10 * raw。
-    leg_action_scale: float = 0.20
+    leg_action_scale: float = 0.25
     wheel_action_scale: float = 10.0
 
     @property
@@ -331,10 +331,10 @@ class RewardScales:
     lin_vel_z: float = -1.0
     ang_vel_xy: float = -0.05
     base_height: float = -2.0
-    leg_action_rate: float = -0.01
-    wheel_action_rate: float = -0.002
+    leg_action_rate: float = -0.02
+    wheel_action_rate: float = -0.005
     orientation: float = -1.5
-    hip_default: float = -0.30
+    hip_default: float = -0.50
     stand_still: float = -0.40
     run_still: float = -0.20
     dof_pos_limits: float = -0.20
@@ -564,7 +564,7 @@ class AlgorithmParams:
     value_loss_coef: float = 1.0
     use_clipped_value_loss: bool = True
     clip_param: float = 0.2
-    entropy_coef: float = 0.0032
+    entropy_coef: float = 0.008
     num_learning_epochs: int = 5
     num_mini_batches: int = 4
     learning_rate: float = 1.0e-3
