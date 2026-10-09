@@ -138,9 +138,25 @@ uv run export --task-id black-rough \
 --agent.save-interval 100       # checkpoint 保存间隔
 --agent.seed 43                 # 随机种子
 --agent.run-name experiment     # 自定义 run 后缀
+--agent.logger tensorboard      # 指标记录后端（见下）
 ~~~
 
 这些参数附加在 `uv run train <task-id>` 后面。默认训练参数在 `src/alldog_mjlab/tasks/velocity/black/black_config.py` 中维护，CLI 显式参数优先。
+
+**`--agent.logger`（指标记录后端）：**
+
+| 选项 | 行为 | 适用场景 |
+| --- | --- | --- |
+| `tensorboard` | 仅写本地 TensorBoard events（`{log_root}/{experiment_name}/{run}/`）；checkpoint 只存本地 | 推荐：本地训练 / 无外部服务依赖 |
+| `wandb`（默认） | 指标 / 配置 / 代码状态上传 Weights & Biases，项目取 `--agent.wandb-project`（默认 `mjlab`）；checkpoint 可通过 `--agent.upload-model`（默认 True）同步上传 | 远程看板、多 run 对比 |
+
+说明：
+
+- 不显式传 `--agent.logger` 时用配置默认 `wandb`，需要 wandb 账号登录；离线流程请显式传 `--agent.logger tensorboard`；
+- `--agent.wandb-tags` 仅在 wandb 下生效；`--agent.upload-model False` 可保留指标上传但不存储模型；
+- 两种后端都写同一 run 目录结构（`logs/rsl_rl/<experiment_name>/<时间戳>_<run>/`），checkpoint 恢复与导出不受后端选择影响。
+
+**注意：** resume 时 `--agent.max-iterations` 表示从 checkpoint 继续训练多少轮，并非最终累计 iteration 编号。
 
 **注意：** resume 时 `--agent.max-iterations` 表示从 checkpoint 继续训练多少轮，并非最终累计 iteration 编号。
 
