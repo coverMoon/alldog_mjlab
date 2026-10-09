@@ -13,6 +13,9 @@ dependencies = [
 
 [project.scripts]
 export = "alldog_mjlab.utils.export_policy:main"
+# play：项目级入口（覆盖 mjlab 的同名 console script），缺省 --checkpoint-file
+# 时自动解析任务对应的最新本地 checkpoint（见 alldog_mjlab/utils/play.py）。
+play = "alldog_mjlab.utils.play:main"
 
 [build-system]
 requires = ["uv_build>=0.12.5,<0.13.0"]

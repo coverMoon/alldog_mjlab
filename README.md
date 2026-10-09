@@ -91,6 +91,13 @@ uv run play black-rough \
 
 将示例中的 `<flat-run>`、`<rough-run>` 和 checkpoint 编号替换成实际目录或文件名。需要播放 flat 或 HIM 策略时，将 task ID 和 checkpoint 路径换成对应任务即可。
 
+**缺省 checkpoint 自动注入**：本仓库的 `play` 是项目级入口（`alldog_mjlab/utils/play.py`，覆盖 mjlab 同名命令），显式传 `--checkpoint-file` 或 `--wandb-run-path` 时行为与 mjlab 原版一致；两者都省略时，自动按 task runner 配置（experiment / load_run regex）在 `logs/rsl_rl/` 下找该任务对应 run 目录中最新的目录内 step 最大的 `model_*.pt` 并注入：
+
+~~~bash
+uv run play wolf-flat-him --viewer viser
+# -> [INFO] 未指定 --checkpoint-file：使用默认最新 checkpoint logs/rsl_rl/wolf_velocity/<...>_wolf_flat_him/model_499.pt
+~~~
+
 ### 5. 导出 TorchScript 策略
 
 从最新的 rough checkpoint 导出 actor：
