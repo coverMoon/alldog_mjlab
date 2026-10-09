@@ -133,7 +133,7 @@ WOLF_ARTICULATION = EntityArticulationInfoCfg(
 
 
 #
-# Initial state（root z=0.45 为暂定值，待仿真确认；单位 quat）
+# Initial state
 #
 
 WOLF_DEFAULT_ROOT_Z = 0.4432  # 轮心偏移 0.3632 + 轮半径 0.08（calf=1.43 姿态 FK 实测几何接触高度）
