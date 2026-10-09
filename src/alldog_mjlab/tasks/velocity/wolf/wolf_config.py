@@ -134,14 +134,13 @@ class CommandParams:
 
     生成器为 MjLab v1.6 `UniformVelocityCommand`。``lin_vel_x`` 是课程起点，训练中
     由性能驱动 curriculum 扩展到 ±4 m/s；``lin_vel_y`` / ``ang_vel_z`` 训练全程固定
-    （范围小于 Black：轮足混合机器人在低速侧移 / 原地转下动力学不同，先收窄）。
     """
 
     resampling_time: tuple[float, float] = (10.0, 10.0)
 
     lin_vel_x: tuple[float, float] = (-1.0, 1.0)
-    lin_vel_y: tuple[float, float] = (-0.15, 0.15)
-    ang_vel_z: tuple[float, float] = (-0.6, 0.6)
+    lin_vel_y: tuple[float, float] = (-1.0, 1.0)
+    ang_vel_z: tuple[float, float] = (-3.14, 3.14)
 
     standing_fraction: float = 0.1
     forward_fraction: float = 0.2
@@ -528,7 +527,7 @@ class AlgorithmParams:
     value_loss_coef: float = 1.0
     use_clipped_value_loss: bool = True
     clip_param: float = 0.2
-    entropy_coef: float = 0.01
+    entropy_coef: float = 0.0032
     num_learning_epochs: int = 5
     num_mini_batches: int = 4
     learning_rate: float = 1.0e-3
@@ -541,7 +540,7 @@ class AlgorithmParams:
 
 @dataclass(frozen=True)
 class HimParams:
-    """Wolf HIM estimator / latent 参数（与 Black 相同 official HIM 默认）。
+    """Wolf HIM estimator / latent 参数。
 
     PPO 侧超参数继续复用 PolicyParams / AlgorithmParams。
     """
@@ -584,7 +583,7 @@ class RunnerParams:
         )
     )
     save_interval: int = 50
-    num_steps_per_env: int = 64
+    num_steps_per_env: int = 32
     max_iterations: int = 10_000
     # resume 时 command curriculum state 的默认恢复策略（语义与 Black 一致：
     # auto = 同 stage full / 跨 stage range / 旧 checkpoint none；PPO→HIM warm start
