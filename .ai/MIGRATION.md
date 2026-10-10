@@ -4908,6 +4908,45 @@ rough_nconmax 256→128 / rough_njmax 1024→256（同 Black rough）。
       hip alpha 期望处 FAIL（参数调参 prior commit 导致，同前记录）。
 ```
 
+## 33. Wolf Rough HField Overflow 定向诊断（本轮集成，COMPLETE；诊断结论）
+
+现象：真实训练（128/256 容量、约 3500 env）反复打印
+`height field collision overflow, number of collisions >= 50`。
+
+触发机制（mujoco-warp 3.11.0 `ccd_hfield_kernel_builder`）：对每个
+(hfield patch × robot collision geom) 对按 geom 支撑 AABB 在 hfield 帧内展开
+80×80 子格（dx≈0.101 m）；每格 2 个候选三角棱柱，`count ≥ 50`（在 z 剪枝前
+计数）即置 `OverflowType.HFIELD`（per-world、sticky、reset 清零）+ console
+每 substep 重印。每对最终仍只写按深度选出的 ≤4 个接触点（候选空间被裁到
+row-major 前 50）。
+
+结论（专用诊断脚本 tests/diag_wf_hfield_overflow.py，不提交）：
+
+```text
+触发配对：terrain HFIELD × robot/base_link 碰撞盒（0.215×0.10×0.06），
+    且仅该 geom 可触发（隔离实验因果验证 + 解析排除）：
+    base 盒斜置支撑 AABB 最大 6x6 cells（36 cells / 72 候选 > 50）；
+    轮圆柱 ≤16 cells、Leg1-3 盒/柱 ≤9-16 cells，其余数学上不可能 ≥51。
+触发状态：仅倒地/翻滚低姿态——base 盒贴/陷 hfield 表面
+    （实测事件：root_z 0.05~0.48 m、roll −102°~135°、base 接触力 ~1191 N、
+    base_contact_found=True 弹跳沉降过程）；正常行走（3×24 env×120 步乱动作
+    + 8×40 步）0 次溢出。
+分辨率对照（同 crash 序列、同 seed）：horizontal_scale 0.10 → 5 次 bit 事件；
+    0.125 → 0 次（支撑覆盖 cell 数低于阈值）。仅诊断对照，未写生产。
+溢出类型区分：HFIELD（本轮目标）；NEFC / EPA_HORIZON 仅人工深插极端状态出现
+    （正常行走 nefc 峰值 72/256 余量充足）；NARROWPHASE / CCD 等未出现。
+console 警告数量 ≠ 受影响 env 数：每 (world, pair, substep) 重复打印；
+    受影响规模应以 per-world bit 统计（建议训练循环加轻量 bit 计数器）。
+物理影响：溢出仅裁剪候选空间到前 50；每对仍写出深度排序最优 ≤4 接触点，
+    深层候选丢失可能使该 pair 接触点选择有细微差异，不改变求解数学。
+最小修复候选（未实施，优先序）：1) 拆分 base_link 碰撞盒为两段小 box
+    （结构性消除；接触分布/摩擦求解体积改变，需重训+行为对照，属机器人
+    生产碰撞几何修改）；2) 等 mujoco-warp 上游支持 (HFIELD, BOX/CYLINDER)
+    multiccd；3) horizontal_scale 0.125（实测可消除，但改变全部 hfield
+    地形接触与训练分布，不推荐）。
+未验证：2000+ env / curriculum 难度 >5 / 激进策略下的按 world 受影响比例；
+    warp 上游后续版本变化；base 盒拆分后的训练行为。
+
 ## 26. Update Rule
 
 每完成一个 behavior unit：
