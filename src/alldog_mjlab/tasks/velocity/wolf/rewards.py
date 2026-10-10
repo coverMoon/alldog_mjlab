@@ -18,7 +18,7 @@
    ``run_still_leg_l1``；
 6. native 薄包装（不复制 MjLab 数学）：``dof_pos_limits`` /
    ``leg_torques_l2``（直接转发 ``mjlab.envs.mdp`` 原生实现）；
-7. rough 专属：``wheel_force_lift``（轮水平接触力 × 向上竖直速度，仅
+7. rough 专属：``wheel_force_lift``（轮水平接触力二值门控 × 向上竖直速度，仅
    wolf-rough / wolf-rough-him 注册）。
 """
 
@@ -382,10 +382,11 @@ def wheel_force_lift(
     env: ManagerBasedRlEnv,
     sensor_name: str,
     asset_cfg: SceneEntityCfg,
+    min_horizontal_force: float,
 ) -> torch.Tensor:
-    """轮子水平接触力 × 向上竖直速度的提升奖励（仅 rough 注册）。
+    """轮子水平接触力门控 × 向上竖直速度的提升奖励（仅 rough 注册）。
 
-    reward = Σ_{i∈{FL,FR,RL,RR}} ‖f_xy^i‖ · max(v_z^i, 0)
+    reward = Σ_{i∈{FL,FR,RL,RR}} 1[‖f_xy^i‖ ≥ min_horizontal_force] · max(v_z^i, 0)
 
     - ``f``：轮-terrain 接触力的世界系 net force（ContactSensor
       ``reduce="netforce"``：MjLab/mujoco_warp 对每个 contact 做
@@ -393,18 +394,17 @@ def wheel_force_lift(
       →secondary，即轮压向地面方向为负 z，本公式只用水平模长，与符号无关）；
       因此 ``f`` 前两维的 norm 就是世界水平接触力幅值（若误当 contact-frame
       读，在障碍面（法向不竖直）上会得到错误量值，见 MIGRATION §30.6）；
+    - 门控：水平接触力幅值达到 ``min_horizontal_force``（单位 N）时取 1，否则 0。
+      门控把“轮正在水平顶住障碍”与“平地静态噪声 / 弱接触”区分开，且同一
+      向上速度在 10 N 与 200 N 水平力下得分相同（不再随力大小线性放大；
+      旧的 ``‖f_xy‖ · v_z`` 力乘速度语义已废弃）；
     - ``v_z``：轮刚体（Link4）世界系线速度竖直分量，clamp min=0（仅向上运动
       计入，向下 / 静止不产生奖励，自然限制奖励方向）；
-    - 脱离接触后 net force 归零，奖励自然归零；不设接触力阈值、指令门控或
-      top-k 选择。
+    - 脱离接触后 net force 归零 → 门控 0，奖励自然归零。
 
-    复位下沉瞬态中切向摩擦可达 30–50 N/settle 数步，产生短时奖励
-    （2026-10 PD 调参后实测前 ~12 步 raw peak 可达 ~159，weight 0.005 下
-    ≈0.8/step）；settled 平地静态 raw ≈ 11（加权 0.057/step，仍远小于
-    tracking 满量 1.0/step）。顺序 contract：接触力沿
-    ``sensor.primary_names``（不依赖 MJCF natural order），逐 call 显式断言为
-    FL/FR/RL/RR 的轮碰撞 geom 顺序；轮部速度索引由 ``asset_cfg``
-    （``preserve_order=True`` 的 Link4 body 名）解析。
+    顺序 contract：接触力沿 ``sensor.primary_names``（不依赖 MJCF natural
+    order），逐 call 显式断言为 FL/FR/RL/RR 的轮碰撞 geom 顺序；轮部速度索引
+    由 ``asset_cfg``（``preserve_order=True`` 的 Link4 body 名）解析。
     """
     sensor = env.scene[sensor_name]
     assert list(sensor.primary_names) == list(WOLF_WHEEL_COLLISION_GEOM_NAMES), (
@@ -414,10 +414,11 @@ def wheel_force_lift(
     contact_force = sensor.data.force  # [B, P=4, 3]，netforce → world frame
     assert contact_force is not None
     horizontal_force = torch.norm(contact_force[..., :2], dim=-1)  # [B, 4]
+    contact_gate = (horizontal_force >= min_horizontal_force).to(horizontal_force.dtype)
     asset: Entity = env.scene[asset_cfg.name]
     wheel_velocity_w = asset.data.body_link_lin_vel_w[:, asset_cfg.body_ids]  # [B, 4, 3]
     upward_velocity = torch.clamp(wheel_velocity_w[..., 2], min=0.0)  # [B, 4]
-    return torch.sum(horizontal_force * upward_velocity, dim=1)
+    return torch.sum(contact_gate * upward_velocity, dim=1)
 
 
 def dof_pos_limits(

@@ -756,14 +756,17 @@ def _configure_rewards(cfg: ManagerBasedRlEnvCfg, rough: bool) -> None:
         params={"asset_cfg": leg_actuator_cfg},
     )
     if rough:
-        # rough 专属第 15 项：轮水平接触力 × 向上竖直速度。轮部速度用显式
-        # Link4 body 名（FL/FR/RL/RR，preserve_order）；接触力侧的顺序对齐由
-        # wheel_force_lift 内部的 primary_names 断言保证。
+        # rough 专属第 15 项：轮水平接触力二值门控 × 向上竖直速度。轮部速度用
+        # 显式 Link4 body 名（FL/FR/RL/RR，preserve_order）；接触力侧的顺序对齐
+        # 由 wheel_force_lift 内部的 primary_names 断言保证。
         cfg.rewards["wheel_force_lift"] = RewardTermCfg(
             func=wheel_force_lift,
             weight=WOLF_CONFIG.reward.scales.wheel_force_lift,
             params={
                 "sensor_name": WOLF_WHEEL_FORCE_CONTACT_SENSOR,
+                "min_horizontal_force": (
+                    WOLF_CONFIG.reward.wheel_force_lift_min_horizontal_force
+                ),
                 "asset_cfg": SceneEntityCfg(
                     "robot", body_names=WOLF_WHEEL_BODY_NAMES, preserve_order=True
                 ),
