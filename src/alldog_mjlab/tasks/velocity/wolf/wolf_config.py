@@ -336,12 +336,12 @@ class RewardScales:
     tracking_linear_x: float = 1.0
     tracking_linear_y: float = 1.0
     tracking_angular: float = 1.0
-    lin_vel_z: float = -1.0
+    lin_vel_z: float = -0.8
     ang_vel_xy: float = -0.05
     base_height: float = -2.0
     leg_action_rate: float = -0.02
     wheel_action_rate: float = -0.005
-    orientation: float = -1.5
+    orientation: float = -0.2
     hip_default: float = -0.50
     stand_still: float = -0.40
     run_still: float = -0.20
@@ -353,7 +353,7 @@ class RewardScales:
     # 未来例如 flat 专属或 HIM 专属项也放这里）。
     # -----------------------------------------------------------------
     # rough 专属：轮水平接触力 × 向上竖直速度（鼓励沿障碍表面向上滚动）。
-    wheel_force_lift: float = 0.005
+    wheel_force_lift: float = 0.5
 
 
 @dataclass(frozen=True)
