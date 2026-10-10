@@ -352,7 +352,8 @@ class RewardScales:
     # 专属区：各 stage / terrain 独有项（不在全部任务注册的权重集中在这里；
     # 未来例如 flat 专属或 HIM 专属项也放这里）。
     # -----------------------------------------------------------------
-    # rough 专属：轮水平接触力 × 向上竖直速度（鼓励沿障碍表面向上滚动）。
+    # rough 专属：轮水平接触力二值门控 × 向上竖直速度（鼓励沿障碍表面向上
+    # 滚动；门控阈值见 ``RewardParams.wheel_force_lift_min_horizontal_force``）。
     wheel_force_lift: float = 0.5
 
 
@@ -388,6 +389,9 @@ class RewardParams:
 
     tracking_sigma: float = 0.25
     base_height_target: float = 0.40
+    # wheel_force_lift 水平接触力门控阈值（单位 N）：‖f_xy‖ ≥ 该值才把轮的
+    # 向上竖直速度计入奖励；用于抑制平地静态噪声与弱接触（语义见 rewards.py）。
+    wheel_force_lift_min_horizontal_force: float = 1.0
     scales: RewardScales = field(default_factory=RewardScales)
     posture: PostureParams = field(default_factory=PostureParams)
 

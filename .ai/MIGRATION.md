@@ -4717,18 +4717,23 @@ CUDA SKIPPED（本轮仅轻量定向检查，未重跑 GPU 矩阵；摩擦/半�
      delay sim2real 等价性 —— 未开始/未重跑。
 ```
 
-### 30.6 Wolf rough wheel_force_lift 奖励（本轮集成，COMPLETE）
+### 30.6 Wolf rough wheel_force_lift 奖励（本轮集成，COMPLETE；2026-10 改为水平力门控）
 
 ```text
-定义：reward = Σ_{i∈{FL,FR,RL,RR}}(|f_xy^i| · max(v_z^i, 0))，输出 [B]。
+定义：reward = Σ_{i∈{FL,FR,RL,RR}}(1[‖f_xy^i‖ ≥ F_min] · max(v_z^i, 0))，输出 [B]。
+    F_min = RewardParams.wheel_force_lift_min_horizontal_force = 1.0 N：水平接触力
+    二值门控。旧的 ‖f_xy‖·v_z 力乘速度语义已废弃——平地静态噪声与弱接触不再被
+    线性放大，且同一向上速度在 10 N 与 200 N 水平力下得分相同。
     f = 轮-terrain 接触力世界系 net force（ContactSensorCfg reduce="netforce"，
     fields=("force",)，num_slots=1；mujoco_warp 对每个 contact 做
     contact_frame.T @ force 后求和，恒为世界系；符号约定 primary→secondary，
-    轮压地方向为负 z，公式只用水平模长，与符号无关）。
-    v_z = 轮刚体（*_Link4）世界系线速度竖直分量，clamp min=0。
-不加入：接触力阈值 / 指令门控 / timer 状态机 / 前方障碍检测 / 目标抬升高度 /
+    轮压地方向为负 z，本公式只用水平模长，与符号无关）。
+    v_z = 轮刚体（*_Link4）世界系线速度竖直分量，clamp min=0（仅向上计入）。
+不加入：力乘速度线性项 / 指令门控 / timer 状态机 / 前方障碍检测 / 目标抬升高度 /
     top-k 轮选择 / 地形自适应 / 额外接触惩罚。
-权重：RewardScales.wheel_force_lift = 0.005（专属区）。
+权重：RewardScales.wheel_force_lift = 0.5（专属区）。
+阈值：RewardParams.wheel_force_lift_min_horizontal_force = 1.0 N，经 env_cfgs
+    reward params 显式传入 wheel_force_lift(min_horizontal_force=...)。
 注册范围：仅 wolf-rough / wolf-rough-him（含各自 play）；flat 两任务保持
     14 项不注册。flat 也不注册配套 sensor。
 sensor：wheel_force_contact（仅 rough），primary =
@@ -4737,25 +4742,22 @@ sensor：wheel_force_contact（仅 rough），primary =
 轮部速度：WOLF_WHEEL_BODY_NAMES（FL/FR/RL/RR 的 *_Link4，
     preserve_order=True）→ data.body_link_lin_vel_w。
 验证（tests/check_wolf_force_lift.py，CPU，不提交）：
-    - 静态 cfg：flat 14 项无该项 / rough train+play+HIM 15 项、weight、
-      sensor 配置 PASS；
-    - 公式（stub env）：无接触 0 / 竖直支撑力 0 / 水平力×向上速度 求和 /
-      向下 clamp 0 / shape [B] PASS；
-    - 真实 env：primary 顺序 == 轮碰撞 geom 顺序、force [B,4,3]；
-      每步 raw 与公式同刻逐值等价（需在 reward_manager.compute 调用内
-      手动重算，derived quantities 在 reward 时刻 stale 一个物理子步，
-      step 返回后已刷新）；
-      平地静态 100 步：Σfz=-330.4 N ≈ -m·g（33.67 kg）；
-      （2026-10 PD 调参后更新：settled raw max≈11.4，加权 0.057/step；
-      复位下沉瞬态 raw peak≈159，加权 ≈0.8/step）水平接触力瞬态集中于
-      settle 数步或摔倒事件，滚走后归零，短期可接受；
-    - rough 生地形 40 步静止 + 120 步前进：raw>0 样本 228/240（切向求解器
-      基底噪声）；raw max=1.518，weighted max=0.0076（×dt 后 1.5e-4/step），
-      无异常尖峰；
+    - 静态 cfg：flat 14 项无该项 / rough train+play+HIM 15 项、weight=0.5、
+      min_horizontal_force=1.0 N 传递、sensor 配置 PASS；
+    - 公式（stub env）：无接触 0 / 水平力<阈值 0 / 水平力≥阈值×向上速度求和 /
+      向下 clamp 0 / 10N 与 200N 同向上速度等价 / shape [B] PASS；
+    - 真实 env：primary 顺序 == 轮碰撞 geom 顺序、force [B,4,3]；每步 raw 与
+      公式同刻逐值等价（在 reward_manager.compute 调用内手动重算，derived
+      quantities 在 reward 时刻 stale 一个物理子步，step 返回后已刷新）；
+      平地静态 100 步：Σfz=-330.4 N ≈ -m·g（33.67 kg）；settled raw max=0.251
+      （加权 0.126/step，远小于 tracking 满量 1.0/step）；复位下沉瞬态 raw
+      peak=1.34（加权 0.669/step）；
+    - rough 生地形 40 步静止 + 120 步前进：raw>0 样本 229/240，raw max=0.042，
+      weighted max=0.021（×dt 后 4e-4/step），无异常尖峰；
     - CUDA SKIPPED（本轮轻量验证，无 device 分支）。
 未验证：障碍立面（非竖直法向）接触下的世界系衰减语义仅有 v1.6.0 源码
-    （frameT @ force）+ mjlab 文档背书，未做独立物理复核；真实训练
-    收敛效果未验证（由后续 wolf-rough 训练观察）。
+    （frameT @ force）+ mjlab 文档背书，未做独立物理复核；1.0 N 门控阈值 /
+    0.5 权重对训练收敛的影响未做系统实验（由后续 wolf-rough 训练观察）。
 ```
 
 ## 31. Wolf Flat 模板 Spawn 高度与仿真容量优化（本轮集成，COMPLETE）
