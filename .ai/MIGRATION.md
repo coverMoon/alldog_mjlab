@@ -4959,31 +4959,39 @@ console 警告数量 ≠ 受影响 env 数：每 (world, pair, substep) 重复�
     WolfRoughSimulationCfg(SimulationCfg)（task-local 模块顶层，YAML
     (!!python/name:) 序列化验证 PASS）：覆写 apply_wp_opt——先
     super().apply_wp_opt() 再 wp_opt.warn_overflow = False；仅在
-    rough_warn_overflow=False 时装入 cfg.sim（构造保留 SimulationCfg 全部
-    字段：nconmax/njmax/mujoco/broadphase/nan_guard 逐字段一致验证 PASS）。
+    rough_warn_overflow=False **且 rough train** 时装入 cfg.sim（play 不关闭
+    ——它不注册 overflow metrics，保留原生警告便于调试；构造保留
+    SimulationCfg 全部字段：nconmax/njmax/mujoco/broadphase/nan_guard
+    逐字段一致验证 PASS）。
     调用时机在 put_model 后 / CUDA Graph 捕获前（Simulation.apply_wp_opt
     的原生时机），不在 graph 捕获后改选项。
     注意：warn_overflow 是 mujoco-warp 3.11.0 布尔**总开关**，关闭的是全部
     overflow 类型打印（非仅 HFIELD）；Data.overflow bit 不受影响。
     metrics（仅 rough train 注册；play/flat 不加）：
-        overflow_hfield / overflow_other，func 直读 Data.overflow 位
-        （HFIELD=1<<5），reduce="max"，无 CPU 同步/无逐 env 打印；
-        手工置位验证：1/4 env HFIELD → 0.25，other bit → 0.5，bit 读取后
-        不消失（sticky 语义保持）。
+        overflow_hfield / overflow_other，func 经 MjLab TorchArray 原生
+        ``overflow[:]``（__getitem__）读底层 Tensor（直接
+        torch.as_tensor(代理对象) 有运行时异常风险，已修复）取
+        Data.overflow 位（HFIELD=1<<5），reduce="max"，无 CPU 同步/无逐
+        env 打印；手工置位验证：1/4 env HFIELD → 0.25，other bit → 0.5，
+        bit 读取后不消失（sticky 语义保持）。
 
 HFIELD ↔ termination 关联诊断（tests/check_wf_overflow_diag.py，不提交；
     采样点 = wrap reward_manager.compute，即 termination 计算后 / reset 前；
     bit sticky → 维护 per-env seen，只计本 episode 首次置位步）：
-    256 env × 60 步 crash 场景一次有效样本：first_hfield=15，
-    同步 illegal_contact=13（86.7%）、同步 done=13、未同步=2
-    （1 个下一步即终止，总体 14/15=93.3% 一控制步内终止）；
-    残存样本含 1 例深插滑动步状态（穿透充分）。
+    256 env × 60 步 crash 场景一次有效样本：首次 HFIELD 事件 15 次，
+    其中 13/15 与 illegal_contact 发生在同一控制步（86.7%）；
+    14/15 最迟在下一控制步终止（93.3%）；尚有 1 个未及时终止样本
+    （深插滑动步状态，穿透充分）。
     ⚠ 复跑稳定性警告：同码同 seed 重跑出现过 0 事件样本（Warp 层隐藏
     随机性，机制未归类）——上述比例仅来自单次有效样本，**标记为未验证**，
     不据此宣称覆盖全部真实训练形态。
 开关决策：证据方向支持"溢出集中于终止步"，但样本不可稳定复现且有未
     及时终止的深插个例 → rough_warn_overflow 默认保持 True；是否关闭由
     用户在 3500+ env 实训核对 "overflow_hfield ≤ illegal stops" 比例后决定。
+风险（保留状态）：诊断复现不稳定（同码同 seed 有 0 事件样本重跑）；真实
+    3500 env 训练分布未验证。本轮仅为监测通道与警告开关的功能修复，
+    **不宣称 HField 碰撞溢出问题已被解决**——触发机制（§33 base 盒）与
+    消除候选（拆分碰撞盒 / warp 上游 / 分辨率）仍是开放项。
 
 验收状态：
     STATIC PASS：cfg 字段保真（8 字段一致）、YAML 序列化、metrics 注册范围

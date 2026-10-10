@@ -64,7 +64,10 @@ _WF_HFIELD_OVERFLOW_BIT = 1 << 5
 def metric_overflow_hfield(env: "ManagerBasedRlEnv") -> torch.Tensor:
     """HFIELD overflow bit 是否置位（bit sticky → `reduce="max"` 即本 episode
     出现过即为 1；0/1 量纲，日志反映完成 episode 中的比例）。"""
-    bits = torch.as_tensor(env.sim.data.overflow)
+    # MjLab v1.6.0：env.sim.data.overflow 是 TorchArray 代理；走原生
+    # __getitem__() 路径取底层 Tensor（torch.as_tensor 对代理对象有运行时
+    # 异常风险）。
+    bits = env.sim.data.overflow[:]
     return ((bits & _WF_HFIELD_OVERFLOW_BIT) != 0).to(
         device=bits.device, dtype=torch.float32
     )
@@ -72,7 +75,7 @@ def metric_overflow_hfield(env: "ManagerBasedRlEnv") -> torch.Tensor:
 
 def metric_overflow_other(env: "ManagerBasedRlEnv") -> torch.Tensor:
     """除 HFIELD 外任一 overflow bit 是否置位（同上 sticky/max 语义）。"""
-    bits = torch.as_tensor(env.sim.data.overflow)
+    bits = env.sim.data.overflow[:]
     return ((bits & ~_WF_HFIELD_OVERFLOW_BIT) != 0).to(
         device=bits.device, dtype=torch.float32
     )
@@ -1188,8 +1191,9 @@ def _configure_common_runtime(cfg: ManagerBasedRlEnvCfg, *, play: bool, rough: b
     cfg.sim.njmax = WOLF_CONFIG.simulation.rough_njmax if rough else WOLF_CONFIG.simulation.njmax
     # Wolf rough 溢出警告开关：诊断确认（§34）后可将 rough_warn_overflow 置
     # False 关闭全部 overflow console 打印（布尔总开关，非仅 HFIELD）；
-    # Data.overflow bit / metrics 监测不受影响。
-    if rough and not WOLF_CONFIG.simulation.rough_warn_overflow:
+    # Data.overflow bit / metrics 监测不受影响。关闭仅作用于 rough train：
+    # play 不注册 overflow metrics，保留原生警告便于调试。
+    if rough and not play and not WOLF_CONFIG.simulation.rough_warn_overflow:
         import dataclasses as dc
 
         cfg.sim = WolfRoughSimulationCfg(
