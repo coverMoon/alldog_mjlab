@@ -203,6 +203,30 @@ WOLF_LEGS_FL_FIRST_JOINT_NAMES = tuple(
 WOLF_WHEEL_JOINT_POLICY_ORDER = tuple(f"{leg}_foot" for leg in WOLF_LEG_ORDER)
 
 
+def _write_template_root_height(spec: "mujoco.MjSpec", root_z: float) -> None:
+    """模板 spec 根 body 高度写入（flat/rough 回调共用的轻量校验 + 写入）。"""
+    body = next((b for b in spec.bodies if b.name == WOLF_TEMPLATE_ROOT_BODY), None)
+    if body is None:
+        raise ValueError(
+            f"Wolf 模板 spec_fn：找不到根 body {WOLF_TEMPLATE_ROOT_BODY!r}，"
+            "spec 结构与预期不符，fail-loud"
+        )
+    # 自由关节名来自 MJCF（robot/floating_base_joint），不属于 root body 名前缀；
+    # 用“全 spec 恰好 1 个 freejoint”+ 根 body 名校验共同判定。
+    free_joints = [
+        j
+        for j in spec.joints
+        if int(j.type) == int(mujoco.mjtJoint.mjJNT_FREE)
+    ]
+    if len(free_joints) != 1:
+        raise ValueError(
+            "Wolf 模板 spec_fn：根 body 下自由关节数量应为 1，实际 "
+            f"{len(free_joints)}（joints={[j.name for j in free_joints]}），fail-loud"
+        )
+    # 抬升模板 root（写入 spec，由 MuJoCo 正常编译流程产生 qpos0）。
+    body.pos[:] = [0.0, 0.0, root_z]
+
+
 def _wolf_flat_template_spec_fn(spec: "mujoco.MjSpec") -> None:
     """Wolf flat 编译模板 spawn 高度回调（模块顶层，保证 yaml 可表示）。
 
@@ -229,36 +253,41 @@ def _wolf_flat_template_spec_fn(spec: "mujoco.MjSpec") -> None:
     yaml 的 ``!!python/name:`` 标签只能表示有稳定可导入名称的对象；嵌套局部
     函数的 qualname 含 ``<locals>``，dump/load 均不可靠。
     """
-    body = next((b for b in spec.bodies if b.name == WOLF_TEMPLATE_ROOT_BODY), None)
-    if body is None:
-        raise ValueError(
-            f"Wolf 模板 spec_fn：找不到根 body {WOLF_TEMPLATE_ROOT_BODY!r}，"
-            "spec 结构与预期不符，fail-loud"
-        )
-    # 自由关节名来自 MJCF（robot/floating_base_joint），不属于 root body 名前缀；
-    # 用“全 spec 恰好 1 个 freejoint”+ 根 body 名校验共同判定。
-    free_joints = [
-        j
-        for j in spec.joints
-        if int(j.type) == int(mujoco.mjtJoint.mjJNT_FREE)
-    ]
-    if len(free_joints) != 1:
-        raise ValueError(
-            "Wolf 模板 spec_fn：根 body 下自由关节数量应为 1，实际 "
-            f"{len(free_joints)}（joints={[j.name for j in free_joints]}），fail-loud"
-        )
-    # 抬升模板 root 高度（写入 spec，由 MuJoCo 正常编译流程产生 qpos0）。
-    body.pos[:] = [0.0, 0.0, WOLF_CONFIG.simulation.template_root_z]
+    _write_template_root_height(spec, WOLF_CONFIG.simulation.template_root_z)
 
 
-def _configure_template_spawn_height(cfg: ManagerBasedRlEnvCfg) -> None:
-    """把模块顶层 spec 回调挂到 ``cfg.scene.spec_fn``（仅 flat 装配路径调用）。"""
+def _wolf_rough_template_spec_fn(spec: "mujoco.MjSpec") -> None:
+    """Wolf rough 编译模板 spawn 高度回调（模块顶层，保证 yaml 可表示）。
+
+    背景（诊断同 §31，rough 版，tests/diag_wolf_rough_template.py）：
+    rough 无 spec_fn 时模板 qpos0 root z=0，深插 generator 地形 patch 之下
+    （模板 ncon=178 / nefc=712），把 rough 容量钉在 256/1024。
+
+    本回调把模板 root 抬到 z=WOLF_CONFIG.simulation.rough_template_root_z
+    （10.0）——高于全部 terrain geom 的 z 上界（实测 ≤2.72 m），使模板与
+    地形零接触，容量改由运行时需求决定。
+
+    不变的量同 ``_wolf_flat_template_spec_fn``（INIT_STATE / joint ref /
+    关节几何 / qpos0 生成路径同）。地形几何与 spawn origin 完全不变。
+    """
+    _write_template_root_height(spec, WOLF_CONFIG.simulation.rough_template_root_z)
+
+
+def _configure_template_spawn_height(
+    cfg: ManagerBasedRlEnvCfg, rough: bool
+) -> None:
+    """把模块顶层 spec 回调挂到 ``cfg.scene.spec_fn``（flat/rough 对应回调）。
+
+    已有 spec_fn 被其他机制占用时 fail-loud（baseline 从不设置该字段）。
+    """
     if cfg.scene.spec_fn is not None:
         raise ValueError(
             "cfg.scene.spec_fn 已存在（Wolf 不覆盖既有 spec_fn；"
             "baseline 未使用该字段，出现该值说明装配链路有未知来源）"
         )
-    cfg.scene.spec_fn = _wolf_flat_template_spec_fn
+    cfg.scene.spec_fn = (
+        _wolf_rough_template_spec_fn if rough else _wolf_flat_template_spec_fn
+    )
 
 
 def _configure_command(cfg: ManagerBasedRlEnvCfg) -> None:
@@ -1189,10 +1218,10 @@ def _build_wolf_env_cfg(
         dr = WOLF_CONFIG.dr if dr is None else dr
         dr.validate()
 
-    if not rough:
-        # 仅 flat（train + play）：编译模板 spawn 高度抬高，消除模板穿地接触
-        # 对 MJWarp 容量的硬下限；rough 模板容量需求另行处理（§30.2）。
-        _configure_template_spawn_height(cfg)
+    # 全部路径（flat/rough × train/play × PPO/HIM）：编译模板 spawn 高度抬高到
+    # 对应地形的无接触区，消除模板穿地接触对 MJWarp 容量的硬下限
+    # （flat=plane z0.45，rough=generator z10.0）。
+    _configure_template_spawn_height(cfg, rough=rough)
 
     _configure_command(cfg)
     _configure_scene_and_sensors(cfg, dr, rough)

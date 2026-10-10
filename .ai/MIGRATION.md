@@ -38,6 +38,7 @@ Wolf flat PPO / HIM / command curriculum integration: COMPLETE（§28）
 Wolf Domain Randomization（逐项开关 + minimal profile）: COMPLETE（§29）
 Wolf task-local independence + Wolf rough PPO/HIM: COMPLETE（§30）
 Wolf flat 模板 spawn 高度 + flat 容量优化（64/256）: COMPLETE（§31）
+Wolf rough 模板 spawn 高度（z=10）+ rough 容量优化（128/256）: COMPLETE（§32）
 Hardware effort/current ceiling: UNCONFIRMED（实机前确认）
 ```
 
@@ -4611,9 +4612,9 @@ terrain generator（curriculum=True，7 类 x 10 行，值与 Black rough 已实
     stairs base 0.05 / gain 0.18 / width 0.30；max_init_terrain_level 5
 rough_slope = WolfRoughSlopeTerrainCfg（slope+noise 双 native 数学相加，同 Black
      已验证实现语义）。
-MJWarp capacity：rough 模板 spawn 实测下限 ncon >= 178 / nefc >= 712（plane 为
-     124/496）；rough_nconmax=256 / rough_njmax=1024（capacity tuning 面非契约值。
-     runtime 需保持 overflow NO，待长训练核）。
+MJWarp capacity：rough 模板 spawn 高度 z=10 后模板 ncon=0 / nefc=0（原
+     178/712 下限消除，见 §32）；rough_nconmax=128 / rough_njmax=256
+     （候选 B，runtime 峰值余量 ~4x，待 4096 实训回验，overflow 需保持 NO）。
 ```
 
 rough 环境特化（与 flat 共用全部基础控制/observation/action/reset/DR 契约）：
@@ -4744,10 +4745,10 @@ sensor：wheel_force_contact（仅 rough），primary =
       每步 raw 与公式同刻逐值等价（需在 reward_manager.compute 调用内
       手动重算，derived quantities 在 reward 时刻 stale 一个物理子步，
       step 返回后已刷新）；
-      平地静态 100 步：Σfz=-330.5 N ≈ -m·g（33.67 kg）；settled 后
-      raw max=0.98（切向~6 N rim-corner 求解器分量 × 微小 v_z）；
-      复位下沉瞬态（前~12 步）raw peak=32.85（切向 30–50 N 摩擦瞬态），
-      weight 0.005 下 0.164/step，短暂时段，可接受但不忽略；
+      平地静态 100 步：Σfz=-330.4 N ≈ -m·g（33.67 kg）；
+      （2026-10 PD 调参后更新：settled raw max≈11.4，加权 0.057/step；
+      复位下沉瞬态 raw peak≈159，加权 ≈0.8/step）水平接触力瞬态集中于
+      settle 数步或摔倒事件，滚走后归零，短期可接受；
     - rough 生地形 40 步静止 + 120 步前进：raw>0 样本 228/240（切向求解器
       基底噪声）；raw max=1.518，weighted max=0.0076（×dt 后 1.5e-4/step），
       无异常尖峰；
@@ -4801,8 +4802,8 @@ wolf_config.py SimulationParams：
     qpos0[0:7] = [0,0,0.45,1,0,0,0]；全部 16 个 hinge ref 仍为 0（qpos0[7:] == 0）。
     keyframe init_state（z=0.4432 + 0.82 关节）不变（key 与 qpos0 是独立机制）。
 容量：flat 64/256（<模板 24/96 下限 + 运行时需求；overflow 必须 NO）；
-    rough 256/1024 完全不变（无 spec_fn；rough 模板 spawn 下限仍 178/712，
-    本轮不处理）。
+    rough 后续由 §32 处理（同机制 spec_fn + 候选 B 128/256）。
+    （历史初版改为：当时 rough 模板 spawn 下限 178/712，弯 256/1024）
 不变项（实测）：
     EntityCfg INIT_STATE / default_root_state z 仍 0.4432（reset 后 root z 实测
     全部 0.4432，无 0.45 偏移）；default joint pos（EntityCfg init_state 显式
@@ -4832,6 +4833,79 @@ CUDA:0 PASS（256 envs / 6 步 smoke）：连续量容差按步放宽
     rough 模板 spawn 状态优化、CUDA 全矩阵重跑。
 注意：put_data 以 qpos0 种子化 warp 派生量（xquat/xmat/ximat）——优化前的
     首步派生值与优化后不同，但 reset 后行为已验证一致；该影响仅限首步。
+```
+
+## 32. Wolf Rough 模板 Spawn 高度与 MJWarp 容量优化（本轮集成，COMPLETE）
+
+诊断（tests/diag_wolf_rough_template.py，不提交）与 §31 同因：rough 无 spec_fn
+时模板 qpos0 root z=0，深插 generator 地形 patch 之下，模板实测 ncon=178 /
+nefc=712（contact rows 712 / limit rows 0），pin 住 rough 容量 256/1024。
+
+### 32.1 模板 spawn 高度（复用 §31 机制）
+
+```text
+env_cfgs.py：
+    _write_template_root_height(spec, root_z)：flat/rough 共用的校验 + 写入
+    （根 body 存在 / 全 spec 恰 1 个 freejoint / 写 body.pos [0,0,z]）；
+    _wolf_rough_template_spec_fn（模块顶层，YAML !!python/name: 验证 PASS）写入
+    WOLF_CONFIG.simulation.rough_template_root_z；
+    _configure_template_spawn_height(cfg, rough) 按 stage 选回调；
+    _build_wolf_env_cfg 全部路径（flat/rough × train/play × PPO/HIM）都挂接。
+    spec_fn 被占用时依旧 fail-loud。
+wolf_config.py SimulationParams：
+    rough_template_root_z = 10.0（初始候选，实测高于 terrain 全部 geom z 上界
+    2.718 m，视为安全；模板接触 clean 无法顶开后不再抬高，如需变动需另行任务）。
+结果（实测）：模板 qpos0 root z = 10.0，ncon 178→0 / nefc 712→0。
+不变项：INIT_STATE / default_root_state z=0.4432、joint ref、actuator、地形几何、
+    spawn origin、reset 语义、MJCF、训练容量 schema 同 §31。
+```
+
+### 32.2 容量：候选 B（最终值）
+
+```text
+rough_nconmax 256→128 / rough_njmax 1024→256（同 Black rough）。
+依据（模板清零后实测 runtime per-world 峰值，中等强度动作短 rollout）：
+    - CPU 4 env、L0–5：activity nefc_max 52 / ncon 17；reset 期 nefc≤20
+    - CPU 8 env、max_init_level=9（难度 0.9 地形）：activity nefc_max 64 / ncon 20
+    - CUDA 256 env、难度 9：activity nefc_max 72 / ncon 35
+      （72/256 = 28%、35/128 = 27%，两候选均余量充足，overflow 全 NO）
+    两候选 A（128/512）/ B（128/256）均验证 clean，采 B（与 Black 同值）。
+训练期更激进动作 / DR 方差未纳入本诊断；4096 实训验收由用户完成。
+```
+
+### 32.3 行为一致性对照（tests/check_wolf_rough_equiv.py + 决断实验，不提交）
+
+```text
+固定 seed=123 / 4 env / 24 步 zero-action：
+    - 修改前后：default_root_state、reset 后 root pos/quat/vel、joint pos/vel、
+      actor obs 首 8 维 全部一致（round diff = 0）；
+    - 首步之后出现微小时序差异，24 步后最大发散至 root pos ~5e-4 m / 轮接触力 66 N
+      （混沌放大，不代表 contract 差异）。
+    决断实验：当前代码 + 模板 z 强改回 0（frozen dataclass
+    object.__ setattr__）→ 与旧代码逐位一致（0 DIFF）——差异 100% 来源于
+    旧模板深插地形在 reset 时刻残留的求解器浮点微扰（qacc_warmstart 已排除，
+    具体内部状态未归类），量级：reset 传感器力 ≤5e-4 N、首步 reward 差 ≤1e-5；
+    新模板 z=10 下连续两 run 逐位一致可复现。
+    语义结论：reset/write-observable 契约不变，残留性差异属 MjLab 求解器实现
+    细节，不影响训练语义；新模板为更干净基线。
+其它回归：check_wolf_rough.py FULL PASS（含 spec_fn 四任务绑定断言 + 容量值）、
+    check_wolf_force_lift.py PASS（settled 阈值同步为当前 PD 调参后的站立水平）、
+    check_wolf_template_capacity.py 揭示既有失败（旧版同样失败，与本轮无关）。```
+
+### 32.4 HField overflow 复查（情况 A + 余留）
+
+```text
+- 全部本轮检查（首次构建 / reset / 40 步活动 rollout / 256 env CUDA）中
+  Data.overflow 位掩码均为 0（无 HFIELD / NEFC / 其它 flag），控制台亦无
+  "height field collision overflow" 警告；
+- 旧模板下限 ncon=178 / nefc=712 已消除，init 期 deep-penetration 路径不复存在；
+- 余留：训练期（2000+ env、机器人摔倒 / 整机沿 hfield 墙滑动）是否可能再触发
+  HFIELD overflow，需 4096 实训确认；本环境内未复现，不下结论。
+已知既有失败（与本轮无关，未修）：
+    - check_wolf_template_capacity.py 断言 reset root z==0.4432，实测
+      0.447/0.436 交替（PD 调参后站立瞬态变化，旧代码同 FAIL）；
+    - check_wolf_task.py / check_wolf_posture_rewards.py 在 max_abs_vx 与
+      hip alpha 期望处 FAIL（参数调参 prior commit 导致，同前记录）。
 ```
 
 ## 26. Update Rule

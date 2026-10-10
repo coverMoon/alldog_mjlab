@@ -398,9 +398,10 @@ def wheel_force_lift(
     - 脱离接触后 net force 归零，奖励自然归零；不设接触力阈值、指令门控或
       top-k 选择。
 
-    复位后的初始下沉 settled 瞬态中切向摩擦可达 30–50 N/settle 数步，产生
-    短暂非零奖励（weight 0.005 下 ≈0.16/step）；settled 平地静态切向 ≈6 N、
-    v_z≈0，raw reward ≈ 0.04，可忽略。顺序 contract：接触力沿
+    复位下沉瞬态中切向摩擦可达 30–50 N/settle 数步，产生短时奖励
+    （2026-10 PD 调参后实测前 ~12 步 raw peak 可达 ~159，weight 0.005 下
+    ≈0.8/step）；settled 平地静态 raw ≈ 11（加权 0.057/step，仍远小于
+    tracking 满量 1.0/step）。顺序 contract：接触力沿
     ``sensor.primary_names``（不依赖 MJCF natural order），逐 call 显式断言为
     FL/FR/RL/RR 的轮碰撞 geom 顺序；轮部速度索引由 ``asset_cfg``
     （``preserve_order=True`` 的 Link4 body 名）解析。
