@@ -5004,6 +5004,51 @@ HFIELD ↔ termination 关联诊断（tests/check_wf_overflow_diag.py，不提�
         ON/OFF 在真实碰撞下的完整等价矩阵。
 ```
 
+## 35. MJWarp 3.14 对照实验分支（experiment，未合并，未决）
+
+目的：为 Wolf Rough 在 mujoco-warp 3.11.0 下的 NaN 问题建立隔离对照，验证
+3.14.0 依赖/API 兼容性与接触数值稳定性。本单元只做依赖升级 + 轻量验证，
+**不合并 main，不宣称 NaN 已修复**。
+
+```text
+分支 / worktree：experiment/mjwarp-3.14-wolf-nan
+    /home/windnotebook/PROJECT/Dog/Train/alldog_mjlab_mjwarp314
+    base = 6fb4173（主目录 HEAD；任务书参考 dd949ca 为其父提交）
+依赖（仅实验分支 pyproject.toml / uv.lock；主目录 .venv / uv.lock 未动）：
+    [tool.uv] override-dependencies = ["mujoco==3.14.0", "mujoco-warp==3.14.0"]
+    实测 mjlab 1.6.0 / mujoco 3.14.0 / mujoco-warp 3.14.0 / warp-lang 1.17.0
+    （3.14 要求 warp-lang>=1.15，原值可用）/ rsl-rl-lib 5.4.2 / torch 2.14.0。
+API 兼容（对照 MjLab v1.6.0 实际调用面）：
+    兼容：put_model/put_data/forward/step/reset_data 签名一致；BroadphaseType/
+    Filter、create_render_context/refit_bvh/render、Model/Data/Option dataclass 均在。
+    加法差异（不影响本项目）：Option +run_rne_postconstraint；Data +qfrc_adhesion；
+    Contact +adhesion；Model 增删 flex/key 字段（项目未用）。
+    warn_overflow 由 3.11 bool 总开关 → 3.14 int 位掩码（OverflowType），setter
+    仍接受 bool（False→0 / True→ALL=4095）：WolfRoughSimulationCfg 的
+    ``wp_opt.warn_overflow = False`` 行为不变；HFIELD 仍 = 1<<5 = 32，metrics 不变。
+    3.14 新增 LS_ITERATIONS(1024)/TACTILE(2048) 等 bit；rough init 期出现
+    "linesearch iterations limit reached ... beyond 20" 打印（3.11 无此类型）。
+    MuJoCo 3.14 拒绝加载 3.11 保存的 .mjb（"different MuJoCo version"）——
+    §四 的历史状态精确复现路径被阻断；mj_saveLastXML 对二进制模型亦不可用。
+Cylinder–Box 接触对照（同 MJCF 各自编译；tests/diag_mjwarp314_*，不提交）：
+    - 3.14 改为多点接触：cylinder 压 Box 顶面由 3.11 单点（常偏一侧 y≈+0.034）
+      → 3.14 对称双点（y=±0.035）；CUDA flat 场景瞬态 |qacc| 由 124/369 降到
+      4.3/21.6（更对称、瞬态更小）。
+    - 台阶棱（step_corner）深度报告不一致：3.11 dist≈-4mm，3.14 dist≈-4e-8
+      （近乎 0），瞬态 |qacc| 反而更高（4.2→38.7）。是否为新版 corner 接触距离
+      语义或缺陷，未归类。
+    - plane / box-box 接触两版本一致（量级 1e-7）。
+    - 最小场景各穿透深度（0.002–0.08 m）两版本均 finite、overflow=0，未复现 NaN。
+轻量验证（tests/check_mjwarp314.py，不提交）：CPU PASS / CUDA PASS
+    4 个 Wolf task（flat/rough × PPO/HIM）构建 + 短 rollout finite；overflow 位可读
+    + metrics 手工置位（HFIELD/NEFC）；NanGuard detect+dump 落盘；CUDA Graph 捕获
+    后 rollout finite。既有 tests/check_wolf_rough.py 两处硬编码数值（orientation
+    -1.5、wheel_force_lift 0.005）在 main 亦 FAIL（"参数更新" 提交导致，与版本无关）。
+未决（NOT RUN / 未验证）：长程 3500 env NaN 是否消失、高难度 curriculum、HIM
+    训练稳定性、corner 接触深度差异的实际训练影响——需独立 Review + 用户本地
+    长程 A/B 后决定。
+```
+
 ## 26. Update Rule
 
 每完成一个 behavior unit：

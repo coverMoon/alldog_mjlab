@@ -21,5 +21,14 @@ play = "alldog_mjlab.utils.play:main"
 requires = ["uv_build>=0.12.5,<0.13.0"]
 build-backend = "uv_build"
 
+# 实验分支：MJWarp 3.14 对照。mjlab v1.6.0 原生约束 mujoco~=3.11.0 /
+# mujoco-warp~=3.11.0，此处用 override-dependencies 强制解析到 3.14.0，
+# 不改动 mjlab 源码、不升级 mjlab 版本。仅实验分支使用。
+[tool.uv]
+override-dependencies = [
+    "mujoco==3.14.0",
+    "mujoco-warp==3.14.0",
+]
+
 [project.entry-points."mjlab.tasks"]
 alldog_mjlab = "alldog_mjlab"
