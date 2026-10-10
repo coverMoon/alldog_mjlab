@@ -21,9 +21,11 @@ play = "alldog_mjlab.utils.play:main"
 requires = ["uv_build>=0.12.5,<0.13.0"]
 build-backend = "uv_build"
 
-# 实验分支：MJWarp 3.14 对照。mjlab v1.6.0 原生约束 mujoco~=3.11.0 /
-# mujoco-warp~=3.11.0，此处用 override-dependencies 强制解析到 3.14.0，
-# 不改动 mjlab 源码、不升级 mjlab 版本。仅实验分支使用。
+# MuJoCo/MJWarp 3.14.0 backend compatibility override (Wolf rough validation).
+# MjLab v1.6.0 declares mujoco~=3.11.0 and mujoco-warp~=3.11.0.
+# Keep MjLab at 1.6.0 (uv.lock) and override these transitive constraints;
+# this combination is project-validated, not officially supported by MjLab.
+# See .ai/MIGRATION.md §35 for validation scope and remaining risks.
 [tool.uv]
 override-dependencies = [
     "mujoco==3.14.0",
