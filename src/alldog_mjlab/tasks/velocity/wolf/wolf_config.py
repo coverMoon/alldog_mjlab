@@ -151,7 +151,7 @@ class CommandParams:
     # （CommandCurriculumParams，复用 Black 已验证的数据类），仅扩展 vx 并把
     # 目标范围改为 ±4.0 m/s；其余阈值 / 统计参数均为 Black 已验证默认值。
     command_curriculum: CommandCurriculumParams = field(
-        default_factory=lambda: CommandCurriculumParams(max_abs_vx=4.0,
+        default_factory=lambda: CommandCurriculumParams(max_abs_vx=3.0,
                                                         initial_lin_vel_x=(-1.0, 1.0))
     )
 
@@ -213,7 +213,7 @@ class TerrainParams:
 
     # stairs（native box 金字塔台阶）：step_height = base + difficulty x gain = 0.05 + 0.18 d
     stair_step_height_base: float = 0.05
-    stair_step_height_gain: float = 0.18
+    stair_step_height_gain: float = 0.28
     stair_step_width: float = 0.3
 
     # 初始 terrain level 上限（inclusive）。Wolf 首版与 Black rough 同值。
@@ -364,7 +364,7 @@ class PostureParams:
     # 放宽 hip 回中要求）；alpha ∈ [min_scale, 1]。
     hip_y_ref: float = 0.5
     hip_yaw_ref: float = 1.0
-    hip_y_scale: float = 0.35
+    hip_y_scale: float = 0.2
     hip_yaw_scale: float = 0.35
     hip_min_scale: float = 0.5
     # stand_still 静止门控阈值（norm(cmd_xy) / |cmd_yaw| 同时满足才开启）。
@@ -445,62 +445,62 @@ class DomainRandomizationParams:
     """
 
     # --- 刚体质量 / COM / 惯量（相对 nominal，per-episode 重采样）---
-    base_mass_enabled: bool = False
+    base_mass_enabled: bool = True
     base_mass_range: tuple[float, float] = (-1.0, 2.0)
-    base_com_enabled: bool = False
+    base_com_enabled: bool = True
     base_com_offset_range: tuple[float, float] = (-0.05, 0.05)
-    link_mass_enabled: bool = False
+    link_mass_enabled: bool = True
     link_mass_scale_range: tuple[float, float] = (0.9, 1.1)
-    link_inertia_enabled: bool = False
+    link_inertia_enabled: bool = True
     link_inertia_scale_range: tuple[float, float] = (0.9, 1.1)
-    wheel_mass_enabled: bool = False
+    wheel_mass_enabled: bool = True
     wheel_mass_scale_range: tuple[float, float] = (0.9, 1.1)
-    wheel_inertia_enabled: bool = False
+    wheel_inertia_enabled: bool = True
     wheel_inertia_scale_range: tuple[float, float] = (0.8, 1.2)
 
     # --- 摩擦（MuJoCo pair 取 max，轮摩擦直接以绝对值写轮 geom）---
-    ground_friction_enabled: bool = False
+    ground_friction_enabled: bool = True
     ground_friction_range: tuple[float, float] = (0.25, 1.25)
-    wheel_friction_enabled: bool = False
+    wheel_friction_enabled: bool = True
     wheel_friction_scale_range: tuple[float, float] = (0.4, 1.0)
 
     # --- 执行器（腿 PD / 电机强度 / calf backlash）---
-    kp_enabled: bool = False
+    kp_enabled: bool = True
     kp_scale_range: tuple[float, float] = (0.9, 1.1)
-    kd_enabled: bool = False
+    kd_enabled: bool = True
     kd_scale_range: tuple[float, float] = (0.9, 1.1)
-    motor_strength_enabled: bool = False
+    motor_strength_enabled: bool = True
     motor_strength_range: tuple[float, float] = (0.9, 1.1)
     hip_motor_strength_enabled: bool = False
     hip_motor_strength_range: tuple[float, float] = (0.8, 1.05)
     calf_backlash: CalfBacklashParams = field(default_factory=CalfBacklashParams)
 
     # --- 轮部执行器 / target / 观测 ---
-    wheel_motor_enabled: bool = False
+    wheel_motor_enabled: bool = True
     wheel_motor_strength_range: tuple[float, float] = (0.8, 1.2)
     wheel_target: WheelTargetBiasParams = field(default_factory=WheelTargetBiasParams)
     wheel_obs_bias: WheelObsBiasParams = field(default_factory=WheelObsBiasParams)
 
     # --- 轮几何 ---
-    wheel_radius_enabled: bool = False
+    wheel_radius_enabled: bool = True
     wheel_radius_scale_range: tuple[float, float] = (0.9, 1.1)
 
     # --- 控制延迟（单位 policy step；换算 physics step = ×decimation）---
-    leg_delay_enabled: bool = False
+    leg_delay_enabled: bool = True
     leg_max_delay_steps: int = 3
-    wheel_delay_enabled: bool = False
+    wheel_delay_enabled: bool = True
     wheel_max_delay_steps: int = 4
 
     # --- 外部扰动 ---
-    push_enabled: bool = False
+    push_enabled: bool = True
     push_interval_s: tuple[float, float] = (15.0, 15.0)
     push_velocity_xy: tuple[float, float] = (-1.0, 1.0)
-    disturbance_enabled: bool = False
-    disturbance_force_range: tuple[float, float] = (-30.0, 30.0)
+    disturbance_enabled: bool = True
+    disturbance_force_range: tuple[float, float] = (-35.0, 35.0)
     disturbance_interval_policy_steps: int = 8
 
     # --- reset：initial joint position（multiplicative，旧版语义）---
-    initial_joint_pos_enabled: bool = False
+    initial_joint_pos_enabled: bool = True
     initial_joint_pos_range: tuple[float, float] = (0.5, 1.5)
 
     def validate(self) -> None:
@@ -640,7 +640,7 @@ class RunnerParams:
     # resume 时 command curriculum state 的默认恢复策略（语义与 Black 一致：
     # auto = 同 stage full / 跨 stage range / 旧 checkpoint none；PPO→HIM warm start
     # 不经过本字段，固定 range）。
-    command_curriculum_restore: Literal["auto", "none", "range", "full"] = "auto"
+    command_curriculum_restore: Literal["auto", "none", "range", "full"] = "none"
 
 
 @dataclass(frozen=True)
