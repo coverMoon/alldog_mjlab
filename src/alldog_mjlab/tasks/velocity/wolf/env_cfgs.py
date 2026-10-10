@@ -18,10 +18,13 @@ wolf_config.py，reward 数学在本任务的 rewards.py（与 black/rewards.py 
 - flat / rough 共用全部机器人专科 / action / observation / reset / DR 契约。
 """
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
 
 import mujoco
+import torch
+
+
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs import mdp as envs_mdp
@@ -31,16 +34,65 @@ from mjlab.envs.mdp.events import reset_joints_by_offset
 from mjlab.managers import (
     CurriculumTermCfg,
     EventTermCfg,
+    MetricsTermCfg,
     ObservationTermCfg,
     RewardTermCfg,
     TerminationTermCfg,
 )
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg, GridPatternCfg, ObjRef, RayCastSensorCfg
+from mjlab.sim.sim import SimulationCfg
 from mjlab.tasks.velocity import mdp
 from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 from mjlab.utils.noise import UniformNoiseCfg
+
+
+# ---------------------------------------------------------------------------
+# Wolf rough overflow 监测 / 警告开关（仅 rough 消费；flat 无关闭用）。
+#
+# 背景 §33：训练倒地/翻滚时 base_link 碰撞盒 × hfield 候选子格候选 ≥50 触发
+# HFIELD overflow，mjwarp 每 (world, pair, substep) 重印 console。warn_overflow
+# 是 mujoco-warp 3.11.0 布尔**总开关**（关闭全部 overflow 类型打印，非仅
+# HFIELD）；Data.overflow 位不受影响，监测改走下方 episode metrics。
+# ---------------------------------------------------------------------------
+
+# OverflowType.HFIELD（mujoco_warp 3.11.0：HFIELD = 1 << 5）。
+_WF_HFIELD_OVERFLOW_BIT = 1 << 5
+
+
+def metric_overflow_hfield(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    """HFIELD overflow bit 是否置位（bit sticky → `reduce="max"` 即本 episode
+    出现过即为 1；0/1 量纲，日志反映完成 episode 中的比例）。"""
+    bits = torch.as_tensor(env.sim.data.overflow)
+    return ((bits & _WF_HFIELD_OVERFLOW_BIT) != 0).to(
+        device=bits.device, dtype=torch.float32
+    )
+
+
+def metric_overflow_other(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    """除 HFIELD 外任一 overflow bit 是否置位（同上 sticky/max 语义）。"""
+    bits = torch.as_tensor(env.sim.data.overflow)
+    return ((bits & ~_WF_HFIELD_OVERFLOW_BIT) != 0).to(
+        device=bits.device, dtype=torch.float32
+    )
+
+
+@dataclass(kw_only=True)
+class WolfRoughSimulationCfg(SimulationCfg):
+    """Wolf rough 专用 SimulationCfg：诊断确认后关闭 MJWarp overflow 打印。
+
+    仅在 ``WOLF_CONFIG.simulation.rough_warn_overflow = False`` 时装入 cfg.sim；
+    构造保留 SimulationCfg 全部字段（nconmax/njmax/mujoco 时步与 solver、
+    broadphase、nan_guard 等）。必须在 CUDA Graph 捕获前生效——本类只在
+    初装 cfg 阶段替换，符合 Simulation.apply_wp_opt 的调用时机（put_model 后、
+    create_graph 前）。
+    """
+
+    def apply_wp_opt(self, wp_opt) -> None:  # noqa: ANN001（mjwarp.Option）
+        super().apply_wp_opt(wp_opt)
+        wp_opt.warn_overflow = False
+
 
 from alldog_mjlab.robots.wolf import get_wolf_robot_cfg
 from alldog_mjlab.robots.wolf.wolf_constants import (
@@ -1134,6 +1186,15 @@ def _configure_common_runtime(cfg: ManagerBasedRlEnvCfg, *, play: bool, rough: b
     # rough generator 模板 spawn 状态 contact 数高于 plane（>=178），用 rough_nconmax。
     cfg.sim.nconmax = WOLF_CONFIG.simulation.rough_nconmax if rough else WOLF_CONFIG.simulation.nconmax
     cfg.sim.njmax = WOLF_CONFIG.simulation.rough_njmax if rough else WOLF_CONFIG.simulation.njmax
+    # Wolf rough 溢出警告开关：诊断确认（§34）后可将 rough_warn_overflow 置
+    # False 关闭全部 overflow console 打印（布尔总开关，非仅 HFIELD）；
+    # Data.overflow bit / metrics 监测不受影响。
+    if rough and not WOLF_CONFIG.simulation.rough_warn_overflow:
+        import dataclasses as dc
+
+        cfg.sim = WolfRoughSimulationCfg(
+            **{f.name: getattr(cfg.sim, f.name) for f in dc.fields(cfg.sim)}
+        )
     cfg.viewer.body_name = "base_link"
     cfg.viewer.distance = 1.8
     cfg.viewer.elevation = -10.0
@@ -1240,6 +1301,15 @@ def _build_wolf_env_cfg(
         if rough:
             _configure_terrain_curriculum(cfg)
         _configure_command_curriculum(cfg, stage)
+        if rough:
+            # 轻量 overflow episode 指标（仅 rough train；bit sticky + reduce=max；
+            # bit 在 per episode 内首次置位后常驻，max 记 1）。
+            cfg.metrics["overflow_hfield"] = MetricsTermCfg(
+                func=metric_overflow_hfield, reduce="max"
+            )
+            cfg.metrics["overflow_other"] = MetricsTermCfg(
+                func=metric_overflow_other, reduce="max"
+            )
     if play:
         _configure_play(cfg)
 

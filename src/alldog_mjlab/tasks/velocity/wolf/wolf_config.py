@@ -563,6 +563,14 @@ class SimulationParams:
     # plane）。10.0 为初始候选值，必须高于全部 terrain geom 的 z 上界（实测
     # ≤2.72 m）；若出现模板接触，报告原因与所需高度，不自动无限增大。
     rough_template_root_z: float = 10.0
+    # rough 专用：MJWarp 溢出告警控制（仅 rough 消费；flat 无关）。
+    # 背景（§33/§34）：训练期倒地/翻滚时 base_link 碰撞盒与 hfield 接触子格
+    # 候选 ≥50 触发 HFIELD overflow，console 每 substep 重印刷屏。诊断确认
+    # （§34）溢出集中于 illegal_contact 终止步，可关闭打印。注意：
+    # warn_overflow 是 mujoco-warp 3.11.0 的布尔总开关，关闭的是**全部**类型
+    # 的 overflow 打印（不只 HFIELD）；Data.overflow 位仍可读，监测走
+    # metrics（overflow_hfield / overflow_other，仅 rough train 注册）。
+    rough_warn_overflow: bool = True
 
 
 @dataclass(frozen=True)

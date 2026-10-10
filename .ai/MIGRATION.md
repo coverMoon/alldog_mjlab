@@ -4915,10 +4915,11 @@ rough_nconmax 256→128 / rough_njmax 1024→256（同 Black rough）。
 
 触发机制（mujoco-warp 3.11.0 `ccd_hfield_kernel_builder`）：对每个
 (hfield patch × robot collision geom) 对按 geom 支撑 AABB 在 hfield 帧内展开
-80×80 子格（dx≈0.101 m）；每格 2 个候选三角棱柱，`count ≥ 50`（在 z 剪枝前
-计数）即置 `OverflowType.HFIELD`（per-world、sticky、reset 清零）+ console
-每 substep 重印。每对最终仍只写按深度选出的 ≤4 个接触点（候选空间被裁到
-row-major 前 50）。
+80×80 子格（dx≈0.101 m）；每格 2 个候选三角棱柱（2026-10 修正：候选须经
+高度剪枝 + CCD 检查产生真实接触后 count 才递增，count = 有效接触候选数，
+上限 MJ_MAXCONPAIR=50；`count ≥ 50` 时置 `OverflowType.HFIELD`
+（per-world、sticky、reset 清零）+ console 每 substep 重印。每对最终仍只写
+按深度选出的 ≤4 个接触点（候选空间被裁到处理序前 50）。
 
 结论（专用诊断脚本 tests/diag_wf_hfield_overflow.py，不提交）：
 
@@ -4946,6 +4947,54 @@ console 警告数量 ≠ 受影响 env 数：每 (world, pair, substep) 重复�
     地形接触与训练分布，不推荐）。
 未验证：2000+ env / curriculum 难度 >5 / 激进策略下的按 world 受影响比例；
     warp 上游后续版本变化；base 盒拆分后的训练行为。
+
+## 34. Wolf Rough HField 警告控制 + overflow 监测（本轮集成，COMPLETE）
+
+触发链回顾（§33）：训练倒地/翻滚 → base_link 碰撞盒 × hfield 有效接触候选
+≥50 → HFIELD overflow bit（sticky）+ console 每 substep 重印刷屏。
+
+```text
+实现（wolf_config.py / env_cfgs.py，仅 rough 消费；flat / play 无诊断开销）：
+    SimulationParams.rough_warn_overflow = True（默认开；风险确认后可关）。
+    WolfRoughSimulationCfg(SimulationCfg)（task-local 模块顶层，YAML
+    (!!python/name:) 序列化验证 PASS）：覆写 apply_wp_opt——先
+    super().apply_wp_opt() 再 wp_opt.warn_overflow = False；仅在
+    rough_warn_overflow=False 时装入 cfg.sim（构造保留 SimulationCfg 全部
+    字段：nconmax/njmax/mujoco/broadphase/nan_guard 逐字段一致验证 PASS）。
+    调用时机在 put_model 后 / CUDA Graph 捕获前（Simulation.apply_wp_opt
+    的原生时机），不在 graph 捕获后改选项。
+    注意：warn_overflow 是 mujoco-warp 3.11.0 布尔**总开关**，关闭的是全部
+    overflow 类型打印（非仅 HFIELD）；Data.overflow bit 不受影响。
+    metrics（仅 rough train 注册；play/flat 不加）：
+        overflow_hfield / overflow_other，func 直读 Data.overflow 位
+        （HFIELD=1<<5），reduce="max"，无 CPU 同步/无逐 env 打印；
+        手工置位验证：1/4 env HFIELD → 0.25，other bit → 0.5，bit 读取后
+        不消失（sticky 语义保持）。
+
+HFIELD ↔ termination 关联诊断（tests/check_wf_overflow_diag.py，不提交；
+    采样点 = wrap reward_manager.compute，即 termination 计算后 / reset 前；
+    bit sticky → 维护 per-env seen，只计本 episode 首次置位步）：
+    256 env × 60 步 crash 场景一次有效样本：first_hfield=15，
+    同步 illegal_contact=13（86.7%）、同步 done=13、未同步=2
+    （1 个下一步即终止，总体 14/15=93.3% 一控制步内终止）；
+    残存样本含 1 例深插滑动步状态（穿透充分）。
+    ⚠ 复跑稳定性警告：同码同 seed 重跑出现过 0 事件样本（Warp 层隐藏
+    随机性，机制未归类）——上述比例仅来自单次有效样本，**标记为未验证**，
+    不据此宣称覆盖全部真实训练形态。
+开关决策：证据方向支持"溢出集中于终止步"，但样本不可稳定复现且有未
+    及时终止的深插个例 → rough_warn_overflow 默认保持 True；是否关闭由
+    用户在 3500+ env 实训核对 "overflow_hfield ≤ illegal stops" 比例后决定。
+
+验收状态：
+    STATIC PASS：cfg 字段保真（8 字段一致）、YAML 序列化、metrics 注册范围
+        （rough train only / play 与 flat 不加）、check_wolf_rough 全 PASS
+        （spec_fn 绑定 / shape / rollout smoke）、flat sim 类不变。
+    LIGHT PASS：metrics 手工置位（0.25/0.5 + bit 可读）；ON/OFF 双跑
+        termination 结果一致（本次为 0 事件样本，等价弱证据）。
+    NOT RUN / 未验证：OFF 后 console 警告消失（依赖可复现倒地样本，
+        本轮未能稳定复现）、真实 3500 env 训练的 metrics/log 分布、
+        ON/OFF 在真实碰撞下的完整等价矩阵。
+```
 
 ## 26. Update Rule
 
