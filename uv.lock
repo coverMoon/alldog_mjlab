@@ -7,6 +7,12 @@ resolution-markers = [
     "python_full_version < '3.13'",
 ]
 
+[manifest]
+overrides = [
+    { name = "mujoco", specifier = "==3.14.0" },
+    { name = "mujoco-warp", specifier = "==3.14.0" },
+]
+
 [[package]]
 name = "absl-py"
 version = "2.5.0"
@@ -15,6 +21,17 @@ sdist = { url = "https://files.pythonhosted.org/packages/d0/4f/d79676ab82f2e42fc
 wheels = [
     { url = "https://files.pythonhosted.org/packages/58/0a/a10b45aab35b175aded078a462dc8d0c698f5b13946e7cb0869097b78bb6/absl_py-2.5.0-py3-none-any.whl", hash = "sha256:0f17b89f2a4eaaedc4f28c622998aa690564b3012a396a4ffad0821007fe03ba", size = 137410, upload-time = "2026-07-03T10:57:46.735Z" },
 ]
+
+[[package]]
+name = "alldog-mjlab"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "mjlab" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "mjlab", specifier = ">=1.6.0" }]
 
 [[package]]
 name = "annotated-types"
@@ -1327,7 +1344,7 @@ wheels = [
 
 [[package]]
 name = "mujoco"
-version = "3.11.0"
+version = "3.14.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "absl-py" },
@@ -1335,30 +1352,39 @@ dependencies = [
     { name = "glfw" },
     { name = "numpy" },
     { name = "pyopengl" },
+    { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/3b/2d/290f3f4062eec1c0d5246de0a75f1b18b59a1961081f49ddc97333fc8263/mujoco-3.11.0.tar.gz", hash = "sha256:390856102af9547dfd87cb2791eb105a3d2e00a37323fe9a12ed17e512aff1a6", size = 1139880, upload-time = "2026-07-28T01:23:32.252Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/6c/32/23fe5a5818255c7e05124c4fa250589e978772677ba150cd5fac3ed65cdf/mujoco-3.14.0.tar.gz", hash = "sha256:f75a0731f6fd829387a1ba9c9a7891efec429000517a6c3f9af98f41735d3b6f", size = 6963412, upload-time = "2026-09-22T17:31:49.787Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/87/b3/b2b449b5978bcb13277c9e50d764e6d8cd9534f58f071fb1647724123e2c/mujoco-3.11.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:3609c198de090c8218b9cc62ca6133f0feede8edd103b743b8002f3f735fcd9b", size = 17511145, upload-time = "2026-07-28T01:22:43.668Z" },
-    { url = "https://files.pythonhosted.org/packages/1a/65/d8130bb8a673f9cdc8a8fb2ef02f9b6931708567de57f17395106e83b4e3/mujoco-3.11.0-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:517bff03623c3329a563f575afd7d731b0be5c4f92a54dcec934b99120b4a9ec", size = 17704436, upload-time = "2026-07-28T01:22:47.05Z" },
-    { url = "https://files.pythonhosted.org/packages/41/d6/7b79f5d8fbd019658a3b5feb6ffd09c1e727eaf93f518685d3cc105a28f5/mujoco-3.11.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:f40214fefc8c2fe0002a3c8abadf30de7a3330634f3c45cc29b407b40a0173fc", size = 18868030, upload-time = "2026-07-28T01:22:50.494Z" },
-    { url = "https://files.pythonhosted.org/packages/19/46/f994cd7d973c4db4f6b5af19ba6eb62703b9aafc8f894c5bc5ceadd31b0d/mujoco-3.11.0-cp312-cp312-win_amd64.whl", hash = "sha256:98c08a5eec9411ecd6f763f1e635fbc8f31e3ea3701584d6b7edcc24d8d6c575", size = 15791637, upload-time = "2026-07-28T01:22:53.922Z" },
-    { url = "https://files.pythonhosted.org/packages/d7/16/4b822d608cb4bc5aafe910b6f6947c73ecd467470935408e4ad0d207023e/mujoco-3.11.0-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:dd282aae46dc7350472bd4a81dd789ea011ff961c00fd60c9434e67bfd0519a3", size = 17511474, upload-time = "2026-07-28T01:22:57.111Z" },
-    { url = "https://files.pythonhosted.org/packages/47/73/4cbe741986ed86f13e86ad92a11de870bdec4979eaafcbc7ef3164680260/mujoco-3.11.0-cp313-cp313-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:b1ea2ed1d20b7cca55fc1e0257f2d4f6ab6e83855f669530fb3f55c85da80aac", size = 17704381, upload-time = "2026-07-28T01:23:00.158Z" },
-    { url = "https://files.pythonhosted.org/packages/90/2e/843071e21831fa5ef4029de6874789f9fd32f340d42fced383757c484bdd/mujoco-3.11.0-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:3379c36b508474127b08e51e77942c493c2f1d7215b425e3b95de08dcba662e0", size = 18868301, upload-time = "2026-07-28T01:23:03.054Z" },
-    { url = "https://files.pythonhosted.org/packages/bb/25/2a518a33b359b0798a9e8b55f30a4c9ab0cadd0cab8d85872ff9da6ca309/mujoco-3.11.0-cp313-cp313-win_amd64.whl", hash = "sha256:d48b4a18d409ce4c746f32b3b402a8419b7450d9a89de68b81d73a3ef333d0e4", size = 15792231, upload-time = "2026-07-28T01:23:05.798Z" },
-    { url = "https://files.pythonhosted.org/packages/36/56/1d434ab8e072a6ca9074a27951cc08770db50daa4f2908fc51c8fe1c73dd/mujoco-3.11.0-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:d0f031b5b747a96c07938a47305f46079b75697282723e3ae1864c089bb56c02", size = 17525650, upload-time = "2026-07-28T01:23:08.562Z" },
-    { url = "https://files.pythonhosted.org/packages/5f/5a/f2fce0b815a51a3cb87d62e0fb3647f8d10330b30a8e7d381b733773263e/mujoco-3.11.0-cp314-cp314-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:eeb372621f885a0ad16ef879c91ff74d47b3b9533babdc16e07303836a23d27e", size = 17720735, upload-time = "2026-07-28T01:23:11.205Z" },
-    { url = "https://files.pythonhosted.org/packages/f9/98/fad81239c7b827a64a472206a6bff5346e3fa949e6ce4945595329d3fdc7/mujoco-3.11.0-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:06af29af1fa40156126165f2634481ef7c0f8dabb9f07892c5af30039c5a59dc", size = 18866078, upload-time = "2026-07-28T01:23:13.982Z" },
-    { url = "https://files.pythonhosted.org/packages/81/33/93ba5542249502ab9d7c1d1f3e38cd915a0259bc4c8cd124c05dbe17e7bb/mujoco-3.11.0-cp314-cp314-win_amd64.whl", hash = "sha256:2a9bf53284604397b7cd041cecb22c8f6b10afdddb4c723d5ff493f9f6b630d7", size = 16436726, upload-time = "2026-07-28T01:23:29.6Z" },
-    { url = "https://files.pythonhosted.org/packages/5b/b8/bc0835e43ed36ab465b4c3b1f6f8324c025207acc4d1e9c24ffaa4ebfb87/mujoco-3.11.0-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:b2be7535332976a82ec69a118cdeb3db3580aba19e3d82bca91c95a416e2a9ce", size = 17696886, upload-time = "2026-07-28T01:23:17.225Z" },
-    { url = "https://files.pythonhosted.org/packages/36/a4/8444786ee44588a02842069eeaca31fc1a25357ac9b5ef03d96e424dc8fd/mujoco-3.11.0-cp314-cp314t-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:80cf42c0153d8dac61fb56724ba3fd8b0e0fb7093c013d57ae9e51f894262338", size = 17952805, upload-time = "2026-07-28T01:23:20.432Z" },
-    { url = "https://files.pythonhosted.org/packages/7b/bd/46a43763dac53e840a9ce1f204f9d80fb07fc7c2a6805cb023fdc35a0986/mujoco-3.11.0-cp314-cp314t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:8205329fce598bc3aede8ef530da6a70c529c8f4a91efdc79933614ba3f126fb", size = 19029401, upload-time = "2026-07-28T01:23:23.656Z" },
-    { url = "https://files.pythonhosted.org/packages/ad/d8/10200a2c1dc65738bc21375b23fe986e4bf435be045ea91eaf698e86cfd7/mujoco-3.11.0-cp314-cp314t-win_amd64.whl", hash = "sha256:0804a70ccd9b669ed36e1ede45781d0d707f2940d560ed756647cc8d9ade847c", size = 16460526, upload-time = "2026-07-28T01:23:26.81Z" },
+    { url = "https://files.pythonhosted.org/packages/c4/cf/b1ad15771e50b769cbecc6ca3d27cfa68c11914508f1d51865ffd02346c7/mujoco-3.14.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:ec16352489f6abdfec92397f627c4f36656eab881bf5282121da8cfa83e5dc61", size = 26408280, upload-time = "2026-09-22T17:30:31.506Z" },
+    { url = "https://files.pythonhosted.org/packages/eb/a8/140ebfefbc943fa42a505b5f1f65093f0109df649213732ff3654d529d51/mujoco-3.14.0-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:f2f72463083b4d319874a93f91a54d46e5d538caea2706f18be874d4307b0264", size = 27122891, upload-time = "2026-09-22T17:30:34.971Z" },
+    { url = "https://files.pythonhosted.org/packages/e1/91/084b94d434ef097850b0302637de4197fc80a5a2aeb5003a083cb36be559/mujoco-3.14.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:7042bfc7cf3e67e885463ff053fc1c28947b75c5ca0cce8d3f780dff4f83f055", size = 28740958, upload-time = "2026-09-22T17:30:38.368Z" },
+    { url = "https://files.pythonhosted.org/packages/36/28/1863744b90e6a778057680c76fa6bd7df418b726dc03913bcca808f1394a/mujoco-3.14.0-cp312-cp312-win_amd64.whl", hash = "sha256:d1777cd426f9155bed514d2362c74d6456df784bb84b00759bc253b64564e92c", size = 18524100, upload-time = "2026-09-22T17:30:41.91Z" },
+    { url = "https://files.pythonhosted.org/packages/07/28/88ccd47e658c38b79e57cbf844528f860c66bfb33818c9008af9bab139ca/mujoco-3.14.0-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:69b06639629506459d8e4d605668b73d8175d146219c132be406b6a75792d10a", size = 26408180, upload-time = "2026-09-22T17:30:45.745Z" },
+    { url = "https://files.pythonhosted.org/packages/0a/66/7c252714b3f91973c58bcda57a8348d0d469413cc9b0cde20e263c9c5da2/mujoco-3.14.0-cp313-cp313-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:60e31f3ca2320e9f9ab3b783b4189dad422047b42bb5a4fcfcaf04d371143448", size = 27122699, upload-time = "2026-09-22T17:30:49.172Z" },
+    { url = "https://files.pythonhosted.org/packages/43/ad/1b18701aacf6c503df8d929ce76afe5327067828084e93964e860091f602/mujoco-3.14.0-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:dd02d0744bd5bd802394ee03310fbc4c8e629cfa5ed3d5c2abc56c1914ae316e", size = 28741189, upload-time = "2026-09-22T17:30:52.511Z" },
+    { url = "https://files.pythonhosted.org/packages/1e/52/9d226782c75e1ce8f14883bbaf7de6a65026ac7a31ade24bd58b0ee8733e/mujoco-3.14.0-cp313-cp313-win_amd64.whl", hash = "sha256:ef6967db38492a1b296c7d8dc7443ebd838ac2aac4593a64fe27a2b09315e371", size = 18524208, upload-time = "2026-09-22T17:30:55.252Z" },
+    { url = "https://files.pythonhosted.org/packages/19/80/1e886509e7549cba3d59ff17b4f2a4596e53f78b0db2a02ccbb4bb8b3328/mujoco-3.14.0-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:645d3b84395960062d63bf83c3092363cbfe7fb671a95a2680445ce5bcd695f3", size = 26423807, upload-time = "2026-09-22T17:30:58.086Z" },
+    { url = "https://files.pythonhosted.org/packages/f1/dc/2851286934f7e6cac70b3075c2e91a7188c279039646a250d5658d697327/mujoco-3.14.0-cp314-cp314-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:435e14a3c03c7b912cf56d9f9c3710e091a5f29096159fe10cd82b38b7d97dc2", size = 27141816, upload-time = "2026-09-22T17:31:01.522Z" },
+    { url = "https://files.pythonhosted.org/packages/80/80/aff9e53b7000c71e85a4f3077cd598acc69de17a678d3238c85b36b341b9/mujoco-3.14.0-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:6c9e388e723acb70f272c90666bb6ca6b76dd7930d051ae3a092a4c4ea5ca6a4", size = 28752428, upload-time = "2026-09-22T17:31:04.818Z" },
+    { url = "https://files.pythonhosted.org/packages/b4/04/0c0aedbf953f443a622b57bfb0b29add0d1de04299567ac9fa2e26bd6d59/mujoco-3.14.0-cp314-cp314-win_amd64.whl", hash = "sha256:2813411c339f9eb5acfb69b154462d88c3c3c7aa049e334c713d6cacac3d5247", size = 19345025, upload-time = "2026-09-22T17:31:07.757Z" },
+    { url = "https://files.pythonhosted.org/packages/37/f6/f64c079376f8d5b0d7cd0299f18c71e91920ac403863c64b204a56b02b4d/mujoco-3.14.0-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:a1fd0e888eb0a7e3dcfb33c0e563b0678cb424f58d093b0c470c2ea2bd80096f", size = 26756012, upload-time = "2026-09-22T17:31:10.944Z" },
+    { url = "https://files.pythonhosted.org/packages/cd/0d/cebbd2fede5699232927d6a7862360c7b163050aba9602da7e812e5d7d5f/mujoco-3.14.0-cp314-cp314t-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:c3cc7a11a36b34955a4a8f6c22e5180ed4a00e924d49cd91678ed338896ae1b2", size = 27483109, upload-time = "2026-09-22T17:31:14.535Z" },
+    { url = "https://files.pythonhosted.org/packages/04/2d/9d9b52415148f919a94973cd840135b78855328fcc0767c3ac52440f6b5f/mujoco-3.14.0-cp314-cp314t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:f2d8b07bf7cc486c2dedd3a981e03b766c886072504bf5b887640bd8110a0bb5", size = 28761296, upload-time = "2026-09-22T17:31:17.655Z" },
+    { url = "https://files.pythonhosted.org/packages/aa/a2/4498f3cd1a6c438ac7979e1cc39efd7f5921b1da8967427cfc5867c997ec/mujoco-3.14.0-cp314-cp314t-win_amd64.whl", hash = "sha256:2f0be3c6369825fd49137d88f025162a9b122b2f255750667d0a2084567353dd", size = 19699582, upload-time = "2026-09-22T17:31:20.473Z" },
+    { url = "https://files.pythonhosted.org/packages/57/8c/84ab37c59eb83d79fd30c50729ddd6d086f13fdd70f5267f9ffc0766d22b/mujoco-3.14.0-cp315-cp315-macosx_11_0_arm64.whl", hash = "sha256:72a0d67b770d1167cc590bfe14932c751e1627c6484d2f572cadc634076a49ac", size = 26423910, upload-time = "2026-09-22T17:31:23.526Z" },
+    { url = "https://files.pythonhosted.org/packages/07/f1/5fe2fd9139b58a67a40ea53c15d7de46863c857842009c1591eb1407544a/mujoco-3.14.0-cp315-cp315-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:65812fcac30150fa5c6b712ae710a3655b0e1996976d9cecb5b64d6c1720b3a8", size = 27141825, upload-time = "2026-09-22T17:31:27.189Z" },
+    { url = "https://files.pythonhosted.org/packages/0e/d3/835aec480f5fac2cf93c3218a1273627d71728a518f149d17367343eb982/mujoco-3.14.0-cp315-cp315-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:27ba9e30ff76da3264aef14ee3b91fe1a2ad0f7ab764907d479cd5c687bab30b", size = 28752392, upload-time = "2026-09-22T17:31:30.865Z" },
+    { url = "https://files.pythonhosted.org/packages/17/d1/c4470ae08898f6528a78d8ee725f9c399139a81a482aa3af5431b65a4e17/mujoco-3.14.0-cp315-cp315-win_amd64.whl", hash = "sha256:94ade6c841bfed4bab621169592a8f276dcd8ffe2f8313ffd9efa56f82d16600", size = 19345060, upload-time = "2026-09-22T17:31:33.579Z" },
+    { url = "https://files.pythonhosted.org/packages/f2/ca/b44565b4a44545c21b9db193b310f2e5f349dfb8b1776212fdf767a19100/mujoco-3.14.0-cp315-cp315t-macosx_11_0_arm64.whl", hash = "sha256:d59ffd55be15e39dd3935d7fc5d24702962283a60d1a5866ddeec6c1f514ffcc", size = 26754883, upload-time = "2026-09-22T17:31:36.901Z" },
+    { url = "https://files.pythonhosted.org/packages/d6/e3/b2ebfd9ad51eb2663fcc13df8e198a3f21323c6a781d4fc26793d7a075e8/mujoco-3.14.0-cp315-cp315t-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:e67dbfa7e3ee1d29fab342c1a675c072011c0be3f59d0d36d396d274461bca5c", size = 27481683, upload-time = "2026-09-22T17:31:40.509Z" },
+    { url = "https://files.pythonhosted.org/packages/38/47/57ce24e1d4326b6a27e6151a7dd05489b2b94b287f11dca4d94da45bfc57/mujoco-3.14.0-cp315-cp315t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:6d99b01a0f5ecbc4c0b24a70e97cc1208d3c4cddd3d81bc5caaa5aa0d1aca923", size = 28759656, upload-time = "2026-09-22T17:31:44.15Z" },
+    { url = "https://files.pythonhosted.org/packages/c6/ad/56b6829837f4dc4340a278cb8d9e4eb7a9e1bf580838567514d3c12b9526/mujoco-3.14.0-cp315-cp315t-win_amd64.whl", hash = "sha256:44010db2efc5ea05b1eb205599f9958ab128b5a748bff5529f52db7fcdf029dc", size = 19699820, upload-time = "2026-09-22T17:31:47.158Z" },
 ]
 
 [[package]]
 name = "mujoco-warp"
-version = "3.11.0"
+version = "3.14.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "absl-py" },
@@ -1367,9 +1393,9 @@ dependencies = [
     { name = "numpy" },
     { name = "warp-lang" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/2c/02/da883029b3661619651d0e2469ec17df92dd64ca5de25119886d516ee1de/mujoco_warp-3.11.0.tar.gz", hash = "sha256:e9e521a3809b95baa98c44bd4fcaccb035b5c700e2616efc52ebc33d29ae2eef", size = 2075418, upload-time = "2026-07-28T01:21:41.987Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a7/78/5b8063303f9108a0849bb5a502692a6f0e5b235c78561490aa5c7ca584ed/mujoco_warp-3.14.0.tar.gz", hash = "sha256:1b4b565592951c7312fcb0f172ab446f2622e51a49ce985a1f1b733ef3b268c7", size = 2137476, upload-time = "2026-09-22T17:29:30.238Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e6/03/9bf86946c755a9a020c1bea587841472b0206351f73f67e41050fcb2a20c/mujoco_warp-3.11.0-py3-none-any.whl", hash = "sha256:97e77e877c1c2ea064ae68eaace2333dec94f2d8984091ba7b383bc8c34958f6", size = 2153348, upload-time = "2026-07-28T01:21:40.18Z" },
+    { url = "https://files.pythonhosted.org/packages/02/9d/2233955f4ce9c8c52ac5df8b915fae953c4deb27469a2f0ceae0fe858a9a/mujoco_warp-3.14.0-py3-none-any.whl", hash = "sha256:77a3e2b041ef7f7b3d2a41b1686672eec27aebd766eafcc22db8af564b821306", size = 2214960, upload-time = "2026-09-22T17:29:28.729Z" },
 ]
 
 [[package]]
@@ -1605,17 +1631,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/c2/f3/d86c845465a2723ad7e1e5c36dcd75ddb82898b3f53be47ebd429fb2fa5d/nvidia_nvtx-13.0.85-py3-none-manylinux1_x86_64.manylinux_2_5_x86_64.whl", hash = "sha256:4936d1d6780fbe68db454f5e72a42ff64d1fd6397df9f363ae786930fd5c1cd4", size = 148047, upload-time = "2025-09-04T08:29:01.761Z" },
     { url = "https://files.pythonhosted.org/packages/a8/64/3708a90d1ebe202ffdeb7185f878a3c84d15c2b2c31858da2ce0583e2def/nvidia_nvtx-13.0.85-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:cb7780edb6b14107373c835bf8b72e7a178bac7367e23da7acb108f973f157a6", size = 148878, upload-time = "2025-09-04T08:28:53.627Z" },
 ]
-
-[[package]]
-name = "alldog-mjlab"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "mjlab" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "mjlab", specifier = ">=1.6.0" }]
 
 [[package]]
 name = "onnx"

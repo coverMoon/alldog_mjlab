@@ -37,6 +37,7 @@ Wolf IMU observation contract: COMPLETE（§27.5）
 Wolf flat PPO / HIM / command curriculum integration: COMPLETE（§28）
 Wolf Domain Randomization（逐项开关 + minimal profile）: COMPLETE（§29）
 Wolf task-local independence + Wolf rough PPO/HIM: COMPLETE（§30）
+MuJoCo / MJWarp 3.14 backend adoption: COMPLETE（版本集成；长程稳定性待验证，§35）
 Wolf flat 模板 spawn 高度 + flat 容量优化（64/256）: COMPLETE（§31）
 Wolf rough 模板 spawn 高度（z=10）+ rough 容量优化（128/256）: COMPLETE（§32）
 Hardware effort/current ceiling: UNCONFIRMED（实机前确认）
@@ -5004,6 +5005,60 @@ HFIELD ↔ termination 关联诊断（tests/check_wf_overflow_diag.py，不提�
     NOT RUN / 未验证：OFF 后 console 警告消失（依赖可复现倒地样本，
         本轮未能稳定复现）、真实 3500 env 训练的 metrics/log 分布、
         ON/OFF 在真实碰撞下的完整等价矩阵。
+```
+
+## 35. MuJoCo / MJWarp 3.14 后端升级（已合并，持续验证）
+
+目的：针对 Wolf Rough 在 mujoco-warp 3.11.0 下的 NaN 问题升级后端，
+在保留 MjLab v1.6.0 及训练侧 policy contract 的前提下使用 MuJoCo / MJWarp
+3.14.0。**3500 env × 100 iteration 未出现 NaN 仅代表第一阶段稳定性通过，
+不宣称根因已被证实修复或长期训练已验证**。
+
+```text
+升级来源分支 / 独立实验 worktree：experiment/mjwarp-3.14-wolf-nan
+    /home/windnotebook/PROJECT/Dog/Train/alldog_mjlab_mjwarp314
+    base = 6fb4173（主目录 HEAD；任务书参考 dd949ca 为其父提交）
+依赖（已纳入 main 的 pyproject.toml / uv.lock；各工作目录须独立 uv sync）：
+    [tool.uv] override-dependencies = ["mujoco==3.14.0", "mujoco-warp==3.14.0"]
+    实测 mjlab 1.6.0 / mujoco 3.14.0 / mujoco-warp 3.14.0 / warp-lang 1.17.0
+    （3.14 要求 warp-lang>=1.15，原值可用）/ rsl-rl-lib 5.4.2 / torch 2.14.0。
+API 兼容（对照 MjLab v1.6.0 实际调用面）：
+    兼容：put_model/put_data/forward/step/reset_data 签名一致；BroadphaseType/
+    Filter、create_render_context/refit_bvh/render、Model/Data/Option dataclass 均在。
+    加法差异（不影响本项目）：Option +run_rne_postconstraint；Data +qfrc_adhesion；
+    Contact +adhesion；Model 增删 flex/key 字段（项目未用）。
+    warn_overflow 由 3.11 bool 总开关 → 3.14 int 位掩码（OverflowType），setter
+    仍接受 bool（False→0 / True→ALL=4095）：WolfRoughSimulationCfg 的
+    ``wp_opt.warn_overflow = False`` 行为不变；HFIELD 仍 = 1<<5 = 32，metrics 不变。
+    3.14 新增 LS_ITERATIONS(1024)/TACTILE(2048) 等 bit；rough init 期出现
+    "linesearch iterations limit reached ... beyond 20" 打印（3.11 无此类型）。
+    MuJoCo 3.14 拒绝加载 3.11 保存的 .mjb（"different MuJoCo version"）——
+    §四 的历史状态精确复现路径被阻断；mj_saveLastXML 对二进制模型亦不可用。
+Cylinder–Box 接触对照（同 MJCF 各自编译；tests/diag_mjwarp314_*，不提交）：
+    - 3.14 改为多点接触：cylinder 压 Box 顶面由 3.11 单点（常偏一侧 y≈+0.034）
+      → 3.14 对称双点（y=±0.035）；CUDA flat 场景瞬态 |qacc| 由 124/369 降到
+      4.3/21.6（更对称、瞬态更小）。
+    - 台阶棱（step_corner）深度报告不一致：3.11 dist≈-4mm，3.14 dist≈-4e-8
+      （近乎 0），瞬态 |qacc| 反而更高（4.2→38.7）。是否为新版 corner 接触距离
+      语义或缺陷，未归类。
+    - plane / box-box 接触两版本一致（量级 1e-7）。
+    - 最小场景各穿透深度（0.002–0.08 m）两版本均 finite、overflow=0，未复现 NaN。
+轻量验证（tests/check_mjwarp314.py，不提交）：CPU PASS / CUDA PASS
+    4 个 Wolf task（flat/rough × PPO/HIM）构建 + 短 rollout finite；overflow 位可读
+    + metrics 手工置位（HFIELD/NEFC）；NanGuard detect+dump 落盘；CUDA Graph 捕获
+    后 rollout finite。既有 tests/check_wolf_rough.py 两处硬编码数值（orientation
+    -1.5、wheel_force_lift 0.005）在 main 亦 FAIL（"参数更新" 提交导致，与版本无关）。
+用户实训（已报告，尚无独立 GPU 复跑）：Wolf rough HIM 3500 env × 100 iteration
+    正常完成，未因 NaN/Inf 中止；HFIELD overflow、solver iterations / linesearch
+    iterations 达到上限的警告仍然频繁出现。3.14 的新警告类型在 3.11 下未必
+    有同等打印机制；打印条数不能直接作为版本优劣的对比指标。
+未决 / 风险：3.11 同配置完整 A/B 未执行；更长期训练和高难度 curriculum
+    数值稳定性尚未验证；corner 接触深度差异对真实训练的影响尚未归类；HFIELD
+    overflow 未消除。保持 NanGuard 和 overflow 监测，不为消除警告擅自改变
+    solver iterations / ls_iterations 或碰撞几何。MjLab v1.6.0 官方要求
+    MuJoCo/MJWarp ~=3.11.0，本项目使用 uv override 强制 3.14.0，属于
+    **本仓库自主验证的非官方依赖组合**。回退时应恢复升级前依赖/锁文件，
+    并在隔离环境中重新同步，避免跨后端 checkpoint 行为差异被忽略。
 ```
 
 ## 26. Update Rule
