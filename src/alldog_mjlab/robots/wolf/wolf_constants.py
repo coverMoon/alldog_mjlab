@@ -57,6 +57,9 @@ WOLF_WHEEL_JOINT_NAMES = tuple(f"{leg}_foot" for leg in WOLF_LEG_ORDER)
 WOLF_WHEEL_COLLISION_GEOM_NAMES = tuple(
     f"{leg}_wheel_collision" for leg in WOLF_LEG_ORDER
 )
+# 轮子刚体（Link4）名（FL/FR/RL/RR 顺序；body_link_lin_vel_w / DR wheel body
+# 选择用）。
+WOLF_WHEEL_BODY_NAMES = tuple(f"{leg}_Link4" for leg in WOLF_LEG_ORDER)
 # 轮子符号 contract：策略正轮速动作 = 该轮为机身前进方向（base +x）驱动。
 # 验证依据（默认姿态 FK）：FL/RL 的轮轴 world 方向为 +y（a × ẑ = +x̂），
 # FR/RR 的轮轴 world 方向为 -y（a × ẑ = -x̂），因此 MuJoCo joint target

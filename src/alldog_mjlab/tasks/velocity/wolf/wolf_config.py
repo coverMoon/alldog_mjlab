@@ -323,8 +323,16 @@ class TerminationParams:
 
 @dataclass(frozen=True)
 class RewardScales:
-    """Wolf 通用奖励权重（flat / rough 四任务同一套 13 项）。"""
+    """Wolf 奖励权重：共用区（flat / rough 四任务同一套 14 项）+ 专属区。
 
+    当前专属区仅 rough 的 ``wheel_force_lift``（flat 保持 14 项，rough 15 项）。
+    注册与否由 env_cfgs._configure_rewards 决定；flat 构建时不消费专属权重。
+    """
+
+    # -----------------------------------------------------------------
+    # 共用区：flat / rough 四任务同权重注册（wolf-flat / wolf-rough /
+    # wolf-*-him）。
+    # -----------------------------------------------------------------
     tracking_linear_x: float = 1.0
     tracking_linear_y: float = 1.0
     tracking_angular: float = 1.0
@@ -339,6 +347,13 @@ class RewardScales:
     run_still: float = -0.20
     dof_pos_limits: float = -0.20
     leg_torques: float = -0.0001
+
+    # -----------------------------------------------------------------
+    # 专属区：各 stage / terrain 独有项（不在全部任务注册的权重集中在这里；
+    # 未来例如 flat 专属或 HIM 专属项也放这里）。
+    # -----------------------------------------------------------------
+    # rough 专属：轮水平接触力 × 向上竖直速度（鼓励沿障碍表面向上滚动）。
+    wheel_force_lift: float = 0.005
 
 
 @dataclass(frozen=True)

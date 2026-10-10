@@ -47,6 +47,7 @@ from alldog_mjlab.robots.wolf.wolf_constants import (
     WOLF_LEG_JOINT_NAMES,
     WOLF_LEG_ORDER,
     WOLF_POLICY_JOINT_NAMES,
+    WOLF_WHEEL_BODY_NAMES,
     WOLF_WHEEL_COLLISION_GEOM_NAMES,
     WOLF_WHEEL_FORWARD_SIGN,
     WOLF_WHEEL_JOINT_NAMES,
@@ -76,6 +77,7 @@ from alldog_mjlab.tasks.velocity.wolf.rewards import (
     track_linear_velocity_y,
     vertical_linear_velocity_l2,
     wheel_action_rate_l2,
+    wheel_force_lift,
 )
 from alldog_mjlab.tasks.velocity.wolf.terrain import wolf_rough_terrain_generator_cfg
 from alldog_mjlab.tasks.velocity.wolf.randomization import (
@@ -165,6 +167,11 @@ _WOLF_ACTOR_TERM_NOISE = {
 
 # 非法接触终止 sensor 身份：illegal_contact_bodies（config 可配）对 terrain。
 WOLF_ILLEGAL_CONTACT_SENSOR = "illegal_ground_contact"
+
+# rough 专属轮-地形接触 sensor 身份（wheel_force_lift reward 用）：四个轮碰撞
+# geom（WOLF_WHEEL_COLLISION_GEOM_NAMES，显式 FL/FR/RL/RR 顺序）对 terrain，
+# netforce = 世界系接触力。flat 不注册。
+WOLF_WHEEL_FORCE_CONTACT_SENSOR = "wheel_force_contact"
 
 # rough terrain scan sensor 身份 contract（只存在于 rough 任务）：MjLab v1.6
 # 原生 RayCastSensorCfg，17 x 11 = 187 rays，ray yaw 对齐，仅碰撞 group 0（terrain）。
@@ -351,6 +358,24 @@ def _configure_scene_and_sensors(
     )
     cfg.scene.sensors = (cfg.scene.sensors or ()) + (illegal_ground_contact,)
 
+    if rough:
+        wheel_force_contact = ContactSensorCfg(
+            name=WOLF_WHEEL_FORCE_CONTACT_SENSOR,
+            primary=ContactMatch(
+                mode="geom",
+                pattern=WOLF_WHEEL_COLLISION_GEOM_NAMES,
+                entity="robot",
+            ),
+            secondary=ContactMatch(
+                mode="body",
+                pattern="terrain",
+            ),
+            fields=("force",),
+            reduce="netforce",
+            num_slots=1,
+        )
+        cfg.scene.sensors = (cfg.scene.sensors or ()) + (wheel_force_contact,)
+
 
 def _configure_actions(
     cfg: ManagerBasedRlEnvCfg, dr: DomainRandomizationParams
@@ -504,7 +529,8 @@ def _configure_events(
 
 
 def _configure_rewards(cfg: ManagerBasedRlEnvCfg, rough: bool) -> None:
-    """Wolf reward baseline：四任务同一套 14 项（dict 顺序即 logging 顺序）。
+    """Wolf reward baseline：flat / rough 通用 14 项 + rough 专属 1 项
+    （dict 顺序即 logging 顺序）。
 
     全部 reward func 均定义在 rewards.py（与 black/rewards.py 公式独立同构，
     不 import；native 项经薄包装转发）；action rate 按显式 16-D contract 的
@@ -514,9 +540,11 @@ def _configure_rewards(cfg: ManagerBasedRlEnvCfg, rough: bool) -> None:
     dof_pos_limits / leg_torques）为 Wolf v1/v2 统一扩展（BlackW 经验迁移），
     flat / rough 共用同一公式 / 权重 / 选关节（有意修改 rough 原 8 项基线，
     见 MIGRATION §28.5）。
-    唯一的 flat / rough 差异仍是 ``base_height`` func：flat = world-z（
+    flat / rough 差异一：``base_height`` func，flat = world-z（
     base_height_l2_flat）、rough = terrain-relative footprint 均值
     （base_height_l2_terrain）；target / weight / key / 顺序完全一致。
+    flat / rough 差异二：rough 末尾追加 ``wheel_force_lift``（flat 不注册；
+    flat 14 项 / rough 15 项，消费 WOLF_WHEEL_FORCE_CONTACT_SENSOR）。
     """
     base_height_term = (
         RewardTermCfg(
@@ -643,8 +671,22 @@ def _configure_rewards(cfg: ManagerBasedRlEnvCfg, rough: bool) -> None:
         weight=WOLF_CONFIG.reward.scales.leg_torques,
         params={"asset_cfg": leg_actuator_cfg},
     )
+    if rough:
+        # rough 专属第 15 项：轮水平接触力 × 向上竖直速度。轮部速度用显式
+        # Link4 body 名（FL/FR/RL/RR，preserve_order）；接触力侧的顺序对齐由
+        # wheel_force_lift 内部的 primary_names 断言保证。
+        cfg.rewards["wheel_force_lift"] = RewardTermCfg(
+            func=wheel_force_lift,
+            weight=WOLF_CONFIG.reward.scales.wheel_force_lift,
+            params={
+                "sensor_name": WOLF_WHEEL_FORCE_CONTACT_SENSOR,
+                "asset_cfg": SceneEntityCfg(
+                    "robot", body_names=WOLF_WHEEL_BODY_NAMES, preserve_order=True
+                ),
+            },
+        )
     assert WOLF_TRACKING_VELOCITY_REWARD_TERM in cfg.rewards
-    assert len(cfg.rewards) == 14
+    assert len(cfg.rewards) == (15 if rough else 14)
 
 
 def _configure_flat_terrain(cfg: ManagerBasedRlEnvCfg) -> None:
@@ -868,9 +910,7 @@ def _dr_event_terms(
         else SceneEntityCfg("terrain", geom_names=("terrain",))
     )
     base_body = SceneEntityCfg("robot", body_names=("base_link",))
-    wheel_bodies = SceneEntityCfg(
-        "robot", body_names=tuple(f"{leg}_Link4" for leg in WOLF_LEG_ORDER)
-    )
+    wheel_bodies = SceneEntityCfg("robot", body_names=WOLF_WHEEL_BODY_NAMES)
     # Link1-3（非 base、非轮）：link mass / inertia 随机化目标。
     link_bodies = SceneEntityCfg(
         "robot",
