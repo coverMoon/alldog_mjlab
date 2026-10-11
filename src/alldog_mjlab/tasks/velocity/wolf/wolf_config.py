@@ -211,7 +211,7 @@ class TerrainParams:
     obstacle_width_range: tuple[float, float] = (1.0, 2.0)
     obstacle_count: int = 20
 
-    # stairs（native box 金字塔台阶）：step_height = base + difficulty x gain = 0.05 + 0.18 d
+    # stairs（native box 金字塔台阶）：step_height = base + difficulty x gain = 0.05 + 0.28 d
     stair_step_height_base: float = 0.05
     stair_step_height_gain: float = 0.28
     stair_step_width: float = 0.3

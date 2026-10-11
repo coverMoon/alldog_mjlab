@@ -4610,9 +4610,10 @@ terrain generator（curriculum=True，7 类 x 10 行，值与 Black rough 已实
                  obstacles 0.20 / stairs_up 0.25 / stairs_down 0.25
     difficulty [0,0.9]；slope [0,0.7]；rough noise base 0.015 / gain 0.1 /
     step 0.005 / downsample 0.2；obstacles [0.06,0.26]m x [1,2]m x 20；
-    stairs base 0.05 / gain 0.18 / width 0.30；max_init_terrain_level 5
+    stairs base 0.05 / gain 0.28 / width 0.30；max_init_terrain_level 5
 rough_slope = WolfRoughSlopeTerrainCfg（slope+noise 双 native 数学相加，同 Black
      已验证实现语义）。
+地形方向语义见 §30.7（2026-10 已修正：统一为“机器人从中心向外运动的实际高度变化”）。
 MJWarp capacity：rough 模板 spawn 高度 z=10 后模板 ncon=0 / nefc=0（原
      178/712 下限消除，见 §32）；rough_nconmax=128 / rough_njmax=256
      （候选 B，runtime 峰值余量 ~4x，待 4096 实训回验，overflow 需保持 NO）。
@@ -4760,6 +4761,94 @@ sensor：wheel_force_contact（仅 rough），primary =
     （frameT @ force）+ mjlab 文档背书，未做独立物理复核；1.0 N 门控阈值 /
     0.5 权重对训练收敛的影响未做系统实验（由后续 wolf-rough 训练观察）。
 ```
+
+### 30.7 Wolf rough 地形方向修正（本轮集成，COMPLETE；改变物理地形）
+
+统一语义：**机器人从中心出生点向外运动时的实际高度变化方向**。
+
+修正前（历史；实际几何方向与 key 名字相反）：
+
+```text
+smooth_slope_up     HfPyramidSlopedTerrainCfg(inverted=False)  中心高 → 外围 0 = 实际下坡
+smooth_slope_down   HfPyramidSlopedTerrainCfg(inverted=True)   中心低 → 外围 0 = 实际上坡
+stairs_up           BoxPyramidStairsTerrainCfg                 中心平台最高 → 外围最低 = 实际下楼梯
+stairs_down         BoxInvertedPyramidStairsTerrainCfg         中心平台最低 → 外围最高 = 实际上楼梯
+rough_slope         _slope_noise 的 slope 取正（中心高）        中心高 → 外围低 = 实际下坡
+```
+
+修正后：
+
+```text
+smooth_slope_up     HfPyramidSlopedTerrainCfg(inverted=True)   中心低 → 外围 0 = 上坡
+smooth_slope_down   HfPyramidSlopedTerrainCfg(inverted=False)  中心高 → 外围 0 = 下坡
+stairs_up           BoxInvertedPyramidStairsTerrainCfg         中心平台最低 → 外围最高 = 上楼梯
+stairs_down         BoxPyramidStairsTerrainCfg                 中心平台最高 → 外围最低 = 下楼梯
+rough_slope         _slope_noise 的 slope 取负（同 native inverted）  中心低 → 外围高 = 上坡
+```
+
+几何依据（MjLab v1.6.0 源码已核对）：
+
+```text
+HfPyramidSlopedTerrainCfg：xx/yy 在中心取 1、边缘取 0；
+    inverted=False → slope>0 → hf_raw 中心最大、边缘 0，hfield_z_offset=0；
+    inverted=True  → slope<0 → 中心最负、边缘 0，hfield_z_offset=-max_physical_height。
+BoxPyramidStairsTerrainCfg：ring k 顶面 = (k+1)*step_height，中心平台顶面 =
+    (num_steps+1)*step_height（最高）；origin z = (num_steps+1)*step_height。
+BoxInvertedPyramidStairsTerrainCfg：ring k 顶面 = -(k+1)*step_height，中心平台顶面 =
+    -(num_steps+1)*step_height（最低）；origin z = -(num_steps+1)*step_height。
+```
+
+flat / discrete_obstacles 未改。key 名称、插入顺序、proportion、curriculum 行数与难度
+范围、``max_init_terrain_level``、以及全部难度数值（num_rows=10 /
+difficulty_range=(0.0,0.9) / base 0.05 / gain 0.28 / width 0.3 / platform 3.0）均不变。
+
+rough_slope 实现细节（最小改动）：只把 ``_slope_noise`` 的 slope 改为
+``-slope_range[0] - d*(slope_range[1]-slope_range[0])``（与 native inverted 分支逐项
+一致）。噪声采样/量化/双线性插值、``elevation_min`` / 归一化 / ``hfield_z_offset =
+elevation_min * vertical_scale``（保留 absolute zero，patch 边缘仍回到 z=0，与相邻
+terrain / border 衔接）、spawn origin = 中心 ±1 m 区域最大 raw height 全部不变。
+负 ``height_max`` 下 platform 裁剪 ``clip(hf_raw, min(0,z_pf), max(0,z_pf))`` 依旧
+成立，无需额外分支；spawn origin 始终 ≥ 中心真实表面（不穿地、不悬空）。
+
+**checkpoint 与课程状态**：
+
+- 网络 / 优化器结构、joint/action/observation/history layout、PPO/HIM、DR、PD、
+  command curriculum、terrain curriculum 更新算法、terrain 类别顺序与权重均未改；
+  已有 checkpoint 仍可直接 load（本改动不触碰 state_dict），历史 checkpoint 不修改。
+- 本轮**改变了 terrain type 对应的物理地形**，因此：不自动恢复旧地形课程等级；
+  rough 训练请使用**新的 run**（新 run_name / experiment 目录），不要 resume 旧 rough
+  run 的课程等级；不重命名已有实验目录；本轮不提供 checkpoint 迁移工具。
+- **旧 TensorBoard 课程指标的实际含义**：旧 run 的 terrain level 类指标（以及
+  ``Episode_Metrics/terrain_level*``）是在**旧方向**地形上产生的课程等级。由于
+  difficulty → 几何方向的映射已改变，旧 run 的 terrain level 不能与新 run 直接比较，
+  也不代表同一组几何难度；旧 run 的 reward / termination 曲线同样对应旧地形，只能
+  作为历史参考，不可与修正后 run 做等难度对比。
+
+验证（本轮，STATIC CHECKED / LIGHT TEST PASS，tests/check_wolf_terrain_direction.py
++ tests/check_wolf_terrain_smoke.py，不提交）：从**生成后的几何数据**（``mj_ray``
+向下打射线，不是只看 ``inverted`` 字段）实测 row=9（d=0.9，3.5 m 处 vs 中心）：
+
+```text
+flat                z_center=+0.0000 z_outer=+0.0000 delta=+0.0000  (中心平台 z≈0)
+smooth_slope_up     z_center=-0.9850 z_outer=-0.2948 delta=+0.6902  (上坡)
+smooth_slope_down   z_center=+0.9850 z_outer=+0.2948 delta=-0.6902  (下坡)
+rough_slope         z_center=-1.0000 z_outer=-0.2991 delta=+0.7009  (上坡，含噪声)
+discrete_obstacles  z_center=+0.0000 z_outer=-0.1200 delta=-0.1200  (中心平台 z≈0)
+stairs_up           z_center=-2.7180 z_outer=-0.6040 delta=+2.1140  (上楼梯)
+stairs_down         z_center=+2.7180 z_outer=+0.6040 delta=-2.1140  (下楼梯)
+```
+
+（验证脚本固定 ``TerrainGeneratorCfg.seed=0`` 以便复现；生产 cfg 的 seed 仍为 None，
+即每次运行随机生成 rough_slope / discrete_obstacles，但方向结论不因随机性而改变。）
+
+另外：key 顺序 / proportion 不变；全部采样射线命中（无空洞）；7 类 terrain 的 spawn
+origin z 与中心平台真实表面一致（|diff| ≤ 0.105 m，且方向为 origin ≥ 表面，不穿地）；
+rough_slope 的坡度方向随难度增强（row 0/4/9 delta = -0.004 / +0.333 / +0.701）；
+四个 task（wolf-flat / wolf-rough / wolf-flat-him / wolf-rough-him）4 env CPU reset +
+3 步 rollout observation/reward 全有限（actor 53 / HIM [B,6,53] / action 16 不变）。
+
+NOT RUN：PPO/HIM 长程训练；新方向地形的实际训练表现未验证（地形难度是否合适、
+课程是否按预期推进均未评估）。
 
 ## 31. Wolf Flat 模板 Spawn 高度与仿真容量优化（本轮集成，COMPLETE）
 

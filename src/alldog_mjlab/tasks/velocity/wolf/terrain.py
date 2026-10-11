@@ -52,7 +52,8 @@ class WolfRoughSlopeTerrainCfg(SubTerrainCfg):
         slope     = slope_range[0] + d * (slope_range[1] - slope_range[0])
         amplitude = noise_base + noise_gain * d
 
-    slope 部分是四向金字塔（中心为 flat platform，向外下降），噪声部分是
+    slope 部分是四向金字塔（中心为 flat platform），方向为**中心低、外围高**
+    （机器人从中心出生点向外运动 = 上坡），噪声部分是
     ±amplitude 内、以 `noise_step` 量化、以 `noise_downsample` 间距采样再双线性
     插值的均匀噪声，噪声叠加在整个 patch 上（包含 spawn platform）。
 
@@ -139,8 +140,14 @@ class WolfRoughSlopeTerrainCfg(SubTerrainCfg):
         return TerrainOutput(origin=origin, geometries=[geom], flat_patches=None)
 
     def _slope_noise(self, difficulty: float) -> np.ndarray:
-        """`HfPyramidSlopedTerrainCfg`（inverted=False, border_width=0）的 slope 高度场。"""
-        slope = self.slope_range[0] + difficulty * (
+        """`HfPyramidSlopedTerrainCfg`（inverted=True, border_width=0）的 slope 高度场。
+
+        中心低、外围高（机器人从中心向外运动 = 上坡）：与 native 的 inverted 分支一致，
+        ``slope`` 取负值使 ``height_max`` 为负，``hf_raw = height_max * xx * yy`` 在中心最
+        负、在 patch 边缘为 0；platform 裁剪逻辑（取 `min(0, z_pf)..max(0, z_pf)`）对负
+        `height_max` 同样成立，因此无需额外分支。
+        """
+        slope = -self.slope_range[0] - difficulty * (
             self.slope_range[1] - self.slope_range[0]
         )
         width_pixels = int(self.size[0] / self.horizontal_scale)
@@ -208,6 +215,12 @@ def wolf_rough_terrain_generator_cfg(terrain: TerrainParams | None = None) -> Te
     stairs（up / down）使用 native box 金字塔台阶，step_height 按 difficulty
     线性插值（``base + gain * d``）；与 legacy heightfield 台缘的 0.1 m 网格量化
     差异是 framework difference（同 Black rough），不声称 exact reproduction。
+
+    方向语义统一为「机器人从中心出生点向外运动的实际高度变化」：
+    ``*_up`` = 中心低、外围高；``*_down`` = 中心高、外围低。
+    - ``HfPyramidSlopedTerrainCfg``：``inverted=True`` → 中心低（up）。
+    - ``BoxInvertedPyramidStairsTerrainCfg``：中心平台最低、向外升（up）。
+    - ``BoxPyramidStairsTerrainCfg``：中心平台最高、向外降（down）。
     """
     terrain = WOLF_CONFIG.terrain if terrain is None else terrain
     terrain.validate()
@@ -227,7 +240,7 @@ def wolf_rough_terrain_generator_cfg(terrain: TerrainParams | None = None) -> Te
                 platform_width=terrain.platform_width,
                 horizontal_scale=terrain.horizontal_scale,
                 vertical_scale=terrain.vertical_scale,
-                inverted=False,
+                inverted=True,
             ),
             "smooth_slope_down": HfPyramidSlopedTerrainCfg(
                 proportion=proportions["smooth_slope_down"],
@@ -235,7 +248,7 @@ def wolf_rough_terrain_generator_cfg(terrain: TerrainParams | None = None) -> Te
                 platform_width=terrain.platform_width,
                 horizontal_scale=terrain.horizontal_scale,
                 vertical_scale=terrain.vertical_scale,
-                inverted=True,
+                inverted=False,
             ),
             "rough_slope": WolfRoughSlopeTerrainCfg(
                 proportion=proportions["rough_slope"],
@@ -260,7 +273,7 @@ def wolf_rough_terrain_generator_cfg(terrain: TerrainParams | None = None) -> Te
                 vertical_scale=terrain.vertical_scale,
                 square_obstacles=False,
             ),
-            "stairs_up": BoxPyramidStairsTerrainCfg(
+            "stairs_up": BoxInvertedPyramidStairsTerrainCfg(
                 proportion=proportions["stairs_up"],
                 step_height_range=(
                     terrain.stair_step_height_base,
@@ -269,7 +282,7 @@ def wolf_rough_terrain_generator_cfg(terrain: TerrainParams | None = None) -> Te
                 step_width=terrain.stair_step_width,
                 platform_width=terrain.platform_width,
             ),
-            "stairs_down": BoxInvertedPyramidStairsTerrainCfg(
+            "stairs_down": BoxPyramidStairsTerrainCfg(
                 proportion=proportions["stairs_down"],
                 step_height_range=(
                     terrain.stair_step_height_base,
