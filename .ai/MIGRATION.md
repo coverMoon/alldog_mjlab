@@ -5150,13 +5150,22 @@ LS_ITERATIONS（上限 20）警告；已有 overflow_hfield / overflow_other 两
     不是安全机制，不参与任何运行时契约。
     关闭：① 原生 uv run train；② MJWARP_EPA_PATCH=0 <launcher>（显式关，打印状态）；
     ③ 不使用 launcher。无 .venv / pyproject / uv.lock 改动。
-LS_ITERATIONS 打印抑制（launcher 默认开启）：
-    MjWarp solver 每步都用 wp.atomic_or 记录 LS_ITERATIONS（结构化统计与
+终端刷屏打印抑制（launcher 默认开启；函数名 suppress_terminal_warnings，
+旧名 suppress_ls_iterations_warning 保留为兼容别名）：
+    清除位：LS_ITERATIONS | HFIELD | ITERATIONS（掩码 1024|32|512 = 1568）。
+    MjWarp 用 wp.atomic_or / overflow_out |= **无条件**记录溢出位（结构化统计与
+    overflow_hfield / overflow_other / overflow_solver_iterations /
     overflow_ls_iterations 指标不受影响），仅在 kernel build 时用
-    wp.static(warn_overflow & LS_ITERATIONS) 决定是否 wp.printf 刷屏。launcher 在
-    **首次 kernel build 之前**（包 Simulation._finish_init）清除该位，因此只关掉
-    终端打印，不改变求解器数值、Data.overflow 统计或任何训练参数。
-    关闭：MJWARP_SUPPRESS_LS_WARNING=0 <launcher>。原生 uv run train 不受影响。
+    wp.static(warn_overflow & <bit>) 决定是否 wp.printf 刷屏（已核对源码：
+    LS solver.py:1347/1353，ITERATIONS solver.py:3394/3400 与 3445/3451，
+    HFIELD collision_convex.py:436/443）。launcher 在**首次 kernel build 之前**
+    （包 Simulation._finish_init）清除该掩码，因此只关掉终端打印，不改变求解器
+    数值、Data.overflow 统计或任何训练参数（solver iterations / ls_iterations /
+    hfield resolution / 碰撞容量均不变）。
+    开关：MJWARP_SUPPRESS_WARNINGS=0（统一开关，默认 1）；旧名
+    MJWARP_SUPPRESS_LS_WARNING 设置时优先（兼容旧脚本）。原生 uv run train 不受影响。
+    **仅处理终端日志**：HFIELD 的真实碰撞容量问题（§33/§34）仍为待调查风险，
+    本抑制不解决它，只是不再刷屏。
 验证（本次，SIM VERIFIED / LIGHT PASS）：
     - 正式加载路径：已复现崩溃状态（mjb + DR 轮半径 0.07524211 + prestep + ctrl）
       原版 CUDA far=1 / step0 NaN；补丁 CUDA RR×terrain_85 contact_pos
@@ -5177,6 +5186,14 @@ LS_ITERATIONS 打印抑制（launcher 默认开启）：
       “linesearch iterations limit reached”；开启抑制 0 行，warn_overflow
       4095→3071（清除 bit 1024），而 Data.overflow 仍为每 env 1024
       （8/8 env 位保留）→ 仅关打印、统计不变。
+    - **三类别警告 A/B（本轮扩展后重测）**：
+      LS（wolf-rough-him 8 env CUDA 30 步）288 行 → 0 行，Data.overflow 仍 [1024]；
+      ITERATIONS（双箱叠放 + iterations=1 合成场景）4 行 → 0 行，overflow 仍 512；
+      HFIELD（hfield 256×256 + 大幅 box 合成场景）507867 行 → 0 行，overflow 仍 32；
+      生产掩码 = 1568（由 _SUPPRESSED_WARNING_TYPES 计算，实测 4095→2527）。
+    - **开关逻辑**：未设环境变量 → 抑制（源 MJWARP_SUPPRESS_WARNINGS）；
+      MJWARP_SUPPRESS_WARNINGS=0 → 保留；MJWARP_SUPPRESS_LS_WARNING=0/1 → 优先且生效；
+      旧名函数可调用且幂等（不重复包装 _finish_init）。
 NOT RUN：真实 3000-env Wolf rough HIM 训练。本补丁为**数值稳定性修复**，仍有未验证的
     退化工况，不宣称已解决所有 EPA 问题。补丁作用于共享 EPA 路径，可能改变使用同一
     算法（含 Black / BlackW）的其他碰撞对的物理数值；checkpoint / policy contract 不变。

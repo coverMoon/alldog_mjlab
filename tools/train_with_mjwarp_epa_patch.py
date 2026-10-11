@@ -13,8 +13,9 @@
     MJWARP_EPA_PATCH=0 uv run python tools/train_with_mjwarp_epa_patch.py ...  # 显式关
 
 环境变量：
-    MJWARP_EPA_PATCH=0             关闭 EPA 补丁（本启动器退化为原版 + 下述 LS 处理）
-    MJWARP_SUPPRESS_LS_WARNING=0   保留 LS_ITERATIONS 终端打印（默认在使用本启动器时关闭它）
+    MJWARP_EPA_PATCH=0             关闭 EPA 补丁（本启动器退化为原版 + 下述警告处理）
+    MJWARP_SUPPRESS_WARNINGS=0     保留终端刷屏打印（LS/HFIELD/ITERATIONS；默认关闭它们）
+    MJWARP_SUPPRESS_LS_WARNING=0   旧名兼容开关，设置时优先于 MJWARP_SUPPRESS_WARNINGS
 
 加载机制（fail-closed）：
     1. 定位当前 venv 已安装的 `mujoco_warp`，要求版本 == 3.14.0，否则报错退出；
@@ -37,12 +38,18 @@
     关于 SHA-256：这里的哈希仅用于**内容完整性/版本钉死**（识别“被替换或损坏的
     源码副本”），不是安全机制，也不用于任何运行时契约。
 
-LS_ITERATIONS 打印抑制（`suppress_ls_iterations_warning`）：
-    MjWarp 的 solver 每步都用 `wp.atomic_or` 记录 LS_ITERATIONS 溢出（结构化统计与
-    `overflow_ls_iterations` 指标不受影响），仅在 kernel build 时用
-    `wp.static(warn_overflow & LS_ITERATIONS)` 决定是否 `wp.printf` 刷屏。本函数在
-    **首次 kernel build 之前**（包 `Simulation._finish_init`）清除该位，因此只关掉
-    终端打印，不改变求解器数值、`Data.overflow` 统计或任何训练参数。
+终端刷屏打印抑制（`suppress_terminal_warnings`，旧名 `suppress_ls_iterations_warning`）：
+    MjWarp 用 `wp.atomic_or` / `overflow_out |=` **无条件**记录溢出位（`Data.overflow`
+    与 `overflow_hfield` / `overflow_other` / `overflow_solver_iterations` /
+    `overflow_ls_iterations` 指标因此不受影响），仅在 kernel build 时用
+    `wp.static(warn_overflow & <bit>)` 决定是否 `wp.printf` 刷屏。本函数在
+    **首次 kernel build 之前**（包 `Simulation._finish_init`）清除
+    `LS_ITERATIONS | HFIELD | ITERATIONS` 三个位，因此只关掉终端打印，不改变求解器
+    数值、`Data.overflow` 统计或任何训练参数（solver iterations / ls_iterations /
+    hfield resolution / 碰撞容量均不变）。
+
+    注意：**仅处理终端日志**。HFIELD 的真实碰撞容量问题（§33/§34）仍然保留为待
+    调查风险，本抑制不解决它，只是不再刷屏。
 
 补丁语义：`_epa()` 在 horizon 新增 face 时，只有“距离在 [lower2,upper2] 且投影不极端
 偏离”的 face 才计入 `nvalid`；偏离的 face 置 invalid（仍留在多面体参与 horizon/可见性
@@ -318,37 +325,70 @@ def install(verbose: bool = True) -> Path:
     return cache_dir
 
 
-def suppress_ls_iterations_warning(verbose: bool = True) -> None:
-    """在首次 kernel build 之前清除 `opt.warn_overflow` 的 LS_ITERATIONS 位。
+# 仅关闭终端刷屏打印；这些位仍会被无条件记录到 Data.overflow（指标不受影响）。
+_SUPPRESSED_WARNING_TYPES = ("LS_ITERATIONS", "HFIELD", "ITERATIONS")
 
-    只关闭 MjWarp 的终端刷屏打印；`Data.overflow` 记录与 `overflow_ls_iterations`
-    指标不受影响（`wp.atomic_or` 与打印开关相互独立）。不改求解器/PD/DR/训练参数。
+_warning_patch_installed = False
+
+
+def suppress_terminal_warnings(verbose: bool = True) -> None:
+    """在首次 kernel build 之前清除 `opt.warn_overflow` 中三类刷屏打印位。
+
+    清除：`LS_ITERATIONS | HFIELD | ITERATIONS`。
+    只关闭 MjWarp 的终端打印；`Data.overflow` 记录及对应 overflow_* 指标不受影响
+    （`wp.atomic_or` / `overflow_out |=` 与打印开关相互独立）。不改 solver
+    iterations / ls_iterations / hfield resolution / 碰撞容量等任何参数。
     """
+    global _warning_patch_installed
+    if _warning_patch_installed:
+        return
+
     import mujoco_warp
 
     from mjlab.sim import Simulation
 
-    ls_bit = int(mujoco_warp.OverflowType.LS_ITERATIONS)
+    overflow = mujoco_warp.OverflowType
+    cleared_mask = 0
+    for type_name in _SUPPRESSED_WARNING_TYPES:
+        cleared_mask |= int(getattr(overflow, type_name))
+    cleared_names = " | ".join(_SUPPRESSED_WARNING_TYPES)
+
     original_finish_init = Simulation._finish_init
     state = {"reported": False}
 
     def patched_finish_init(self):  # type: ignore[no-untyped-def]
         before = int(self._wp_model.opt.warn_overflow)
-        self._wp_model.opt.warn_overflow = before & ~ls_bit
+        self._wp_model.opt.warn_overflow = before & ~cleared_mask
         if verbose and not state["reported"]:
             state["reported"] = True
             print(
-                "[mjwarp-ls-warning] LS_ITERATIONS 打印已关闭（仅打印，不改数值/统计）\n"
+                f"[mjwarp-warning] 终端刷屏打印已关闭：{cleared_names}"
+                "（仅打印，不改数值/统计）\n"
                 f"  warn_overflow: {before} -> {int(self._wp_model.opt.warn_overflow)}"
-                f" (cleared bit {ls_bit})"
+                f" (cleared mask {cleared_mask})"
             )
         return original_finish_init(self)
 
     Simulation._finish_init = patched_finish_init
+    _warning_patch_installed = True
+
+
+def suppress_ls_iterations_warning(verbose: bool = True) -> None:
+    """兼容旧名（历史版本只清 LS_ITERATIONS）：等价于 `suppress_terminal_warnings`。"""
+    suppress_terminal_warnings(verbose=verbose)
 
 
 def _flag(name: str, default: str) -> bool:
     return os.environ.get(name, default).strip().lower() not in ("0", "false", "off", "no")
+
+
+def _warnings_suppressed() -> tuple[bool, str]:
+    """统一开关：MJWARP_SUPPRESS_WARNINGS（默认开）；旧名设置时优先。"""
+    legacy = "MJWARP_SUPPRESS_LS_WARNING"
+    if os.environ.get(legacy) is not None:
+        return _flag(legacy, "1"), legacy
+    unified = "MJWARP_SUPPRESS_WARNINGS"
+    return _flag(unified, "1"), unified
 
 
 def main() -> None:
@@ -357,10 +397,11 @@ def main() -> None:
     else:
         print("[mjwarp-epa-patch] DISABLED via MJWARP_EPA_PATCH=0 (native mujoco_warp)")
 
-    if _flag("MJWARP_SUPPRESS_LS_WARNING", "1"):
-        suppress_ls_iterations_warning(verbose=True)
+    suppress, source = _warnings_suppressed()
+    if suppress:
+        suppress_terminal_warnings(verbose=True)
     else:
-        print("[mjwarp-ls-warning] KEPT via MJWARP_SUPPRESS_LS_WARNING=0")
+        print(f"[mjwarp-warning] KEPT via {source}=0（保留 LS/HFIELD/ITERATIONS 打印）")
 
     from mjlab.scripts.train import main as train_main
 
