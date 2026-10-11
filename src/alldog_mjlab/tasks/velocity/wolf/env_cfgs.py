@@ -59,6 +59,11 @@ from mjlab.utils.noise import UniformNoiseCfg
 
 # OverflowType.HFIELD（mujoco_warp 3.11.0：HFIELD = 1 << 5）。
 _WF_HFIELD_OVERFLOW_BIT = 1 << 5
+# OverflowType.ITERATIONS / LS_ITERATIONS（mujoco_warp 3.14.0：bit 9 = 512 /
+# bit 10 = 1024）。求解器 / 线搜索迭代达上限时置位；由 `overflow_other`
+# 单独拆出，便于区分线搜索不收敛与其他接触异常。
+_WF_ITERATIONS_OVERFLOW_BIT = 1 << 9
+_WF_LS_ITERATIONS_OVERFLOW_BIT = 1 << 10
 
 
 def metric_overflow_hfield(env: "ManagerBasedRlEnv") -> torch.Tensor:
@@ -77,6 +82,26 @@ def metric_overflow_other(env: "ManagerBasedRlEnv") -> torch.Tensor:
     """除 HFIELD 外任一 overflow bit 是否置位（同上 sticky/max 语义）。"""
     bits = env.sim.data.overflow[:]
     return ((bits & ~_WF_HFIELD_OVERFLOW_BIT) != 0).to(
+        device=bits.device, dtype=torch.float32
+    )
+
+
+def metric_overflow_solver_iterations(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    """ITERATIONS overflow bit（求解器迭代达上限）是否置位（同上 sticky/max
+    语义）。为 `overflow_other` 的子集，用于单独观察是否需要对 solver
+    iterations 调参。"""
+    bits = env.sim.data.overflow[:]
+    return ((bits & _WF_ITERATIONS_OVERFLOW_BIT) != 0).to(
+        device=bits.device, dtype=torch.float32
+    )
+
+
+def metric_overflow_ls_iterations(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    """LS_ITERATIONS overflow bit（线搜索迭代达上限）是否置位（同上 sticky/max
+    语义）。为 `overflow_other` 的子集，用于单独观察是否需要对 ls_iterations
+    调参。"""
+    bits = env.sim.data.overflow[:]
+    return ((bits & _WF_LS_ITERATIONS_OVERFLOW_BIT) != 0).to(
         device=bits.device, dtype=torch.float32
     )
 
@@ -1316,6 +1341,14 @@ def _build_wolf_env_cfg(
             )
             cfg.metrics["overflow_other"] = MetricsTermCfg(
                 func=metric_overflow_other, reduce="max"
+            )
+            # 求解器 / 线搜索迭代达上限拆分为独立指标（overflow_other 的子集），
+            # 便于判断是否需要调整 iterations / ls_iterations。
+            cfg.metrics["overflow_solver_iterations"] = MetricsTermCfg(
+                func=metric_overflow_solver_iterations, reduce="max"
+            )
+            cfg.metrics["overflow_ls_iterations"] = MetricsTermCfg(
+                func=metric_overflow_ls_iterations, reduce="max"
             )
     if play:
         _configure_play(cfg)

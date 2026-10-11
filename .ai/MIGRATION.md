@@ -5061,6 +5061,55 @@ Cylinder–Box 接触对照（同 MJCF 各自编译；tests/diag_mjwarp314_*，�
     并在隔离环境中重新同步，避免跨后端 checkpoint 行为差异被忽略。
 ```
 
+## 36. Wolf Rough 求解器警告分类监测（本轮集成，COMPLETE；仅监测，未调参）
+
+背景：MJWarp 3.14.0 下 Wolf Rough 训练仍出现 HFIELD / ITERATIONS（上限 10）/
+LS_ITERATIONS（上限 20）警告；已有 overflow_hfield / overflow_other 两项 metrics，
+但 overflow_other 混合了求解器不收敛与其它接触异常，无法单独判断线搜索警告比例。
+
+```text
+实现（仅 env_cfgs.py）：
+    新增两个 episode metric（复用现有 TorchArray 原生 ``overflow[:]`` 读法，
+    不经 torch.as_tensor，无 CPU 同步 / 无逐 env 打印）：
+        metric_overflow_solver_iterations → ITERATIONS = 1<<9 = 512
+        metric_overflow_ls_iterations     → LS_ITERATIONS = 1<<10 = 1024
+        （常量 _WF_ITERATIONS_OVERFLOW_BIT / _WF_LS_ITERATIONS_OVERFLOW_BIT）
+    返回 [B] float32 0/1，reduce="max"。
+    注册范围（与 overflow_hfield/other 完全一致）：wolf-rough / wolf-rough-him
+    的 train；flat PPO/HIM 与全部 play 不注册。
+    保留 overflow_hfield / overflow_other 名称与语义不变：
+        other = bits & ~HFIELD（仍含 ITERATIONS / LS_ITERATIONS / EPA / TACTILE...），
+        新增两项是 other 的**子集**，便于单独观察，不替代 other。
+统计含义（MjLab v1.6.0 reduce="max"）：episode 内取 per-env 最大值，episode
+    reset 时对本次完成的环境取均值 → 日志值 = 本批完成 episode 中曾出现该标志
+    的比例（0~1），不是所有环境 / 每个物理步的事件率。bit 为 per-world sticky，
+    reset 清零。
+验证（tests/check_wolf_overflow_metrics.py，CPU PASS + CUDA PASS，不提交）：
+    - 位值：ITERATIONS=512 / LS_ITERATIONS=1024 / HFIELD=32（与 mujoco_warp 一致）；
+    - 位运算：零 / 单独 / 同时 / 与 HFIELD 混合，四函数结果正确，other 语义不变；
+    - 输出 [B] float32、device 与输入一致；
+    - 注册范围：rough PPO/HIM 4 项，flat 与全部 play 共 0 项；
+    - 日志通道：reset 后 extras["log"] 出现 Episode_Metrics/overflow_{hfield,
+      other,solver_iterations,ls_iterations} 四项；极短 rollout reward finite。
+事件关联诊断（tests/diag_wf_solver_overflow.py，不提交；auto_reset=False，
+    wrapper 在 termination 后 / reset 前采样，per-env sticky→seen，区分未终止 /
+    同终止步 / 同超时步 / 与 HFIELD 同现）：
+    CUDA 128 env × 60 步 crash 场景一次样本：
+        ITERATIONS 首次事件 3（3 未终止）；
+        LS_ITERATIONS 首次事件 135（135 未终止）；
+        HFIELD 首次事件 13（3 未终止 / 10 与终止同控制步）；
+        iter∧ls 同现 86 env-step，ls∧hfield 同现 16 env-step。
+    方向性观察：本样本中 LS_ITERATIONS 主要发生在**未终止**的活体环境（求解器
+    压力），与 HFIELD 集中于终止步不同。样本单一、场景为 crash，**不宣称**为
+    真实训练分布。
+未验证 / NOT RUN：真实 3500 env 训练中两项标志的实际比例与持续时间；正常行走
+    下的触发率；提高 solver iterations / ls_iterations 后事件是否下降及其
+    数值/性能代价；iteration 敏感性。**本轮仅新增监测，未调整任何求解器参数，
+    不宣称线搜索问题已解决**（iterations=10 / ls_iterations=20 / tolerance、
+    warn_overflow / rough_warn_overflow、碰撞几何、reward/termination/DR、
+    policy contract 均未改）。
+```
+
 ## 26. Update Rule
 
 每完成一个 behavior unit：
