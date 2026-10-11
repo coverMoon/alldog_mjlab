@@ -5126,17 +5126,37 @@ LS_ITERATIONS（上限 20）警告；已有 overflow_hfield / overflow_other 两
         “极端投影偏离”保守过滤，dfar2 > 4·emax2）；
         _epa() horizon 新增 face：仅“距离在 [lower2,upper2] 且投影不极端偏离”才
         nvalid += 1，否则置 invalid（仍留在多面体参与 horizon/可见性，仅选面跳过）。
-加载机制（显式启用 + fail-closed）：
+加载机制（显式启用 + fail-closed + 内容钉定）：
     启用：uv run python tools/train_with_mjwarp_epa_patch.py <task> ...
         （install() 后委托原生 mjlab.scripts.train.main()；不复制训练逻辑）。
     原生 uv run train ... 从不加载补丁。
-    install()：校验已安装 mujoco-warp == 3.14.0 → 整包复制到
-    /tmp/mjlab/mjwarp_epa_patch_3.14.0_v1（排除 __pycache__）→ 文本补丁（每个
-    anchor 必须恰好匹配 1 次）→ 把副本目录插入 sys.path[0] 后再 import
-    mujoco_warp → 校验 __file__ 指向副本且 collision_gjk 含新符号。
+    install()：
+        1. 校验已安装 mujoco-warp == 3.14.0；
+        2. 校验原始 _src/collision_gjk.py 的 SHA-256 == 已核对哈希
+           c288f8f3…（两独立来源一致：venv 安装副本 与 上游 3.15.0 wheel，
+           二者 byte-identical，且该文件 3.14.0/3.15.0 无差异）；
+        3. 内存中施加两处文本补丁（anchor 必须恰好匹配 1 次），并校验打补丁后
+           哈希 == 648a62a0…（与已 Review 的 .diff 一致）；
+        4. 缓存为**内容寻址的不可变目录**：
+           /tmp/mjlab/mjwarp_epa_patch_cache/mw<版本>_<补丁后哈希前16位>。
+           已存在则**校验内容**（哈希 + 关键文件）后才复用；否则在私有 mkdtemp
+           目录内构建并 os.rename **原子发布**；**从不删除共享目录**（并发启动的
+           训练进程不会互相破坏源码）。目标存在但校验不通过时改用固定的
+           <dir>.fallback，不删原目录（累积目录数有界）；
+        5. 把缓存目录插入 sys.path[0] 后再 import mujoco_warp → 校验 __file__
+           指向缓存目录、collision_gjk 含新符号、且该文件哈希 == 648a62a0…。
     任一步失败 SystemExit（fail-closed，绝不静默回退原版）。
+    关于 SHA-256：仅用于**内容完整性/版本钉死**（识别被替换或损坏的源码副本），
+    不是安全机制，不参与任何运行时契约。
     关闭：① 原生 uv run train；② MJWARP_EPA_PATCH=0 <launcher>（显式关，打印状态）；
     ③ 不使用 launcher。无 .venv / pyproject / uv.lock 改动。
+LS_ITERATIONS 打印抑制（launcher 默认开启）：
+    MjWarp solver 每步都用 wp.atomic_or 记录 LS_ITERATIONS（结构化统计与
+    overflow_ls_iterations 指标不受影响），仅在 kernel build 时用
+    wp.static(warn_overflow & LS_ITERATIONS) 决定是否 wp.printf 刷屏。launcher 在
+    **首次 kernel build 之前**（包 Simulation._finish_init）清除该位，因此只关掉
+    终端打印，不改变求解器数值、Data.overflow 统计或任何训练参数。
+    关闭：MJWARP_SUPPRESS_LS_WARNING=0 <launcher>。原生 uv run train 不受影响。
 验证（本次，SIM VERIFIED / LIGHT PASS）：
     - 正式加载路径：已复现崩溃状态（mjb + DR 轮半径 0.07524211 + prestep + ctrl）
       原版 CUDA far=1 / step0 NaN；补丁 CUDA RR×terrain_85 contact_pos
@@ -5147,10 +5167,21 @@ LS_ITERATIONS（上限 20）警告；已有 overflow_hfield / overflow_other 两
       （estimator.encoder.0.weight (128,318)）。
     - vanilla vs patched 的 ccd kernel hash 不同（2c6479ae/616de794/8bcb2208 vs
       e4d93a66/0b0d42ee/4e5f105a）；连续两次 launcher 运行复用同一 patched hash。
-    - fail-closed 已测：anchor 不匹配 / 版本不符 / 已在原版导入后再安装 均 SystemExit。
+    - **并发**：冷缓存下 4 进程同时 install（重复 3 轮）→ 每轮均为 1 built +
+      3 reuse (race)，均指向同一目录，0 个 .tmp- 残留，最终 1 个目录。
+    - **内容校验**：热缓存命中 reuses（校验哈希）；人为破坏 collision_gjk.py 后
+      不被复用、不被删除，转用 <dir>.fallback 并在后续运行继续复用（目录数有界）。
+    - **哈希钉定 fail-closed**：篡改原始源码 / 篡改补丁文本（打补丁后哈希不符）/
+      版本不符 / 已在原版导入后再安装 均 SystemExit。
+    - **LS 打印 A/B**（wolf-rough-him 8 env，CUDA，30 步）：关闭抑制 273 行
+      “linesearch iterations limit reached”；开启抑制 0 行，warn_overflow
+      4095→3071（清除 bit 1024），而 Data.overflow 仍为每 env 1024
+      （8/8 env 位保留）→ 仅关打印、统计不变。
 NOT RUN：真实 3000-env Wolf rough HIM 训练。本补丁为**数值稳定性修复**，仍有未验证的
     退化工况，不宣称已解决所有 EPA 问题。补丁作用于共享 EPA 路径，可能改变使用同一
     算法（含 Black / BlackW）的其他碰撞对的物理数值；checkpoint / policy contract 不变。
+    已知小风险：当上游 mujoco-warp 升级或本地包被修改时，哈希钉定会直接 fail-closed
+    （需重新核对源文件并更新两个常量）；手动清除缓存可用 rm -rf /tmp/mjlab/mjwarp_epa_patch_cache。
 ```
 
 ## 26. Update Rule
