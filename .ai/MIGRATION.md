@@ -5110,6 +5110,49 @@ LS_ITERATIONS（上限 20）警告；已有 overflow_hfield / overflow_other 两
     policy contract 均未改）。
 ```
 
+## 37. MjWarp 3.14 EPA 异常投影过滤补丁集成（本轮集成，COMPLETE；默认关闭，未长训验证）
+
+背景（§35 后端升级之后的 Wolf rough HIM NaN）：物理层 NaN 已定位到 MjWarp 3.14 CUDA
+凸碰撞 EPA 的退化（needle）三角面。`_epa()` 选面时该面报告虚假的小平面距离，其 origin
+投影远离三角形，`_epa_witness` 解出巨大重心坐标 → witness 远距离 → contact_pos 错误
+（`(-434.793,10.046,0.257)`）→ 约束求解器 NaN。
+
+```text
+补丁（保持 MjLab v1.6.0 / MjWarp 3.14 不变；不改 .venv / 生产训练配置）：
+    位置：tools/train_with_mjwarp_epa_patch.py（新增，独立于 alldog_mjlab 包，避免
+    import 时提前拉入 mjlab/mujoco_warp）。内容等价于已 Review 的
+    tests/patch_mjwarp_epa_degenerate_face.diff：
+        collision_gjk.py 新增 _face_degenerate_projection(pt, idx)（尺度相关的
+        “极端投影偏离”保守过滤，dfar2 > 4·emax2）；
+        _epa() horizon 新增 face：仅“距离在 [lower2,upper2] 且投影不极端偏离”才
+        nvalid += 1，否则置 invalid（仍留在多面体参与 horizon/可见性，仅选面跳过）。
+加载机制（显式启用 + fail-closed）：
+    启用：uv run python tools/train_with_mjwarp_epa_patch.py <task> ...
+        （install() 后委托原生 mjlab.scripts.train.main()；不复制训练逻辑）。
+    原生 uv run train ... 从不加载补丁。
+    install()：校验已安装 mujoco-warp == 3.14.0 → 整包复制到
+    /tmp/mjlab/mjwarp_epa_patch_3.14.0_v1（排除 __pycache__）→ 文本补丁（每个
+    anchor 必须恰好匹配 1 次）→ 把副本目录插入 sys.path[0] 后再 import
+    mujoco_warp → 校验 __file__ 指向副本且 collision_gjk 含新符号。
+    任一步失败 SystemExit（fail-closed，绝不静默回退原版）。
+    关闭：① 原生 uv run train；② MJWARP_EPA_PATCH=0 <launcher>（显式关，打印状态）；
+    ③ 不使用 launcher。无 .venv / pyproject / uv.lock 改动。
+验证（本次，SIM VERIFIED / LIGHT PASS）：
+    - 正式加载路径：已复现崩溃状态（mjb + DR 轮半径 0.07524211 + prestep + ctrl）
+      原版 CUDA far=1 / step0 NaN；补丁 CUDA RR×terrain_85 contact_pos
+      (-434.793,10.046,0.257)→(-24.224,15.807,0.078)、normal (0,0,-1)，far=0、
+      step0 finite；25 邻近状态全 clean；nworld 1/64/1024/3000 全 clean。
+    - wolf-rough-him 4 env reset + 5 步 CUDA finite；actor [B,6,53] / critic [B,56] /
+      action 16 / metrics 注册不变；wolf-flat-him model_999.pt 可加载
+      （estimator.encoder.0.weight (128,318)）。
+    - vanilla vs patched 的 ccd kernel hash 不同（2c6479ae/616de794/8bcb2208 vs
+      e4d93a66/0b0d42ee/4e5f105a）；连续两次 launcher 运行复用同一 patched hash。
+    - fail-closed 已测：anchor 不匹配 / 版本不符 / 已在原版导入后再安装 均 SystemExit。
+NOT RUN：真实 3000-env Wolf rough HIM 训练。本补丁为**数值稳定性修复**，仍有未验证的
+    退化工况，不宣称已解决所有 EPA 问题。补丁作用于共享 EPA 路径，可能改变使用同一
+    算法（含 Black / BlackW）的其他碰撞对的物理数值；checkpoint / policy contract 不变。
+```
+
 ## 26. Update Rule
 
 每完成一个 behavior unit：
