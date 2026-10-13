@@ -28,6 +28,28 @@ uv sync --frozen
 
 后续命令均在仓库根目录运行，通过 `uv run` 自动使用项目虚拟环境，无需单独创建 `train.py` 或 `play.py`。
 
+### 训练入口与 MuJoCo Warp EPA 补丁
+
+`uv run train <task-id> ...` 是唯一推荐的训练入口（项目级 console script
+`alldog_mjlab.utils.train:main`）。它在进入 MjLab 原生训练前自动启用已验证的
+MuJoCo Warp 3.14 EPA 退化面补丁（版本 / SHA-256 校验 + 内容寻址缓存 + 
+fail-closed），并按需关闭终端刷屏打印。两个环境变量相互独立：
+
+| 命令 | EPA 补丁 | LS_ITERATIONS / HFIELD / ITERATIONS 终端打印 |
+|---|---|---|
+| `uv run train ...` | 默认开启 | 默认关闭 |
+| `MJWARP_EPA_PATCH=0 uv run train ...` | 关闭（原版 MjWarp） | 默认关闭 |
+| `MJWARP_SUPPRESS_WARNINGS=0 uv run train ...` | 开启 | 显示 |
+| 两者均设为 `0` | 关闭 | 显示 |
+
+- 关闭打印只影响终端日志；**其余 overflow 类型仍会打印**，`Data.overflow` 记录与
+  `overflow_hfield` / `overflow_other` / `overflow_solver_iterations` /
+  `overflow_ls_iterations` 指标不受影响，solver / collision / 地形 / PD / DR /
+  policy contract 均不改变。
+- 补丁启用失败时明确报错退出（fail-closed），不会静默回退到未修补的 MjWarp。
+- 旧脚本 `tools/train_with_mjwarp_epa_patch.py` 保留为兼容入口，调用同一份实现
+  （`alldog_mjlab/utils/mjwarp_epa.py`），但不再是主要训练方式。
+
 ### 2. 训练 Black flat
 
 从随机初始化开始训练平地 PPO：

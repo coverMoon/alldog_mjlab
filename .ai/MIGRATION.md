@@ -5201,6 +5201,10 @@ LS_ITERATIONS（上限 20）警告；已有 overflow_hfield / overflow_other 两
 
 ## 37. MjWarp 3.14 EPA 异常投影过滤补丁集成（本轮集成，COMPLETE；默认关闭，未长训验证）
 
+> 后续状态（§38）：自 §38 起 `uv run train` **默认启用**本补丁；核心实现已迁至
+> `src/alldog_mjlab/utils/mjwarp_epa.py`（唯一权威来源），
+> `tools/train_with_mjwarp_epa_patch.py` 变为兼容 shim。本节其余内容为 §37 集成时的记录。
+
 背景（§35 后端升级之后的 Wolf rough HIM NaN）：物理层 NaN 已定位到 MjWarp 3.14 CUDA
 凸碰撞 EPA 的退化（needle）三角面。`_epa()` 选面时该面报告虚假的小平面距离，其 origin
 投影远离三角形，`_epa_witness` 解出巨大重心坐标 → witness 远距离 → contact_pos 错误
@@ -5288,6 +5292,69 @@ NOT RUN：真实 3000-env Wolf rough HIM 训练。本补丁为**数值稳定性�
     算法（含 Black / BlackW）的其他碰撞对的物理数值；checkpoint / policy contract 不变。
     已知小风险：当上游 mujoco-warp 升级或本地包被修改时，哈希钉定会直接 fail-closed
     （需重新核对源文件并更新两个常量）；手动清除缓存可用 rm -rf /tmp/mjlab/mjwarp_epa_patch_cache。
+```
+
+## 38. 将 EPA 补丁接入项目级 `uv run train`（本轮集成，COMPLETE；默认开启，未长训验证）
+
+目标：让 Black / BlackW / Wolf 共用同一套已验证的 EPA 启动流程，不再依赖单独脚本。
+不重新实现补丁、不复制 MjLab train CLI、不新建训练循环。
+
+```text
+入口与共享实现：
+    pyproject.toml [project.scripts]: train = "alldog_mjlab.utils.train:main"
+        （项目 console script 覆盖 mjlab 的同名 train；原 CLI 参数与 task id 不变）
+    src/alldog_mjlab/utils/train.py    轻量入口，调用 launch()
+    src/alldog_mjlab/utils/mjwarp_epa.py  EPA 核心实现的**唯一权威来源**
+        （版本/SHA 校验、内存补丁、内容寻址缓存、原子发布、fail-closed、
+         三类 warning 抑制、launch() 启动序列）
+    tools/train_with_mjwarp_epa_patch.py 保留为兼容 shim，re-export 并调 launch()
+        （不再含补丁代码；既有 tests 对 loader.install() / _flag / _warnings_suppressed
+         的引用保持可用）
+
+启动顺序（保证补丁先于 mujoco_warp / MjLab 仿真模块）：
+    uv run train -> utils.train.main() -> mjwarp_epa.launch()
+      -> 读 MJWARP_EPA_PATCH（默认 1）：install() 或打印 DISABLED
+      -> 读 MJWARP_SUPPRESS_WARNINGS（默认 1；旧名优先）：注册 _finish_init 抑制
+      -> import mjlab.scripts.train.main -> 调用原生 train_main()
+    `mujoco_warp` / `mjlab` 只在 install()/suppress_terminal_warnings()/launch() 内部、
+    补丁安装之后 import。
+
+导入时序修复（必须）：
+    src/alldog_mjlab/__init__.py 原为 `from . import tasks`，会使任何
+    `import alldog_mjlab.*`（含 console entry point）提前导入 tasks -> mjlab -> mujoco_warp，
+    违反补丁时序。现改为 PEP 562 延迟 __getattr__：import 包本身不导入 tasks；
+    `alldog_mjlab.tasks` / `from alldog_mjlab import tasks` 仍可用。
+    [project.entry-points."mjlab.tasks"] 值由 "alldog_mjlab" 改为 "alldog_mjlab.tasks"，
+    保证 MjLab `entry_points().select(...).load()` 仍会显式导入 tasks 并完成
+    register_mjlab_task。任务注册未变（list-envs 仍列出 black/wolf 全部 8 个任务）。
+
+冻结行为（两个开关相互独立）：
+    uv run train ...                          补丁开 / 三类打印关
+    MJWARP_EPA_PATCH=0 uv run train ...       补丁关（原版）/ 三类打印关
+    MJWARP_SUPPRESS_WARNINGS=0 uv run train ... 补丁开 / 打印开
+    两者=0                                     补丁关 / 打印开
+    warning 只清 LS_ITERATIONS|HFIELD|ITERATIONS（掩码 1568）；其余类型仍打印；
+    Data.overflow 与 overflow_* metrics 不受影响。不改变 solver / collision /
+    地形 / PD / DR / policy contract。补丁任一步失败 SystemExit，不静默回退。
+
+验证（本轮，STATIC / LIGHT / SIM-VERIFIED limited）：
+    - py_compile：新模块与 shim。
+    - import 时序：import alldog_mjlab / alldog_mjlab.utils.train 后 mujoco_warp
+      与 mjlab 均未加载。
+    - uv run train --help / MJWARP_EPA_PATCH=0 --help：命中项目入口并进入原生 CLI。
+    - 补丁开：mujoco_warp.__file__ 指向 /tmp/.../mw3.14.0_648a62a078794b79/…；
+      补丁关：指向 .venv site-packages。
+    - warning 掩码（wolf-flat 1 env 初始化）：补丁开+抑制 4095→2527；抑制关 4095；
+      补丁关+抑制 2527。仅清三类位。
+    - 任务注册：uv run list-envs 仍列出 black/wolf 全部任务；play/export --help 正常。
+    - 兼容：tests/diagnose_wolf_rough_overflows.py --static 经 shim 正常 install。
+NOT RUN：真实长训练；CUDA kernel 数值等价（仍依赖既有安装校验与最小仿真验证）。
+
+已知交互（非本轮引入）：工作区存在未提交的 wolf_config 改动
+    `rough_warn_overflow: False`；它使 Wolf rough 的 apply_wp_opt 直接把 warn_overflow
+    置 0（所有类型打印关闭）。这是 task 级配置，不在本轮允许修改范围内，仅记录：
+    入口抑制本身只清三类位（已在 wolf-flat 验证 2527）；Wolf rough 的实际打印由该
+    task 配置决定。
 ```
 
 ## 26. Update Rule

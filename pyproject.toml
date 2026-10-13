@@ -13,6 +13,10 @@ dependencies = [
 
 [project.scripts]
 export = "alldog_mjlab.utils.export_policy:main"
+# train：项目级入口（覆盖 mjlab 的同名 console script）。默认启用已验证的 MuJoCo
+# Warp 3.14 EPA 补丁，并默认关闭 LS_ITERATIONS/HFIELD/ITERATIONS 终端刷屏打印；
+# 两个环境变量 MJWARP_EPA_PATCH / MJWARP_SUPPRESS_WARNINGS 可独立关闭（见 utils/train.py）。
+train = "alldog_mjlab.utils.train:main"
 # play：项目级入口（覆盖 mjlab 的同名 console script），缺省 --checkpoint-file
 # 时自动解析任务对应的最新本地 checkpoint（见 alldog_mjlab/utils/play.py）。
 play = "alldog_mjlab.utils.play:main"
@@ -33,4 +37,6 @@ override-dependencies = [
 ]
 
 [project.entry-points."mjlab.tasks"]
-alldog_mjlab = "alldog_mjlab"
+# 指向 tasks 子包本身（而非包根）：包 __init__ 已改为延迟导入 tasks，
+# 因此 MjLab 必须显式加载该子包才会触发 register_mjlab_task。
+alldog_mjlab = "alldog_mjlab.tasks"
