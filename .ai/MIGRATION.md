@@ -5296,6 +5296,10 @@ NOT RUN：真实 3000-env Wolf rough HIM 训练。本补丁为**数值稳定性�
 
 ## 38. 将 EPA 补丁接入项目级 `uv run train`（本轮集成，COMPLETE；默认开启，未长训验证）
 
+> 后续状态（§39）：自 §39 起补丁内容升级为 **v1 投影过滤 + v2 needle 形状过滤**
+> （`PATCH_ID = "epa-degenerate-face v2"`，patched SHA-256 `dfefeac6…`）。
+> 本节其余内容（入口、顺序、缓存/原子发布/fail-closed、warning 开关语义）仍然有效。
+
 目标：让 Black / BlackW / Wolf 共用同一套已验证的 EPA 启动流程，不再依赖单独脚本。
 不重新实现补丁、不复制 MjLab train CLI、不新建训练循环。
 
@@ -5355,6 +5359,104 @@ NOT RUN：真实长训练；CUDA kernel 数值等价（仍依赖既有安装校�
     置 0（所有类型打印关闭）。这是 task 级配置，不在本轮允许修改范围内，仅记录：
     入口抑制本身只清三类位（已在 wolf-flat 验证 2527）；Wolf rough 的实际打印由该
     task 配置决定。
+```
+
+## 39. EPA 补丁 v2：needle 形状过滤（本轮集成，COMPLETE；默认开启，未长训验证）
+
+背景：§37/§38 的 v1（投影极端偏离过滤）解决了第一次 NaN（RR wheel × terrain_85），
+但 2026-10-14 20:22 出现了第二次 NaN（env 1854，RL wheel × terrain_82，见
+`tests/diagnose_nan_replay_1854.md`）：dump 恢复 + 单 world CUDA 重放（vanilla 与 v1 均复现，
+逐位一致）证明 v1 未覆盖该实例。
+
+两次异常的根因（同一函数、不同退化维度）：
+
+```text
+路径：collision_driver(CYLINDER,BOX → CONVEX) → convex_narrowphase → gjk_phase
+      → epa_phase → _epa（选面）→ _epa_witness → _tri_affine_coord（数值爆炸）
+      → write_contact(pos = 0.5*(w1+w2)+origin) → 约束/求解器 → LS_ITERATIONS → NaN
+共同点：EPA 选中一个近退化 needle/sliver 三角面；_tri_affine_coord 除以 M_max(∝2·面积)
+        得到巨大重心坐标 → witness 远离两个几何体（数百米）→ 接触位置与法向错误。
+        EPA 报告的 dist 本身是对的（CPU MuJoCo 同值，量级 1e-5），失败只在 witness/位置/法向重建。
+差异：
+  v1 覆盖的实例（§37）：投影原点落在面外很远（dfar2 > 4 * emax2），但面本身可能不太薄。
+  v2 覆盖的实例（env 1854）：投影偏离相对“最长边”很小（dfar2 = 5.02 < 4*emax2 = 40.96
+        → v1deg = 0，v1 不标记），而面在自身最长边方向极薄：
+        emax = 3.2 m、hmin = 1.19e-7 m → hmin/emax = 3.7e-8（同 polytope 的 8 个合法 in-range 面为 0.5）
+```
+
+补丁内容（`src/alldog_mjlab/utils/mjwarp_epa.py`，唯一权威来源；两处文本替换）：
+
+```text
+v1 `_face_degenerate_projection`（保留，不变）：dfar2 > 4 * emax2 → 退化
+v2 `_face_needle_shape`（新增，尺度无关形状判据）：
+      n  = (p2 - p1) x (p3 - p1)          # |n| = 2*area
+      nn = dot(n, n)                      # nn / emax2 = hmin^2
+      emax2 = max(e12, e13, e23)          # 最长边长度平方
+      if emax2 <= 0: return True          # 零长退化三角形（与 _attach_face float32 语义一致）
+      return nn < 1e-8 * emax2 * emax2    # 等价 hmin/emax < 1e-4（无量纲）
+horizon 新增面判定（同一处，两守卫取并）：
+      if (dist2 >= lower2 and dist2 <= upper2
+          and not _face_degenerate_projection(pt, pt.nface - 1)
+          and not _face_needle_shape(pt, pt.nface - 1)):
+        nvalid += 1
+      else:
+        pt.face[pt.nface - 1] = _invalidate_face(pt.face[pt.nface - 1])
+被拒面仍留在 polytope 参与 horizon / 可见性维护，仅不参与选面；`nvalid` 与可选面集合一致。
+不改初始 polytope 面构造（`_polytope2/3/4`）、不改 `_epa_witness`、不改 EPA horizon 容量、
+不改 solver 参数、不删除远距离接触。
+```
+
+阈值依据（实测分离度）：异常 needle `hmin/emax = 3.7e-08`；同一 polytope 的合法面 `0.5`；
+§37 在 v1 修复后的合法面 `4.1e-02`。取 `1e-4`（即 `nn < 1e-8 * emax2^2`）时异常面低 3 个数量级，
+合法面高 2–4 个数量级。
+
+版本 / 哈希（fail-closed 不变）：
+
+```text
+PATCH_ID              = "epa-degenerate-face v2"
+EXPECTED_MJWARP_VERSION = "3.14.0"（不变）
+EXPECTED_SRC_SHA256     = c288f8f3…（原始 collision_gjk.py，不变）
+EXPECTED_PATCHED_SHA256 = dfefeac6ea5d17154a70213925c0db277a11bc54d374bbac67b50166e3bbde69（新）
+缓存目录：/tmp/mjlab/mjwarp_epa_patch_cache/mw3.14.0_dfefeac6ea5d1715（内容寻址；旧 v1 目录 mw3.14.0_648a62a0… 不被复用，也不删除）
+装载后校验：路径必须在缓存目录内 + `_face_degenerate_projection` 与 `_face_needle_shape` 两个符号
+            都在 + 已加载 collision_gjk.py 哈希 == 新 patched 哈希；任一不符 SystemExit。
+同进程若已先导入 vanilla 或旧 v1 副本 → fail-closed（不静默复用 v1）。
+```
+
+验证（本轮，STATIC / LIGHT / SIM-VERIFIED limited；**未做长训练**）：
+
+```text
+STATIC CHECKED：patched 文本语法可解析；`_build_patched_text` anchor 唯一性与两守卫符号检查；
+    `EXPECTED_SRC_SHA256` 与实际安装副本一致；`git diff --check` 干净。
+SIM VERIFIED（CUDA，1 world 重放）：
+    env 1854（RL wheel × terrain_82，dump 恢复的失败子步）：vanilla 与 v1 均复现
+        far contact (567.449,-155.609,10.239) + NaN；**生产 v2 不复现**：contact
+        (-36.14908,16.19964,-0.45002)、normal (0,0,-1)、far=false、qacc/qvel 有限。
+    §37（RR wheel × terrain_85，minimal repro）：vanilla REPRODUCED；生产 v2 NOT REPRODUCED。
+    正常 cylinder–box 回归（14 个确定性场景：水平/立姿/靠边/半悬空/浅穿透 0.1–3 mm）：
+        vanilla vs 生产 v2 → ncon/pos/dist/normal 逐位一致（max diff 0.0）。
+LIGHT TEST PASS：`uv run train --help` 经 launch() 加载生产 v2（patch id v2、新缓存目录、reuse）；
+    `MJWARP_EPA_PATCH=0` 仍为 DISABLED；同进程预导入 vanilla/v1 均 fail-closed。
+    Wolf rough HIM CUDA：4 env 初始化 + 8 / 100 policy step 极短 rollout，无 NaN / Traceback，
+    0 reset / 0 fall，腿关节力矩与位置有限。
+NOT RUN：真实长程训练（3500/3000 env）；Warp CPU 后端；初始 polytope 面过滤方案；
+    更大规模几何分布上的阈值敏感性扫描；上游 mujoco-warp 的完整测试套件。
+```
+
+残留风险（保留状态，**不得声称已解决所有 EPA 问题**）：
+
+```text
+1. 初始 polytope 面（`_polytope2/3/4` 建面路径）仍不经 v1/v2 过滤：若某个初始面本身即
+   needle/degenerate，仍可能产生病态 witness。两次已知异常都发生在 horizon 新增面（idx ≥ 6）。
+2. `_attach_face` 的第三个平面回退分支（`nn > MINVAL` 不满足时仍 `ret=0` 返回）可能给出极小的
+   平面法向；本轮未改动（超出允许范围）。
+3. 形状守卫只改变“哪些面可被选为最近面”，在极端场景下可能使 EPA 距离取到稍大的值
+   （本 case 实测 dist 不变）；对复杂几何（mesh/hfield/多点接触 multicontact 路径）
+   的接触语义变化尚未做大规模验证。
+4. 本补丁作用于共享 EPA 路径，会影响使用同一算法（含 Black / BlackW）的其它碰撞对；
+   现有 14 例 cylinder–box 回归未发现变化，但不构成全面等价证明。
+5. 上游 mujoco-warp 升级或本地包被修改时，哈希钉定会直接 fail-closed（需重新核对源文件
+   并更新两个常量）；手动清缓存：rm -rf /tmp/mjlab/mjwarp_epa_patch_cache。
 ```
 
 ## 26. Update Rule

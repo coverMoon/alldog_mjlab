@@ -1,12 +1,22 @@
-"""MjWarp 3.14 EPA 异常投影过滤补丁的共享实现（唯一权威来源）。
+"""MjWarp 3.14 EPA 退化面过滤补丁（v1 投影过滤 + v2 needle 形状过滤）的共享实现（唯一权威来源）。
 
 两处入口复用本模块：
   - 项目级 console script `uv run train`（`alldog_mjlab.utils.train:main` -> launch()）
   - 兼容入口 `tools/train_with_mjwarp_epa_patch.py`（-> launch()）
 
+补丁内容（两处文本替换，见 `_HELPER_BLOCK` / `_NEW_COND`）：
+  v1 `_face_degenerate_projection`：投影 "极端偏离" 过滤（面平面上的原点投影远离三角形，
+      判据 dfar2 > 4 * emax2）。修复 §37 的 needle 面伪接触。
+  v2 `_face_needle_shape`：尺度无关的 needle/sliver 形状过滤（最小高度相对最长边过小，
+      判据 nn < 1e-8 * emax2 * emax2）。修复 env-1854 的 needle 面伪接触（v1 的判据
+      在最长边很长时过于宽松，漏掉该种退化）。
+  两者在同一 horizon 新增面判定处取并：不满足任一条的 face 置 invalid（仍留在 polytope
+  参与 horizon / 可见性维护，仅不参与选面），`nvalid` 计数与可选面集合保持一致。
+
 加载机制（fail-closed，细节见各常量/函数 docstring）：版本校验 -> 原始 SHA-256 校验
 -> 内存打补丁 -> 打补丁后 SHA-256 校验 -> 内容寻址缓存/原子发布 -> sys.path 前置后
-import -> import 后路径与符号校验。任何一步失败 SystemExit，绝不静默回退未修补实现。
+import -> import 后路径与两处 guard 符号校验。任何一步失败 SystemExit，绝不静默回退
+未修补实现。
 
 环境变量：
   MJWARP_EPA_PATCH=0           关闭 EPA 补丁（使用已安装的原版 mujoco_warp）
@@ -27,7 +37,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-PATCH_ID = "epa-degenerate-face v1"
+PATCH_ID = "epa-degenerate-face v2"
 EXPECTED_MJWARP_VERSION = "3.14.0"
 CACHE_ROOT = Path("/tmp/mjlab/mjwarp_epa_patch_cache")
 _REL_COLLISION_GJK = Path("_src/collision_gjk.py")
@@ -43,10 +53,12 @@ _REQUIRED_FILES = (
 # 已核对的原始文件哈希（两个独立来源一致：venv 安装副本 与 上游 3.15.0 wheel 中
 # 该文件；二者 byte-identical，且 collision_gjk.py 在 3.14.0/3.15.0 间无差异）。
 EXPECTED_SRC_SHA256 = "c288f8f37e4b7f8f9e0e48a92a46c3eee0d0efc6dd7fac65bba2522e11f39e48"
-# 施加下述两处补丁后的预期哈希（由已 Review 的 tests/patch_mjwarp_epa_degenerate_face.diff）。
-EXPECTED_PATCHED_SHA256 = "648a62a078794b79062fec83e4ad20166158f9c9b32367bf28e511daa05dae9b"
+# 施加 v1(投影) + v2(needle 形状) 两处补丁后的预期哈希。
+# 由本模块 `_HELPER_BLOCK` / `_NEW_COND` 对已核对原始文本施加后计算（见 _build_patched_text）。
+# 与 v1 补丁哈希 (648a62a0…) 不同：内容寻址缓存目录随之变化，旧 v1 缓存不会被复用。
+EXPECTED_PATCHED_SHA256 = "dfefeac6ea5d17154a70213925c0db277a11bc54d374bbac67b50166e3bbde69"
 
-# --- 已 Review 的补丁文本（与 tests/patch_mjwarp_epa_degenerate_face.diff 一致） ---
+# --- 已 Review 的补丁文本（v1 投影过滤 + v2 needle 形状过滤） ---
 _ANCHOR_EPA = "@wp.func\ndef _epa("
 _HELPER_BLOCK = '''@wp.func
 def _face_degenerate_projection(pt: Polytope, idx: int) -> bool:
@@ -77,6 +89,37 @@ def _face_degenerate_projection(pt: Polytope, idx: int) -> bool:
   return dfar2 > 4.0 * emax2
 
 
+@wp.func
+def _face_needle_shape(pt: Polytope, idx: int) -> bool:
+  """Scale-free needle/sliver filter for a candidate support face.
+
+  With ``n = (p2 - p1) x (p3 - p1)`` we have ``|n| = 2 * area`` and, for the longest
+  edge ``emax``, the minimal altitude is ``hmin = 2 * area / emax``. Hence
+  ``nn / emax2 == hmin**2`` (``nn = |n|**2``, ``emax2 = emax**2``). A face whose minimal
+  altitude is negligible compared with its own longest edge makes ``_tri_affine_coord``
+  ill-conditioned (it divides by ``M_max`` ~ 2 * area), so ``_epa_witness`` can
+  interpolate witnesses hundreds of metres away from both geoms. The test below uses a
+  dimensionless aspect ratio (``hmin / emax < 1e-4``, i.e. ``nn < 1e-8 * emax2**2``), so
+  no absolute length threshold is assumed; it is independent of the v1 projection test,
+  which is too permissive when the longest edge is much longer than the face is thick.
+  A fully degenerate zero-length triangle (``emax2 <= 0``) is rejected as well, matching
+  the float32 arithmetic of ``_attach_face`` / ``_face_degenerate_projection``.
+  """
+  face = _get_face_verts(pt.face[idx])
+  p1 = pt.vert[2 * face[0]] - pt.vert[2 * face[0] + 1]
+  p2 = pt.vert[2 * face[1]] - pt.vert[2 * face[1] + 1]
+  p3 = pt.vert[2 * face[2]] - pt.vert[2 * face[2] + 1]
+  e12 = wp.dot(p1 - p2, p1 - p2)
+  e13 = wp.dot(p1 - p3, p1 - p3)
+  e23 = wp.dot(p2 - p3, p2 - p3)
+  emax2 = wp.max(e12, wp.max(e13, e23))
+  if emax2 <= 0.0:
+    return True
+  n = wp.cross(p2 - p1, p3 - p1)
+  nn = wp.dot(n, n)
+  return nn < 1e-8 * emax2 * emax2
+
+
 '''
 
 _OLD_COND = """      pt.nface += 1
@@ -88,13 +131,15 @@ _OLD_COND = """      pt.nface += 1
 
 _NEW_COND = """      pt.nface += 1
 
-      # A face whose projection deviates extremely is marked invalid (kept in the
-      # polytope for horizon/visibility, skipped by selection). It must NOT count
-      # toward nvalid, otherwise nvalid disagrees with the selectable-face set.
+      # A face whose projection deviates extremely (v1), or whose triangle is a
+      # near-degenerate needle/sliver (v2), is marked invalid (kept in the polytope for
+      # horizon/visibility, skipped by selection). It must NOT count toward nvalid,
+      # otherwise nvalid disagrees with the selectable-face set.
       if (
         dist2 >= lower2
         and dist2 <= upper2
         and not _face_degenerate_projection(pt, pt.nface - 1)
+        and not _face_needle_shape(pt, pt.nface - 1)
       ):
         nvalid += 1
       else:
@@ -139,8 +184,11 @@ def _build_patched_text(original_text: str) -> str:
         _fail(f"anchor horizon-condition 匹配 {original_text.count(_OLD_COND)} 次（期望 1）")
     text = original_text.replace(_ANCHOR_EPA, _HELPER_BLOCK + _ANCHOR_EPA, 1)
     text = text.replace(_OLD_COND, _NEW_COND, 1)
-    if "_face_degenerate_projection" not in text:
-        _fail("补丁结果中未找到 `_face_degenerate_projection`")
+    for symbol in ("_face_degenerate_projection", "_face_needle_shape"):
+        if symbol not in text:
+            _fail(f"补丁结果中未找到 `{symbol}`")
+    if "not _face_needle_shape(pt, pt.nface - 1)" not in text:
+        _fail("补丁结果中 horizon 新增面判定未引用 v2 形状守卫")
     got = hashlib.sha256(text.encode()).hexdigest()
     if got != EXPECTED_PATCHED_SHA256:
         _fail(f"打补丁后内容哈希 {got} != 预期 {EXPECTED_PATCHED_SHA256}（补丁文本与预期不符）")
@@ -266,7 +314,9 @@ def install(verbose: bool = True) -> Path:
     from mujoco_warp._src import collision_gjk
 
     if not hasattr(collision_gjk, "_face_degenerate_projection"):
-        _fail("collision_gjk 缺少 `_face_degenerate_projection`（补丁未生效）")
+        _fail("collision_gjk 缺少 `_face_degenerate_projection`（v1 补丁未生效）")
+    if not hasattr(collision_gjk, "_face_needle_shape"):
+        _fail("collision_gjk 缺少 `_face_needle_shape`（v2 补丁未生效）")
     loaded_sha = _sha256_file(Path(collision_gjk.__file__))
     if loaded_sha != EXPECTED_PATCHED_SHA256:
         _fail(f"已加载 collision_gjk.py 哈希 {loaded_sha} != 预期 {EXPECTED_PATCHED_SHA256}")
