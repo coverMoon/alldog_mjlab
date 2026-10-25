@@ -33,6 +33,7 @@ Black rough stairs terrain（up / down）: COMPLETE（§13.5）
 Black performance-based forward-speed command curriculum
 + checkpoint/resume state: COMPLETE（§4.3 / §4.4）
 Wolf robot asset / joint order / actuator contract (stage 1): COMPLETE（§27）
+Wolf hip/thigh/calf 分组 PD 参数: COMPLETE（默认数值不变；§27.4）
 Wolf IMU observation contract: COMPLETE（§27.5）
 Wolf flat PPO / HIM / command curriculum integration: COMPLETE（§28）
 Wolf Domain Randomization（逐项开关 + minimal profile）: COMPLETE（§29）
@@ -4159,18 +4160,21 @@ INIT_STATE pos z = 0.4432：轮最低点 ≈ 0，可直接站立。
     实测（root z 0.4289 → 稳态 0.3773，静力沉降 ≈ 5.2 cm，thigh 静力矩 ≈ 11 N·m
     → 稳态误差 ≈ 0.23 rad；roll/pitch ≈ 0；4 轮接地；max contact force ≈ 85 N；
     max leg τ 13.9 N·m ≪ 60；无自碰撞 / 弹飞 / 持续塌陷 / 数值发散）。
-    当前 Kp=80/Kd=3.0（用户 2026-10 调参轨迹：60/2.0 → 80/3.0 → 50/1.2 →
-    80/3.0）+ calf=1.43 姿态下未重跑受控站立沉降记录（待下轮验证记录补充）。
+    当前 hip/thigh/calf 三组均 Kp=80/Kd=3.0、calf=1.43 姿态下 CPU 重跑：
+    root z=0.4432 → 稳态 0.4166，4 轮接地；从 +1 cm 余量落稳时 root z=0.4160，
+    max leg τ=11.59 N·m，max joint position error=0.1448 rad，状态有限。
 ```
 
 ### 27.4 执行器 contract
 
 ```text
 全部 MjLab v1.6.0 原生 IdealPdActuatorCfg，逐关节 16 个（sort_actuators=True）：
-    hip/thigh/calf  position PD  Kp=80, Kd=3.0,  effort_limit=60 N·m
-                    （腿部 PD 2026-10 用户调参轨迹：60/2.0 → 80/3.0 → 50/1.2 →
-                     80/3.0，当前实际值 Kp=80/Kd=3.0；实机电机规格仍待确认；
-                     dq_target=0）
+    hip/thigh/calf  三组独立 position PD，默认各组 Kp=80, Kd=3.0，effort_limit=60 N·m
+                    参数入口：wolf_constants.py 的 WOLF_LEG_STIFFNESS /
+                    WOLF_LEG_DAMPING，均按 "hip" / "thigh" / "calf" 键取值；
+                    同类型四个关节共用一组，执行器按 joint 名后缀绑定。
+                    本次仅拆分调参入口，默认控制数值不变；dq_target=0；
+                    实机电机规格仍待确认。DR 继续基于各 actuator 默认 gains 缩放。
     foot（轮）       velocity PD  Kp=0,  Kd=1.0,  effort_limit=17 N·m
                     （不使用 torque action / XML velocity servo / 自定义 actuator）
 控制语义 = mjlaw τ = clamp(Kp(pos_t−q)+Kd(vel_t−dq)+effort, ±limit)：
@@ -4229,6 +4233,10 @@ projected_gravity  = mdp.projected_gravity_from_sensor(robot/imu_upvector)
 CPU  PASS（静态 / 编译 / joint+actuator mapping / PD law 探针 /
      wheel forward direction FK + 闭环 / 受控站立 / INIT 0.45 站立）
 CUDA PASS（MJWarp Simulation 构建 + 默认姿态 20 步 finite）
+分组 PD 验证（tests/check_wolf_robot.py --device cpu）：
+    CPU PASS：12 个腿关节逐项 PD law / 限幅；分别扰动 hip/thigh/calf 的 Kp/Kd，
+    仅对应四关节改变，其他关节与轮参数不变；资产 / mapping / 站立 / 滚动回归通过。
+    CUDA PASS：MJWarp 构建 + 20 步零力矩 smoke finite（非闭环 PD rollout）。
 git diff --check: clean
 IMU（check_wolf_imu.py）: 静态 / 静止读数 / 5 组倾斜 / 非零角速度 /
     root-based 对照（err=0.0）/ Scene 端到端 CPU + CUDA 全部 PASS

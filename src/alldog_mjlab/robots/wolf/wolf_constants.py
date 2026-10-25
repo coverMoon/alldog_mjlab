@@ -7,7 +7,8 @@ MJCF（``xmls/wolf.xml``）是模型权威来源；本文件定义 entity 级配
 不向 Black 的 ``*_joint`` 命名靠拢。
 
 PD 参数为当前实际值，**实机电机规格仍待确认**：
-- 腿部 hip/thigh/calf：position PD，Kp=80、Kd=3.0、effort_limit=60 N·m；
+- 腿部 hip/thigh/calf：三组独立 position PD，默认均 Kp=80、Kd=3.0、
+  effort_limit=60 N·m；
 - 轮部 foot：velocity PD，Kp=0、Kd=1.0、effort_limit=17 N·m（速度目标由后续
   task 的 velocity action 提供；轮部不做 torque action，也不用 XML velocity servo）。
 """
@@ -94,24 +95,31 @@ WOLF_IMU_BODY_OFFSET = (0.0, 0.0, 0.05975)
 # 显式 actuator / PD contract
 # ---------------------------------------------------------------------------
 
-# 腿部（hip/thigh/calf）position PD
-WOLF_LEG_STIFFNESS = 80.0
-WOLF_LEG_DAMPING = 3
+# 腿部 position PD：按关节类型独立调参，同类型四个关节共用一组。
+WOLF_LEG_STIFFNESS = {
+    "hip": 80.0,
+    "thigh": 80.0,
+    "calf": 80.0,
+}
+WOLF_LEG_DAMPING = {
+    "hip": 3.0,
+    "thigh": 3.0,
+    "calf": 3.0,
+}
 WOLF_LEG_EFFORT_LIMIT = 60.0
 # 轮部（foot）velocity PD：Kp=0 → τ = Kd * (vel_target - dq)，clamp ±17。
 WOLF_WHEEL_STIFFNESS = 0.0
 WOLF_WHEEL_DAMPING = 1.0
 WOLF_WHEEL_EFFORT_LIMIT = 17.0
 
-_LEG_JOINTS = ("hip", "thigh", "calf")
-
 
 def _actuator_cfg(joint_name: str) -> IdealPdActuatorCfg:
-    if any(joint_name.endswith(f"_{joint}") for joint in _LEG_JOINTS):
+    joint_type = joint_name.rsplit("_", 1)[-1]
+    if joint_type in WOLF_LEG_STIFFNESS:
         return IdealPdActuatorCfg(
             target_names_expr=(joint_name,),
-            stiffness=WOLF_LEG_STIFFNESS,
-            damping=WOLF_LEG_DAMPING,
+            stiffness=WOLF_LEG_STIFFNESS[joint_type],
+            damping=WOLF_LEG_DAMPING[joint_type],
             effort_limit=WOLF_LEG_EFFORT_LIMIT,
         )
     if joint_name in WOLF_WHEEL_JOINT_NAMES:
