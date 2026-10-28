@@ -1,23 +1,4 @@
-"""本仓库的 ``play`` CLI 包装（覆盖 mjlab wheel 自带的 play console script）。
-
-唯一增强：省略 ``--checkpoint-file`` 时，自动解析“任务对应的最新本地
-checkpoint”（例如 ``wolf-flat-him`` → ``logs/rsl_rl/wolf_velocity/`` 下
-``*_wolf_flat_him`` 的最新目录中 step 最大的 ``model_*.pt``），并把该路径注入
-``--checkpoint-file`` 后原样委派给 ``mjlab.scripts.play.main()``。
-
-规则：
-
-- 显式传了 ``--checkpoint-file`` 或 ``--wandb-run-path`` 时完全不干预；
-- checkpoint 解析依据 task runner cfg 的 ``experiment_name`` / ``run_name`` /
-  ``load_run`` regex（与一角 resume 的目录语义一致，不散落字符串）；
-  run 目录按目录名排序取最新（名字前缀为定宽时间戳，字典序 = 时间序）；
-- 解析不到候选（无 run 目录 / 无 model 文件 / cfg 缺少相应字段）时不注入参数，
-  打印说明后交回 mjlab 原入口（保持原有报错行为）；
-- 其他参数与视图（viser / native / video / log-root 等）全部透传。
-
-不修改 mjlab 源码；只替换 console script 入口（见 pyproject
-``[project.scripts]``）。
-"""
+"""Play a task; infer the latest checkpoint from its experiment when no explicit file is supplied."""
 
 from __future__ import annotations
 
@@ -91,12 +72,10 @@ def main() -> None:
     if len(sys.argv) >= 2 and sys.argv[1] in tasks:
         task_id, rest = sys.argv[1], sys.argv[2:]
         explicit_ckpt = any(
-            a == "--checkpoint-file" or a.startswith("--checkpoint-file=")
-            for a in rest
+            a == "--checkpoint-file" or a.startswith("--checkpoint-file=") for a in rest
         )
         explicit_wandb = any(
-            a == "--wandb-run-path" or a.startswith("--wandb-run-path=")
-            for a in rest
+            a == "--wandb-run-path" or a.startswith("--wandb-run-path=") for a in rest
         )
         if not explicit_ckpt and not explicit_wandb:
             log_root = _argv_flag_value("--log-root") or "logs/rsl_rl"
@@ -106,7 +85,9 @@ def main() -> None:
                 print(f"[INFO] 默认 checkpoint 解析失败（{exc}），跳过自动注入。")
                 ckpt = None
             if ckpt is not None:
-                print(f"[INFO] 未指定 --checkpoint-file：使用默认最新 checkpoint {ckpt}")
+                print(
+                    f"[INFO] 未指定 --checkpoint-file：使用默认最新 checkpoint {ckpt}"
+                )
                 sys.argv = [sys.argv[0], task_id, "--checkpoint-file", str(ckpt), *rest]
             else:
                 print(

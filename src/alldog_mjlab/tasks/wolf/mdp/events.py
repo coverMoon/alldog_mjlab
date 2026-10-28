@@ -1,36 +1,10 @@
-"""Wolf flat 任务 Domain Randomization 的自定义实现（MjLab v1.6.0 原生机制的补充）。
-
-设计原则（见 .ai/MIGRATION.md §29）：
-
-- 优先使用 MjLab v1.6.0 原生 ``dr.*`` / ``mdp.*``；本模块只实现原生机制
-  无法直接表达的部分，全部相对 nominal（compile-time default）参数显式建立
-  状态，禁止跨 episode 累计漂移。
-- 轮地摩擦：MuJoCo 接触摩擦按 geom pair 取 **max** 结合（地面 geom 默认 1.0
-  会把合成结果抬高下限）。因此「全局摩擦 + 轮摩擦乘子」直接以绝对值写机器人
-  geom，并把地面 geom 切向摩擦压到 0，使 pair 合成结果完全由机器人 geom 决定；
-  实际 wheel-ground contact 摩擦因此可完整覆盖配置采样范围（含 < 1.0 段），
-  且摩擦乘子读前序 ground_friction 事件写入的当前值再乘 per-env 共享乘子
-  （event dict 顺序 = 应用顺序）。地面 geom 选择由 caller 传入：flat plane 为
-  单个 ``terrain`` geom，rough generator 为全部 patch geom（压 0 语义对两者一致）。
-- 执行器：保留 IdealPdActuator 控制律，Kp/Kd/motor strength 组合缩放通过
-  ``set_gains`` 相对 default 建立；轮子 Kp 恒为 0，任何缩放都不会引入
-  position stiffness。
-- calf backlash：在 action term 层实现旧版 ``play`` 模式状态机；输出目标
-  ``q + kp_scale * (effective_target - q)`` 与旧版
-  ``τ = Kp * kp_scale * (effective - q)`` 逐数学等价（每 physics substep
-  更新一次状态，与旧版每 substep 调用 _compute_torques 的时序一致）。
-- 轮 target scaling / bias：在 action term 层作用于 velocity target（per
-  episode 常数，因此与 actuator 命令延迟的先后可交换，数值等价）。
-- 轮观测 bias：只作用于 actor 可观测通道（独立 term 实例持有状态并在
-  reset 重采样）；critic 观测构造时显式替换回无 bias 的真实 term。
-"""
+"""Wolf domain randomization parameters, events and control perturbations."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
-
 from mjlab.actuator import IdealPdActuator
 from mjlab.entity import Entity
 from mjlab.envs import ManagerBasedRlEnv
@@ -46,12 +20,106 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.utils.lab_api.math import sample_uniform
 
 from alldog_mjlab.robots.wolf.wolf_constants import WOLF_WHEEL_RADIUS
-from alldog_mjlab.tasks.velocity.wolf.observations import signed_wheel_velocity
+from alldog_mjlab.tasks.wolf.mdp.observations import signed_wheel_velocity
 
 
-# ---------------------------------------------------------------------------
-# Event：轮地摩擦（地面 geom 压 0 + 轮摩擦乘子，依赖 event dict 顺序）
-# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class CalfBacklashParams:
+    enabled: bool = False
+    width_range: tuple[float, float] = (0.005, 0.035)
+    min_kp_scale: float = 0.12
+    engage_start: float = 0.6
+    leak: float = 0.02
+
+
+@dataclass(frozen=True)
+class WheelTargetBiasParams:
+    vel_ref_scale_enabled: bool = False
+    vel_ref_scale_range: tuple[float, float] = (0.9, 1.1)
+    vel_ref_bias_enabled: bool = False
+    vel_ref_bias_range: tuple[float, float] = (-0.3, 0.3)
+
+
+@dataclass(frozen=True)
+class WheelObsBiasParams:
+    enabled: bool = False
+    range: tuple[float, float] = (-0.5, 0.5)
+
+
+@dataclass(frozen=True)
+class DomainRandomizationParams:
+    base_mass_enabled: bool = True
+    base_mass_range: tuple[float, float] = (-1.0, 2.0)
+    base_com_enabled: bool = True
+    base_com_offset_range: tuple[float, float] = (-0.05, 0.05)
+    link_mass_enabled: bool = True
+    link_mass_scale_range: tuple[float, float] = (0.9, 1.1)
+    link_inertia_enabled: bool = True
+    link_inertia_scale_range: tuple[float, float] = (0.9, 1.1)
+    wheel_mass_enabled: bool = True
+    wheel_mass_scale_range: tuple[float, float] = (0.9, 1.1)
+    wheel_inertia_enabled: bool = True
+    wheel_inertia_scale_range: tuple[float, float] = (0.8, 1.2)
+    ground_friction_enabled: bool = True
+    ground_friction_range: tuple[float, float] = (0.25, 1.25)
+    wheel_friction_enabled: bool = True
+    wheel_friction_scale_range: tuple[float, float] = (0.4, 1.0)
+    kp_enabled: bool = True
+    kp_scale_range: tuple[float, float] = (0.9, 1.1)
+    kd_enabled: bool = True
+    kd_scale_range: tuple[float, float] = (0.9, 1.1)
+    motor_strength_enabled: bool = True
+    motor_strength_range: tuple[float, float] = (0.9, 1.1)
+    hip_motor_strength_enabled: bool = False
+    hip_motor_strength_range: tuple[float, float] = (0.8, 1.05)
+    calf_backlash: CalfBacklashParams = field(default_factory=CalfBacklashParams)
+    wheel_motor_enabled: bool = True
+    wheel_motor_strength_range: tuple[float, float] = (0.8, 1.2)
+    wheel_target: WheelTargetBiasParams = field(default_factory=WheelTargetBiasParams)
+    wheel_obs_bias: WheelObsBiasParams = field(default_factory=WheelObsBiasParams)
+    wheel_radius_enabled: bool = True
+    wheel_radius_scale_range: tuple[float, float] = (0.9, 1.1)
+    leg_delay_enabled: bool = True
+    leg_max_delay_steps: int = 3
+    wheel_delay_enabled: bool = True
+    wheel_max_delay_steps: int = 4
+    push_enabled: bool = True
+    push_interval_s: tuple[float, float] = (15.0, 15.0)
+    push_velocity_xy: tuple[float, float] = (-1.0, 1.0)
+    disturbance_enabled: bool = True
+    disturbance_force_range: tuple[float, float] = (-35.0, 35.0)
+    disturbance_interval_policy_steps: int = 8
+    initial_joint_pos_enabled: bool = True
+    initial_joint_pos_range: tuple[float, float] = (0.5, 1.5)
+
+    def validate(self) -> None:
+        for name in (
+            "base_mass_range",
+            "base_com_offset_range",
+            "link_mass_scale_range",
+            "link_inertia_scale_range",
+            "wheel_mass_scale_range",
+            "wheel_inertia_scale_range",
+            "ground_friction_range",
+            "wheel_friction_scale_range",
+            "kp_scale_range",
+            "kd_scale_range",
+            "motor_strength_range",
+            "hip_motor_strength_range",
+            "wheel_motor_strength_range",
+            "wheel_radius_scale_range",
+            "initial_joint_pos_range",
+        ):
+            lo, hi = getattr(self, name)
+            if lo > hi:
+                raise ValueError(f"dr.{name} 区间反序: {lo} > {hi}")
+        for name in (
+            "leg_max_delay_steps",
+            "wheel_max_delay_steps",
+            "disturbance_interval_policy_steps",
+        ):
+            if getattr(self, name) < 0:
+                raise ValueError(f"dr.{name} 必须非负")
 
 
 def _resolve_env_ids(
@@ -63,28 +131,16 @@ def _resolve_env_ids(
 
 
 def _press_terrain_friction(
-    env: ManagerBasedRlEnv,
-    terrain_cfg: SceneEntityCfg,
-    env_ids: torch.Tensor,
+    env: ManagerBasedRlEnv, terrain_cfg: SceneEntityCfg, env_ids: torch.Tensor
 ) -> None:
-    """把地面 geom 的切向摩擦压到 0。
-
-    MuJoCo contact 摩擦 = max(geom1, geom2)：地面默认 1.0 会把 pair 合成结果
-    抬高下限（采样值 < 1.0 被吞掉）。压 0 后合成结果完全由机器人 geom 决定，
-    wheel-ground contact 摩擦可完整覆盖配置采样范围与乘子组合。地形选择由
-    caller 传入（flat plane 为单个 ``terrain`` geom；rough generator 为全部
-    patch geom，``geom_names=(".*",)`）；选择器匹配不到 geom 时 fail-loud
-    （不允许摩擦 DR 已启用但实际没有生效）。
-    """
     terrain = env.scene[terrain_cfg.name]
     env_grid, geom_grid = _resolve_geom_grid(env, terrain, terrain_cfg, env_ids)
     if geom_grid.numel() == 0:
         raise ValueError(
-            f"terrain friction selector matched no geoms for entity "
-            f"{terrain_cfg.name!r} (geom_names={terrain_cfg.geom_names}); "
-            "摩擦 DR 将不会生效，禁止静默无效"
+            f"terrain friction selector matched no geoms for entity {terrain_cfg.name!r} (geom_names={terrain_cfg.geom_names}); 摩擦 DR 将不会生效，禁止静默无效"
         )
     env.sim.model.geom_friction[env_grid, geom_grid, 0] = 0.0
+
 
 def _resolve_geom_grid(
     env: ManagerBasedRlEnv,
@@ -92,11 +148,6 @@ def _resolve_geom_grid(
     asset_cfg: SceneEntityCfg,
     env_ids: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """按 asset_cfg 的 geom 选择构造 (env_grid, model_geom_grid) 索引（均 long）。
-
-    geom id 经 ``asset.indexing.geom_ids`` 映射为 per-world 展开字段中的 model
-    geom id（entity-local id 不能直接用作字段行索引）。
-    """
     from mjlab.envs.mdp.dr._core import _get_entity_indices
 
     env_ids = env_ids.to(env.device, dtype=torch.long)
@@ -104,7 +155,7 @@ def _resolve_geom_grid(
         dtype=torch.long
     )
     env_grid, geom_grid = torch.meshgrid(env_ids, entity_indices, indexing="ij")
-    return env_grid, geom_grid
+    return (env_grid, geom_grid)
 
 
 @requires_model_fields("geom_friction")
@@ -115,12 +166,6 @@ def randomize_ground_friction(
     asset_cfg: SceneEntityCfg,
     terrain_cfg: SceneEntityCfg,
 ) -> None:
-    """基础摩擦：per-env 单标量（旧版单系数语义），绝对值写全部机器人 collision geom。
-
-    同时把地面 geom 切向摩擦压 0（见 ``_press_terrain_friction``）：否则地面默认
-    1.0 经 max() 合成会把 contact 摩擦下限抬高到 1.0，采样范围 [0.25, 1.25]
-    的低段实际不可达。压 0 后 wheel-ground contact 摩擦 = 本事件写入的采样值。
-    """
     env_ids = _resolve_env_ids(env, env_ids)
     asset = env.scene[asset_cfg.name]
     env_grid, geom_grid = _resolve_geom_grid(env, asset, asset_cfg, env_ids)
@@ -140,18 +185,6 @@ def randomize_wheel_friction_multiplier(
     terrain_cfg: SceneEntityCfg,
     from_current_base: bool,
 ) -> None:
-    """轮摩擦 = 本 episode 基础摩擦 × per-env 共享乘子（旧 BlackW 语义）。
-
-    乘子为每环境单标量（四轮同值），不引入逐轮独立随机化。乘子经 max()
-    合成无法靠 pair 表达，故直接改写轮 geom 切向摩擦绝对值；并把地面 geom
-    压 0，保证 wheel-ground contact 摩擦 = 轮 geom 值（否则地面默认 1.0 会
-    把乘子结果抬回 1.0，乘子对 < 1.0 段失效）。
-
-    ``from_current_base=True``（ground_friction 同开）：读前序 ground_friction
-    事件写入的当前值作为基础摩擦（event dict 顺序保证）；
-    ``from_current_base=False``（仅轮摩擦开启）：相对 compile-time default
-    摩擦建立，避免跨 episode 陈旧值累计。
-    """
     env_ids = _resolve_env_ids(env, env_ids)
     asset = env.scene[asset_cfg.name]
     env_grid, geom_grid = _resolve_geom_grid(env, asset, asset_cfg, env_ids)
@@ -159,17 +192,11 @@ def randomize_wheel_friction_multiplier(
         base = env.sim.model.geom_friction[env_grid, geom_grid, 0].clone()
     else:
         base = env.sim.get_default_field("geom_friction")[geom_grid, 0]
-    # per-env 共享乘子：(n_envs, 1) 采样，广播到四轮（旧版 (len(env_ids), 1) 语义）。
     scale = sample_uniform(
         scale_range[0], scale_range[1], (len(env_ids), 1), device=env.device
     )
     env.sim.model.geom_friction[env_grid, geom_grid, 0] = base * scale
     _press_terrain_friction(env, terrain_cfg, env_ids)
-
-
-# ---------------------------------------------------------------------------
-# Event：body inertia 相对 default 的乘法缩放（原生 dr 无 body_inertia 函数）
-# ---------------------------------------------------------------------------
 
 
 @requires_model_fields("body_inertia", recompute=RecomputeLevel.set_const_0)
@@ -180,11 +207,6 @@ def randomize_body_inertia_scale(
     asset_cfg: SceneEntityCfg,
     shared_random: bool = False,
 ) -> None:
-    """按 body 相对 nominal（default）惯量张量主矩做乘法缩放（三轴同乘）。
-
-    与原生 ``dr.body_mass``（只改质量）配套使用，表达旧版
-    wheel_inertia / link_inertia 的独立惯量缩放语义。
-    """
     env_ids = _resolve_env_ids(env, env_ids)
     asset = env.scene[asset_cfg.name]
     from mjlab.envs.mdp.dr._core import _get_entity_indices
@@ -194,9 +216,8 @@ def randomize_body_inertia_scale(
     )
     env_ids = env_ids.to(env.device, dtype=torch.long)
     env_grid, body_grid = torch.meshgrid(env_ids, entity_indices, indexing="ij")
-
-    defaults = env.sim.get_default_field("body_inertia")  # (nbody, 3) 编译期默认
-    base = defaults[body_grid]  # (n_envs, n_bodies, 3)
+    defaults = env.sim.get_default_field("body_inertia")
+    base = defaults[body_grid]
     if shared_random:
         scale = sample_uniform(
             ranges[0], ranges[1], (*base.shape[:-1], 1), device=env.device
@@ -206,11 +227,6 @@ def randomize_body_inertia_scale(
     env.sim.model.body_inertia[env_grid, body_grid] = base * scale
 
 
-# ---------------------------------------------------------------------------
-# Event：腿部 PD gains × motor strength 组合缩放（IdealPdActuator）
-# ---------------------------------------------------------------------------
-
-
 def _actuator_gains(
     env: ManagerBasedRlEnv,
     env_ids: torch.Tensor,
@@ -218,10 +234,6 @@ def _actuator_gains(
     kp_scale: torch.Tensor,
     kd_scale: torch.Tensor,
 ) -> None:
-    """把 (n_envs, n_actuators) 的组合缩放写到每 actuator 的 gains。
-
-    kp_scale / kd_scale 是已经组合好全部因子的最终缩放（相对 default）。
-    """
     for act_idx, act in enumerate(actuators):
         assert isinstance(act, IdealPdActuator), type(act)
         kp = act.default_stiffness[env_ids] * kp_scale[:, act_idx : act_idx + 1]
@@ -238,43 +250,38 @@ def randomize_leg_pd_gains_strength(
     hip_strength_range: tuple[float, float] | None,
     asset_cfg: SceneEntityCfg,
 ) -> None:
-    """腿部（hip/thigh/calf）actuator 的 Kp / Kd / motor strength 组合缩放。
-
-    语义对应 legacy BlackW：τ = s_global * (kp*kp_f*e − kd*kd_f*v)，hip 再乘
-    per-hip strength s_hip。组合到 actuator 等效增益：
-    ``kp_eff = default_kp * kp_f * s_global [* s_hip]``、kd 同理。
-    所有因子相对 compile-time default 采样，per-episode 重采样不漂移。
-    """
     env_ids = _resolve_env_ids(env, env_ids)
     asset = env.scene[asset_cfg.name]
     actuators = [asset.actuators[i] for i in asset_cfg.actuator_ids]
     n_envs = len(env_ids)
     n_act = len(actuators)
-
-    kp_samples = sample_uniform(kp_range[0], kp_range[1], (n_envs, n_act), device=env.device)
-    kd_samples = sample_uniform(kd_range[0], kd_range[1], (n_envs, n_act), device=env.device)
-    # 旧版 motor strength 是 per-env 标量（乘全部 12 腿关节力矩）。
+    kp_samples = sample_uniform(
+        kp_range[0], kp_range[1], (n_envs, n_act), device=env.device
+    )
+    kd_samples = sample_uniform(
+        kd_range[0], kd_range[1], (n_envs, n_act), device=env.device
+    )
     strength = sample_uniform(
         motor_strength_range[0], motor_strength_range[1], (n_envs, 1), device=env.device
     )
     kp_scale = kp_samples * strength
     kd_scale = kd_samples * strength
-
     if hip_strength_range is not None:
         hip_mask = torch.tensor(
-            [all("hip" in name for name in act.target_names) for act in actuators],
+            [all(("hip" in name for name in act.target_names)) for act in actuators],
             device=env.device,
             dtype=torch.float32,
         )
         if bool(hip_mask.any()):
-            # per-env per-hip 独立采样（hip actuator 各自一列）。
             hip_strength = sample_uniform(
-                hip_strength_range[0], hip_strength_range[1], (n_envs, n_act), device=env.device
+                hip_strength_range[0],
+                hip_strength_range[1],
+                (n_envs, n_act),
+                device=env.device,
             )
             factor = 1.0 + hip_mask * (hip_strength - 1.0)
             kp_scale = kp_scale * factor
             kd_scale = kd_scale * factor
-
     _actuator_gains(env, env_ids, actuators, kp_scale, kd_scale)
 
 
@@ -284,11 +291,6 @@ def randomize_wheel_motor_strength(
     strength_range: tuple[float, float],
     asset_cfg: SceneEntityCfg,
 ) -> None:
-    """轮 actuator（Velocity PD：Kp=0 / Kd=1）的电机强度缩放。
-
-    只缩放 Kd（τ = Kd_eff * (vel_target − dq)）；Kp 恒为 default 0，缩放后
-    仍为 0，不会意外引入 position stiffness。控制模式（velocity PD）不变。
-    """
     env_ids = _resolve_env_ids(env, env_ids)
     asset = env.scene[asset_cfg.name]
     actuators = [asset.actuators[i] for i in asset_cfg.actuator_ids]
@@ -300,23 +302,12 @@ def randomize_wheel_motor_strength(
     _actuator_gains(env, env_ids, actuators, strength, strength)
 
 
-# ---------------------------------------------------------------------------
-# Event：initial joint position（multiplicative，旧版 _reset_dofs 语义）
-# ---------------------------------------------------------------------------
-
-
 def reset_joints_by_default_scale(
     env: ManagerBasedRlEnv,
     env_ids: torch.Tensor | None,
     scale_range: tuple[float, float],
     asset_cfg: SceneEntityCfg,
 ) -> None:
-    """关节位置 = default × U(scale_range)（multiplicative，旧版语义）。
-
-    与 Wolf nominal 的 offset reset 不同：仅在 DR 开启时由 env_cfgs 用本函数
-    替换腿关节 offset reset 事件。轮关节 default 为 0，乘法后仍为 0。
-    位置 clamp 到 soft joint limits（与 native reset_joints_by_offset 一致）。
-    """
     from mjlab.envs.mdp.events import resolve_env_ids
 
     env_ids = resolve_env_ids(env, env_ids)
@@ -325,13 +316,11 @@ def reset_joints_by_default_scale(
     assert default_joint_pos is not None
     soft_limits = asset.data.soft_joint_pos_limits
     assert soft_limits is not None
-
     joint_pos = default_joint_pos[env_ids][:, asset_cfg.joint_ids].clone()
     scale = sample_uniform(scale_range[0], scale_range[1], joint_pos.shape, env.device)
     joint_pos = joint_pos * scale
     limits = soft_limits[env_ids][:, asset_cfg.joint_ids]
     joint_pos = joint_pos.clamp_(limits[..., 0], limits[..., 1])
-
     joint_ids = asset_cfg.joint_ids
     if isinstance(joint_ids, list):
         joint_ids = torch.tensor(joint_ids, device=env.device)
@@ -343,11 +332,6 @@ def reset_joints_by_default_scale(
     )
 
 
-# ---------------------------------------------------------------------------
-# Event：轮碰撞半径缩放 + 初始高度补偿
-# ---------------------------------------------------------------------------
-
-
 @requires_model_fields("geom_size", "geom_rbound", "geom_aabb")
 def randomize_wheel_radius_with_height(
     env: ManagerBasedRlEnv,
@@ -355,16 +339,6 @@ def randomize_wheel_radius_with_height(
     scale_range: tuple[float, float],
     asset_cfg: SceneEntityCfg,
 ) -> None:
-    """轮碰撞圆柱半径相对 nominal 乘法缩放，并把 root z 抬高到新几何接触高度。
-
-    - 半径用原生 ``dr.geom_size``（scale 相对 default，不累计；写后同步刷新
-      geom_rbound / geom_aabb，broadphase 一致）；轮 body 有显式 inertial，
-      几何变化不会暗中修改质量。
-    - 初始高度补偿：只读改当前 root pose 的 Z 分量
-      ``z += (r_new − r_nominal)``，避免半径变化后 reset 轮地初始穿透；
-      XY / quaternion 原样保留（read-modify-write qpos），velocity（qvel）
-      完全不触碰（保留 reset_base 写入的六维扰动）。
-    """
     env_ids = _resolve_env_ids(env, env_ids)
     dr.geom_size(
         env,
@@ -377,29 +351,18 @@ def randomize_wheel_radius_with_height(
     )
     asset = env.scene[asset_cfg.name]
     env_grid, geom_grid = _resolve_geom_grid(env, asset, asset_cfg, env_ids)
-    r_new = env.sim.model.geom_size[env_grid, geom_grid, 0]  # (n, 4)
-    # shared_random=True ⇒ 同 env 内 4 轮半径一致；取第一列做高度补偿。
+    r_new = env.sim.model.geom_size[env_grid, geom_grid, 0]
     assert bool(torch.allclose(r_new, r_new[:, :1], rtol=0, atol=0)), r_new
-    # 只调整当前 root pose 的 Z（XY / quat 原样保留；写 pose 不触碰 qvel）。
-    # 读 sim 原始 qpos（reset 事件阶段 derived kinematics 未经 forward，不可用
-    # root_link_pose_w）；free_joint_q_adr 为 per-world 绝对 qpos 地址。
     env_ids_long = env_ids.to(env.device, dtype=torch.long)
     pose = env.sim.data.qpos[
         env_ids_long[:, None], asset.indexing.free_joint_q_adr
     ].clone()
-    pose[:, 2] += (r_new[:, 0] - WOLF_WHEEL_RADIUS)
+    pose[:, 2] += r_new[:, 0] - WOLF_WHEEL_RADIUS
     asset.write_root_link_pose_to_sim(pose, env_ids=env_ids_long)
-
-
-# ---------------------------------------------------------------------------
-# Action term：calf backlash（旧版 play 模式）
-# ---------------------------------------------------------------------------
 
 
 @dataclass(kw_only=True)
 class CalfBacklashPositionActionCfg(JointPositionActionCfg):
-    """带 calf backlash 状态机的腿部位置 action cfg（term 维度 / 顺序不变）。"""
-
     backlash_enabled: bool = False
     width_range: tuple[float, float] = (0.005, 0.035)
     min_kp_scale: float = 0.12
@@ -411,13 +374,6 @@ class CalfBacklashPositionActionCfg(JointPositionActionCfg):
 
 
 class CalfBacklashPositionAction(JointPositionAction):
-    """calf 通道的 backlash ``play`` 模式（legacy BlackW 语义）。
-
-    每 physics substep（apply_actions 调用频率）更新一次状态机；非 calf 通道
-    与父类行为完全一致。enabled=False 时本 term 与原生 JointPositionAction
-    等价（无残余状态）。
-    """
-
     def __init__(self, cfg: CalfBacklashPositionActionCfg, env: ManagerBasedRlEnv):
         super().__init__(cfg, env)
         self._backlash_cfg = cfg
@@ -445,8 +401,10 @@ class CalfBacklashPositionAction(JointPositionAction):
         ids = slice(None) if env_ids is None else env_ids
         if cfg.backlash_enabled:
             self._widths[ids] = sample_uniform(
-                cfg.width_range[0], cfg.width_range[1],
-                self._widths[ids].shape, device=self.device,
+                cfg.width_range[0],
+                cfg.width_range[1],
+                self._widths[ids].shape,
+                device=self.device,
             )
         else:
             self._widths[ids] = 0.0
@@ -455,7 +413,11 @@ class CalfBacklashPositionAction(JointPositionAction):
         calf_joint_ids = torch.tensor(
             [self._target_ids[i] for i in self._calf_slots], device=self.device
         )
-        init = default[ids][:, calf_joint_ids] if not isinstance(ids, slice) else default[:, calf_joint_ids]
+        init = (
+            default[ids][:, calf_joint_ids]
+            if not isinstance(ids, slice)
+            else default[:, calf_joint_ids]
+        )
         self._effective[ids] = init
         self._last_targets[ids] = init
         self._dirs[ids] = 0.0
@@ -465,13 +427,11 @@ class CalfBacklashPositionAction(JointPositionAction):
         if not cfg.backlash_enabled:
             super().apply_actions()
             return
-
         encoder_bias = self._entity.data.encoder_bias[:, self._target_ids]
         target = self._processed_actions - encoder_bias
-
         calf_targets = target[:, self._calf_slots]
         q = self._entity.data.joint_pos[:, self._target_ids][:, self._calf_slots]
-        widths = self._widths.clamp(min=1e-6)
+        widths = self._widths.clamp(min=1e-06)
         if cfg.leak > 0.0:
             self._effective += cfg.leak * (calf_targets - self._effective)
         self._effective = torch.clamp(
@@ -480,28 +440,21 @@ class CalfBacklashPositionAction(JointPositionAction):
         gap_ratio = torch.clamp(
             torch.abs(calf_targets - self._effective) / widths, min=0.0, max=1.0
         )
-        engage_span = max(1.0 - cfg.engage_start, 1e-6)
-        engage = torch.clamp((gap_ratio - cfg.engage_start) / engage_span, min=0.0, max=1.0)
+        engage_span = max(1.0 - cfg.engage_start, 1e-06)
+        engage = torch.clamp(
+            (gap_ratio - cfg.engage_start) / engage_span, min=0.0, max=1.0
+        )
         kp_scale = cfg.min_kp_scale + (1.0 - cfg.min_kp_scale) * engage
         delta_sign = torch.sign(calf_targets - self._last_targets)
         self._last_targets = calf_targets.clone()
         self._dirs = torch.where(delta_sign != 0.0, delta_sign, self._dirs)
-
-        # τ = Kp * kp_scale * (effective − q) 的精确等价表达（actuator Kp 不变）。
         effective_target = q + kp_scale * (self._effective - q)
         target[:, self._calf_slots] = effective_target
         self._entity.set_joint_position_target(target, joint_ids=self._target_ids)
 
 
-# ---------------------------------------------------------------------------
-# Action term：轮 velocity target 的 scaling / bias
-# ---------------------------------------------------------------------------
-
-
 @dataclass(kw_only=True)
 class ScaledBiasedWheelVelocityActionCfg(JointVelocityActionCfg):
-    """带 per-episode target scaling / bias 的轮速度 action cfg。"""
-
     vel_ref_scale_enabled: bool = False
     vel_ref_scale_range: tuple[float, float] = (0.9, 1.1)
     vel_ref_bias_enabled: bool = False
@@ -512,13 +465,6 @@ class ScaledBiasedWheelVelocityActionCfg(JointVelocityActionCfg):
 
 
 class ScaledBiasedWheelVelocityAction(JointVelocityAction):
-    """dq_target = processed * vel_ref_scale + vel_ref_bias（每 episode 重采样）。
-
-    两个因子均为 per-episode 常数，与 actuator 命令延迟可交换（延迟的是
-    常数缩放后的 target，与延迟 raw 后再缩放数值相同）。
-    enabled 均为 False 时与原生 JointVelocityAction 等价。
-    """
-
     def __init__(self, cfg: ScaledBiasedWheelVelocityActionCfg, env: ManagerBasedRlEnv):
         super().__init__(cfg, env)
         self._wheel_cfg = cfg
@@ -530,13 +476,19 @@ class ScaledBiasedWheelVelocityAction(JointVelocityAction):
         shape = self._scales[env_ids].shape
         if cfg.vel_ref_scale_enabled:
             self._scales[env_ids] = sample_uniform(
-                cfg.vel_ref_scale_range[0], cfg.vel_ref_scale_range[1], shape, device=self.device
+                cfg.vel_ref_scale_range[0],
+                cfg.vel_ref_scale_range[1],
+                shape,
+                device=self.device,
             )
         else:
             self._scales[env_ids] = 1.0
         if cfg.vel_ref_bias_enabled:
             self._biases[env_ids] = sample_uniform(
-                cfg.vel_ref_bias_range[0], cfg.vel_ref_bias_range[1], shape, device=self.device
+                cfg.vel_ref_bias_range[0],
+                cfg.vel_ref_bias_range[1],
+                shape,
+                device=self.device,
             )
         else:
             self._biases[env_ids] = 0.0
@@ -554,25 +506,14 @@ class ScaledBiasedWheelVelocityAction(JointVelocityAction):
         self._entity.set_joint_velocity_target(target, joint_ids=self._target_ids)
 
 
-# ---------------------------------------------------------------------------
-# Observation term：带 per-episode bias 的 signed wheel velocity（仅 actor）
-# ---------------------------------------------------------------------------
-
-
 class BiasedSignedWheelVelocity:
-    """signed wheel velocity + per-episode 观测偏置（只影响策略可观测通道）。
-
-    状态为本 term 实例私有，reset 时重采样；真实 joint_vel / reward / PD
-    feedback / critic 观测均不受影响（critic 构造时显式使用无 bias 的
-    ``signed_wheel_velocity``）。
-    """
-
     def __init__(self, cfg, env: ManagerBasedRlEnv):
         self._asset_cfg: SceneEntityCfg = cfg.params["asset_cfg"]
         self._bias_range: tuple[float, float] = cfg.params["bias_range"]
         self._enabled: bool = cfg.params["enabled"]
         self._env = env
-        self._bias: torch.Tensor | None = None  # 首次 __call__ / reset 时按轮数初始化
+        self._bias: torch.Tensor | None = None
+
     def _ensure_buffer(self, num_envs: int, n_wheels: int, device) -> None:
         if self._bias is None or self._bias.shape != (num_envs, n_wheels):
             self._bias = torch.zeros(num_envs, n_wheels, device=device)
@@ -584,7 +525,10 @@ class BiasedSignedWheelVelocity:
         if self._enabled:
             shape = self._bias[ids].shape
             self._bias[ids] = sample_uniform(
-                self._bias_range[0], self._bias_range[1], shape, device=self._bias.device
+                self._bias_range[0],
+                self._bias_range[1],
+                shape,
+                device=self._bias.device,
             )
         else:
             self._bias[ids] = 0.0
@@ -596,7 +540,6 @@ class BiasedSignedWheelVelocity:
         bias_range: tuple[float, float],
         enabled: bool,
     ) -> torch.Tensor:
-        """签名与 cfg.params 一致（manager 以关键字传参）；状态在 __init__ / reset。"""
         signed = signed_wheel_velocity(env, asset_cfg)
         self._ensure_buffer(signed.shape[0], signed.shape[1], signed.device)
         return signed + self._bias

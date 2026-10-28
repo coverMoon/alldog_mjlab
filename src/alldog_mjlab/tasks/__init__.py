@@ -1,3 +1,5 @@
-"""Project task discovery and registration."""
+"""Register robot-local locomotion tasks."""
 
-from . import velocity as velocity
+from . import black, wolf
+
+__all__ = ["black", "wolf"]

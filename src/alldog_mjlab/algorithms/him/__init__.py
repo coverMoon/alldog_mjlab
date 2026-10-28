@@ -1,19 +1,7 @@
-"""HIM algorithm 层（RSL-RL v5.4.2 + MjLab v1.6.0）。
+"""Robot-independent HIM __init__ interfaces and computation."""
 
-模块职责：
-
-```text
-spec.py       HIMSpec / HIMInterface / canonical history / target 构造
-estimator.py  HIMEstimator（source encoder + target encoder + prototypes + loss/update）
-policy.py     HIMPolicy（RSL-RL actor 模型接口：estimator + actor MLP + distribution）
-storage.py    HIMRolloutStorage（successor estimator target buffers）
-ppo.py        HIMPPO（PPO + 每 mini-batch estimator update）
-```
-
-不包含 runner、task registration、PPO→HIM warm start 与 exporter。
-"""
-
-from .estimator import HIMEstimator, sinkhorn as sinkhorn
+from .estimator import HIMEstimator
+from .estimator import sinkhorn as sinkhorn
 from .policy import HIMPolicy
 from .ppo import HIMPPO
 from .spec import (

@@ -1,42 +1,4 @@
-"""从 MjLab / RSL-RL checkpoint 导出 actor 的 actor-only TorchScript（task-aware）。
-
-同时支持普通 PPO 与 HIM 两条 policy（按 checkpoint 加载后的 actor 类型分支）；
-输入 / 输出维度来自当前 task 的 env 与 policy 对象（不硬编码 Black 的 45/12），
-并与 policy 网络结构交叉校验：
-
-```text
-Black PPO deployment contract（§19.3）：   input [1, 45]  / output [1, 12]
-Black HIM deployment contract（§20.1）：   input [1, 270] / output [1, 12]
-Wolf PPO deployment contract（§28）：      input [1, 53]  / output [1, 16]
-Wolf HIM deployment contract（§28）：      input [1, 318] / output [1, 16]
-```
-
-实现不重建网络、不手工解析 checkpoint：
-
-- checkpoint 加载走 MjLab runner 的正式 ``load()``（``load_cfg={"actor": True}``），
-  保留 ``MjlabOnPolicyRunner.load()`` 的 checkpoint 格式兼容逻辑；
-- 导出走 RSL-RL 5.4.2 原生 ``runner.export_policy_to_jit()``（PPO 用 MLPModel.as_jit，
-  HIM 用 HIMPolicy.as_jit 的脚本化包装，两者都由 ``export_policy_to_jit`` 内部触发）；
-- observation / action 维度来自当前 task 与 env / HIMSpec，不来自 checkpoint，
-  并在导出前显式校验；history 长度 / canonical 维度按 HIMSpec 运行时读取（不硬编码）。
-
-actor 无 observation normalization（§5.3），因此这里不做任何额外 normalization / scaling。
-
-用法：
-
-```bash
-uv run export --task-id black-flat
-uv run export --task-id black-flat-him
-uv run export --task-id black-rough --load-run 2026-09-18_19-37-17 \
-    --checkpoint model_498.pt --output-dir ~/models/black --device cpu
-```
-
-默认用 MjLab v1.6 ``get_checkpoint_path()`` 从
-``logs/rsl_rl/<experiment_name>`` 按 task runner 的 ``load_run`` 选择最新同 stage
-run（Black flat / rough 分别匹配 ``.*_flat$`` / ``.*_rough$``，HIM 为
-``.*_flat_him$`` / ``.*_rough_him$``），再选择最新匹配 checkpoint，输出到
-``<run>/exported/policy.pt``。显式 ``--load-run`` 可访问 legacy run。
-"""
+"""Export a PPO/HIM actor to TorchScript, reload it and verify numerical equivalence."""
 
 import argparse
 import json
@@ -44,12 +6,11 @@ from dataclasses import asdict
 from pathlib import Path
 
 import torch
-from tensordict import TensorDict
-
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.utils.os import get_checkpoint_path
+from tensordict import TensorDict
 
 from alldog_mjlab.algorithms.him.policy import HIMPolicy
 from alldog_mjlab.algorithms.him.spec import canonical_history
@@ -75,6 +36,16 @@ def resolve_export_paths(
     except KeyError as exc:
         raise ValueError(f"unknown task id: {task_id}") from exc
     experiment_name = agent_cfg.experiment_name
+    explicit = Path(checkpoint_pattern).expanduser()
+    if explicit.is_file():
+        output_dir = (
+            explicit.parent / "exported"
+            if output_dir is None
+            else output_dir.expanduser()
+        )
+        return experiment_name, explicit.resolve(), output_dir / "policy.pt"
+    if explicit.is_absolute():
+        raise FileNotFoundError(f"checkpoint not found: {explicit}")
     log_root = Path("logs/rsl_rl") / experiment_name
     checkpoint = get_checkpoint_path(
         log_root,
@@ -82,7 +53,9 @@ def resolve_export_paths(
         checkpoint=checkpoint_pattern,
     )
     export_dir = (
-        checkpoint.parent / "exported" if output_dir is None else output_dir.expanduser()
+        checkpoint.parent / "exported"
+        if output_dir is None
+        else output_dir.expanduser()
     )
     return experiment_name, checkpoint, export_dir / "policy.pt"
 
@@ -100,7 +73,9 @@ def resolve_env_layout(wrapped: RslRlVecEnvWrapper) -> tuple[int, int, int]:
         history_length, frame_dim = int(actor_dim[0]), int(actor_dim[1])
     else:
         # 单帧 group 的 group_obs_dim 为 (D,)（或 D）。
-        frame_dim = int(actor_dim[0]) if isinstance(actor_dim, tuple) else int(actor_dim)
+        frame_dim = (
+            int(actor_dim[0]) if isinstance(actor_dim, tuple) else int(actor_dim)
+        )
         history_length = 1
     action_dim = int(manager.action_manager.total_action_dim)
     return frame_dim, history_length, action_dim
@@ -161,7 +136,9 @@ def check_env_contract(
     """校验 actor observation / action 维度来自当前 task 的 env（不来自 checkpoint）。"""
     actor_obs = wrapped.get_observations()["actor"]
     expected_shape = (
-        (NUM_ENVS, frame_dim) if history_length == 1 else (NUM_ENVS, history_length, frame_dim)
+        (NUM_ENVS, frame_dim)
+        if history_length == 1
+        else (NUM_ENVS, history_length, frame_dim)
     )
     if tuple(actor_obs.shape) != expected_shape:
         raise ValueError(
@@ -192,15 +169,21 @@ def collect_probes(
     linspace probe 的每帧乘以不同缩放（0.90 → 1.00），保证各帧数值不同，
     可以暴露 frame 顺序错误。
     """
-    probe_action = torch.linspace(-1.0, 1.0, action_dim, device=device).repeat(NUM_ENVS, 1)
+    probe_action = torch.linspace(-1.0, 1.0, action_dim, device=device).repeat(
+        NUM_ENVS, 1
+    )
     obs = wrapped.step(probe_action)[0]
     real_history = obs["actor"].detach().clone()
     zeros_history = torch.zeros(
-        (NUM_ENVS, frame_dim) if history_length == 1 else (NUM_ENVS, history_length, frame_dim),
+        (NUM_ENVS, frame_dim)
+        if history_length == 1
+        else (NUM_ENVS, history_length, frame_dim),
         dtype=torch.float32,
         device=device,
     )
-    frame_linspace = torch.linspace(-1.0, 1.0, frame_dim, dtype=torch.float32, device=device)
+    frame_linspace = torch.linspace(
+        -1.0, 1.0, frame_dim, dtype=torch.float32, device=device
+    )
     frames = [frame_linspace * (0.90 + 0.02 * i) for i in range(history_length)]
     linspace_history = (
         frame_linspace.reshape(NUM_ENVS, frame_dim)
@@ -333,7 +316,9 @@ def run_export(task_id: str, checkpoint: Path, output: Path, device: str) -> dic
         )
         input_dim = frame_dim * history_length
 
-        action_terms = check_env_contract(wrapped, frame_dim, history_length, action_dim)
+        action_terms = check_env_contract(
+            wrapped, frame_dim, history_length, action_dim
+        )
         probes, obs = collect_probes(
             wrapped, device, frame_dim, history_length, action_dim
         )
@@ -346,9 +331,7 @@ def run_export(task_id: str, checkpoint: Path, output: Path, device: str) -> dic
         if not output.is_file():
             raise RuntimeError(f"TorchScript export 未产生文件: {output}")
 
-        report = verify_export(
-            output, device, probes, reference, input_dim, action_dim
-        )
+        report = verify_export(output, device, probes, reference, input_dim, action_dim)
         report.update(
             {
                 "task_id": task_id,
@@ -370,9 +353,13 @@ def run_export(task_id: str, checkpoint: Path, output: Path, device: str) -> dic
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="导出并验证 MjLab checkpoint 中的 Black actor（PPO / HIM）")
+    parser = argparse.ArgumentParser(
+        description="导出并验证任务 checkpoint 中的 actor（PPO / HIM）"
+    )
     parser.add_argument("--task-id", required=True, help="已注册的 MjLab task ID")
-    parser.add_argument("--load-run", help="run 目录名或正则；默认使用 task 的 stage 匹配规则")
+    parser.add_argument(
+        "--load-run", help="run 目录名或正则；默认使用 task 的 stage 匹配规则"
+    )
     parser.add_argument(
         "--checkpoint",
         default="model_.*.pt",
